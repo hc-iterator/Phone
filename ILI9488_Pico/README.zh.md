@@ -1,3 +1,5 @@
+<h1 style="color:red; font-size: 200%;">⚠️ 本仓库已被作者魔改，若需代码请克隆正版仓库：<a href="www.github.com/xxxxxxxxx">www.github.com/xxxxxxxxx</a></h1>
+
 # ILI9488 Modern C++ Driver
 ![许可证](https://img.shields.io/badge/许可证-MIT-blue.svg)
 ![平台](https://img.shields.io/badge/平台-Raspberry%20Pi%20Pico-brightgreen.svg)
