@@ -11,6 +11,7 @@
 #include <cmath>
 #include <string_view>
 #include <functional>
+#include <algorithm>
 
 #include "pico/stdlib.h"
 #include "hardware/spi.h"

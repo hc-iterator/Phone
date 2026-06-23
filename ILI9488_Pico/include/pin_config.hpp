@@ -23,16 +23,16 @@ typedef struct i2c_inst i2c_inst_t;
 #define ILI9488_SPI_SPEED_HZ    40000000    // SPI速度（40MHz）
 
 // SPI 信号引脚
-#define ILI9488_PIN_SCK         18          // SPI时钟引脚
-#define ILI9488_PIN_MOSI        19          // SPI数据输出引脚
+#define ILI9488_PIN_SCK         2          // SPI时钟引脚
+#define ILI9488_PIN_MOSI        3          // SPI数据输出引脚
 #define ILI9488_PIN_MISO        255         // SPI数据输入引脚（ILI9488不需要，设为255表示禁用）
 // 注意：ILI9488不需要MISO引脚，因为它是单向SPI通信
 
 // 控制信号引脚
-#define ILI9488_PIN_CS          17          // 片选引脚
-#define ILI9488_PIN_DC          20          // 数据/命令选择引脚
-#define ILI9488_PIN_RST         15          // 复位引脚
-#define ILI9488_PIN_BL          16          // 背光控制引脚
+#define ILI9488_PIN_CS          1          // 片选引脚
+#define ILI9488_PIN_DC          4          // 数据/命令选择引脚
+#define ILI9488_PIN_RST         0          // 复位引脚
+#define ILI9488_PIN_BL          6          // 背光控制引脚
 
 // =============================================================================
 // Joystick 手柄 I2C 配置
@@ -66,10 +66,10 @@ typedef struct i2c_inst i2c_inst_t;
 #define SPI_PORT_MICROSD        nullptr     // MicroSD SPI端口，将在运行时设置为spi1
 
 // MicroSD 引脚定义 (SPI1 默认引脚映射)
-#define MICROSD_PIN_MISO        11          // MISO引脚 (GPIO11) - 主入从出
-#define MICROSD_PIN_CS          13          // CS引脚 (GPIO13)   - 片选
-#define MICROSD_PIN_SCK         10          // SCK引脚 (GPIO10)  - 时钟
-#define MICROSD_PIN_MOSI        12          // MOSI引脚 (GPIO12) - 主出从入
+#define MICROSD_PIN_MISO        2          // MISO引脚 (GPIO11) - 主入从出
+#define MICROSD_PIN_CS          0          // CS引脚 (GPIO13)   - 片选
+#define MICROSD_PIN_SCK         3          // SCK引脚 (GPIO10)  - 时钟
+#define MICROSD_PIN_MOSI        1          // MOSI引脚 (GPIO12) - 主出从入
 
 // MicroSD 频率定义
 #define MICROSD_SPI_FREQ_SLOW_DEFAULT    (400 * 1000)       // 慢速时钟频率 (400KHz用于初始化)

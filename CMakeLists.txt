@@ -60,6 +60,8 @@ target_include_directories(SPI_PICO_TEST PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
 )
 
+add_subdirectory(no-OS-FatFS-SD-SPI-RPi-Pico-1.0.8/FatFs_SPI)
+
 # Add any user requested libraries
 target_link_libraries(SPI_PICO_TEST 
         hardware_spi
@@ -70,6 +72,8 @@ target_link_libraries(SPI_PICO_TEST
         hardware_timer
         hardware_watchdog
         hardware_clocks
+        ILI9488_Pico
+        FatFs_SPI
         )
 
 add_subdirectory(ILI9488_Pico)
