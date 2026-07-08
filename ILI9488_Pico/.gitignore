@@ -1,0 +1,26 @@
+# build directory
+/build/
+/out/
+
+# compile output
+*.o
+*.obj
+*.elf
+*.map
+*.bin
+*.dis
+*.hex
+*.uf2
+
+# editor temporary files
+.vscode/
+.vs/
+*.swp
+*~
+.DS_Store
+
+# Pico SDK (if submodule, no need to include this)
+# pico-sdk/
+
+# dependency library cache
+_deps/ 
