@@ -73,7 +73,7 @@ target_include_directories(SPI_PICO_TEST PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
 )
 
-add_subdirectory(no-OS-FatFS-SD-SPI-RPi-Pico-1.0.8/FatFs_SPI)
+add_subdirectory(no-OS-FatFS-SD-SDIO-SPI-RPi-Pico-main/build)
 add_subdirectory(ILI9488_Pico)
 
 # Add any user requested libraries
@@ -86,7 +86,7 @@ target_link_libraries(SPI_PICO_TEST
         hardware_timer
         hardware_watchdog
         hardware_clocks
-        FatFs_SPI
+        no-OS-FatFS-SD-SDIO-SPI-RPi-Pico
         ili9488_modern_driver # Provide from ILI9488_Pico
         font_system           # Provide from ILI9488_Pico
         )
