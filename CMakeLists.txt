@@ -51,7 +51,6 @@ pico_sdk_init()
 
 add_executable(SPI_PICO_TEST 
         SPI_PICO_TEST.cpp
-        hw_config.cpp
         )
 
 pico_set_program_name(SPI_PICO_TEST "SPI_PICO_TEST")
@@ -61,7 +60,7 @@ pico_set_program_version(SPI_PICO_TEST "0.1")
 pico_generate_pio_header(SPI_PICO_TEST ${CMAKE_CURRENT_LIST_DIR}/blink.pio)
 
 # Modify the below lines to enable/disable output over UART/USB
-pico_enable_stdio_uart(SPI_PICO_TEST 1)
+pico_enable_stdio_uart(SPI_PICO_TEST 0)
 pico_enable_stdio_usb(SPI_PICO_TEST 1)
 
 # Add the standard library to the build
@@ -73,7 +72,7 @@ target_include_directories(SPI_PICO_TEST PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
 )
 
-add_subdirectory(no-OS-FatFS-SD-SDIO-SPI-RPi-Pico-main/build)
+add_subdirectory(no-OS-FatFS-SD-SDIO-SPI-RPi-Pico-main/src)
 add_subdirectory(ILI9488_Pico)
 
 # Add any user requested libraries

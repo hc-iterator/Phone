@@ -1,116 +1,129 @@
-/* Instead of a statically linked hw_config.c,
-   create configuration dynamically */
+/* main.c
+Copyright 2021 Carl John Kugler III
+
+Licensed under the Apache License, Version 2.0 (the License); you may not use
+this file except in compliance with the License. You may obtain a copy of the
+License at
+
+   http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing, software distributed
+under the License is distributed on an AS IS BASIS, WITHOUT WARRANTIES OR
+CONDITIONS OF ANY KIND, either express or implied. See the License for the
+specific language governing permissions and limitations under the License.
+*/
 
 #include <stdio.h>
-#include <string.h>
-#include <iostream>
-//
+#include "tusb.h"
+#include "pico/stdlib.h"
 #include "f_util.h"
 #include "ff.h"
-#include "pico/stdlib.h"
-#include "rtc.h"
-//
 #include "hw_config.h"
-//
-#include "diskio.h" /* Declarations of disk functions */
 
-void add_spi(spi_t *const spi);
-void add_sd_card(sd_card_t *const sd_card);
+/*
 
-static spi_t *p_spi;
+This file should be tailored to match the hardware design.
 
-void test(sd_card_t *pSD) {
+See
+https://github.com/carlk3/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico/tree/main#customizing-for-the-hardware-configuration
+
+*/
+
+#include "hw_config.h"
+
+/* SDIO Interface */
+static sd_sdio_if_t sdio_if = {
+    /*
+    Pins CLK_gpio, D1_gpio, D2_gpio, and D3_gpio are at offsets from pin D0_gpio.
+    The offsets are determined by sd_driver\SDIO\rp2040_sdio.pio.
+        CLK_gpio = (D0_gpio + SDIO_CLK_PIN_D0_OFFSET) % 32;
+        As of this writing, SDIO_CLK_PIN_D0_OFFSET is 30,
+            which is -2 in mod32 arithmetic, so:
+        CLK_gpio = D0_gpio -2.
+        D1_gpio = D0_gpio + 1;
+        D2_gpio = D0_gpio + 2;
+        D3_gpio = D0_gpio + 3;
+    */
+    .CMD_gpio = 3,
+    .D0_gpio = 4,
+    .baud_rate = 125 * 1000 * 1000 / 6 / 4  // ？？？20833333 Hz
+};
+
+/* Hardware Configuration of the SD Card socket "object" */
+static sd_card_t sd_card = {.type = SD_IF_SDIO, .sdio_if_p = &sdio_if};
+
+/**
+ * @brief Get the number of SD cards.
+ *
+ * @return The number of SD cards, which is 1 in this case.
+ */
+size_t sd_get_num() { return 1; }
+
+/**
+ * @brief Get a pointer to an SD card object by its number.
+ *
+ * @param[in] num The number of the SD card to get.
+ *
+ * @return A pointer to the SD card object, or @c NULL if the number is invalid.
+ */
+sd_card_t* sd_get_by_num(size_t num) {
+    if (0 == num) {
+        // The number 0 is a valid SD card number.
+        // Return a pointer to the sd_card object.
+        return &sd_card;
+    } else {
+        // The number is invalid. Return @c NULL.
+        return NULL;
+    }
+}
+
+/**
+ * @brief The main function of the program.
+ *
+ * @details This function initializes the stdio interface, prints a greeting to the
+ * console, mounts the SD card, writes a message to a file, and unmounts the SD card.
+ *
+ */
+int main() {
+    stdio_init_all();
+
+    gpio_init(25);
+    gpio_set_dir(25, GPIO_OUT);
+    gpio_put(25, 1);
+
+    while(!stdio_usb_connected()) {
+        tight_loop_contents();
+    }
+    
+    puts("Hello, world!");
+
     // See FatFs - Generic FAT Filesystem Module, "Application Interface",
     // http://elm-chan.org/fsw/ff/00index_e.html
-    FRESULT fr = f_mount(&pSD->fatfs, pSD->pcName, 1);
-    if (FR_OK != fr) panic("f_mount error: %s (%d)\n", FRESULT_str(fr), fr);
-    fr = f_chdrive(pSD->pcName);
-    if (FR_OK != fr) panic("f_chdrive error: %s (%d)\n", FRESULT_str(fr), fr);
+    FATFS fs;
+    FRESULT fr = f_mount(&fs, "", 1);
+    if (FR_OK != fr) {
+        panic("f_mount error: %s (%d)\n", FRESULT_str(fr), fr);
+        return -1;
+    }
 
     FIL fil;
-    const char *const filename = "filename.txt";
+    const char* const filename = "filename.txt";
     fr = f_open(&fil, filename, FA_OPEN_APPEND | FA_WRITE);
-    if (FR_OK != fr && FR_EXIST != fr)
+    if (FR_OK != fr && FR_EXIST != fr) {
         panic("f_open(%s) error: %s (%d)\n", filename, FRESULT_str(fr), fr);
+        return -1;
+    }
+
     if (f_printf(&fil, "Hello, world!\n") < 0) {
         printf("f_printf failed\n");
     }
+
     fr = f_close(&fil);
     if (FR_OK != fr) {
         printf("f_close error: %s (%d)\n", FRESULT_str(fr), fr);
     }
+
+    f_unmount("");
     
-    f_unmount(pSD->pcName);
-}
-
-// DMA 中断处理函数（如果库使用 DMA 且需要回调）
-//void spi_dma_isr() {
-    // 空实现，只为了满足库的指针要求
-//}
-
-int main() {
-    stdio_init_all();
-    time_init();
-    while(!stdio_usb_connected())
-    {
-    tight_loop_contents();
-    }
-
-    puts("Hello, world!");
-
-    // Hardware Configuration of SPI "object"
-    p_spi = new spi_t;
-    memset(p_spi, 0, sizeof(spi_t));
-    if (!p_spi) panic("Out of memory");
-    p_spi->hw_inst = spi0;  // SPI component
-    p_spi->miso_gpio = 4;  // GPIO number (not pin number)
-    p_spi->mosi_gpio = 7;
-    p_spi->sck_gpio = 6;
-    p_spi->baud_rate = 31.25 * 1000 * 1000; 
-    //p_spi->dma_isr = spi_dma_isr; 
-    add_spi(p_spi);
-
-    // Hardware Configuration of the SD Card "object"
-    sd_card_t *p_sd_card = new sd_card_t;
-    if (!p_sd_card) panic("Out of memory");
-    memset(p_sd_card, 0, sizeof(sd_card_t));
-    p_sd_card->pcName = "0:";  // Name used to mount device
-    p_sd_card->spi = p_spi;    // Pointer to the SPI driving this card
-    p_sd_card->ss_gpio = 5;   // The SPI slave select GPIO for this SD card
-    p_sd_card->use_card_detect = false;
-    p_sd_card->card_detect_gpio = 0;  // Card detect
-    // What the GPIO read returns when a card is
-    // present. Use -1 if there is no card detect.
-    p_sd_card->card_detected_true = 0;
-    add_sd_card(p_sd_card);
-
-#ifdef CARD2
-    /* Add another SD card */
-    p_sd_card = new sd_card_t;
-    if (!p_sd_card) panic("Out of memory");
-    memset(p_sd_card, 0, sizeof(sd_card_t));
-    p_sd_card->pcName = "1:";  // Name used to mount device
-    p_sd_card->spi = p_spi;    // Pointer to the SPI driving this card
-    p_sd_card->ss_gpio = 15;   // The SPI slave select GPIO for this SD card
-    p_sd_card->card_detect_gpio = 14;  // Card detect
-    // What the GPIO read returns when a card is
-    // present. Use -1 if there is no card detect.
-    p_sd_card->card_detected_true = 0;
-    // State attributes:
-    p_sd_card->m_Status = STA_NOINIT;
-    p_sd_card->sectors = 0;
-    p_sd_card->card_type = 0;
-    add_sd_card(p_sd_card);
-#endif
-
-    for (size_t i = 0; i < sd_get_num(); ++i) 
-        test(sd_get_by_num(i));
-
     puts("Goodbye, world!");
-    
-    while(true)
-    {
-        tight_loop_contents();
-    }
-
+    for (;;);
 }
