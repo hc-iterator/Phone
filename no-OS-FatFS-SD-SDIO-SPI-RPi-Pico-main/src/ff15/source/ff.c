@@ -3654,7 +3654,7 @@ static FRESULT validate (	/* Returns FR_OK or FR_INVALID_OBJECT */
 /* Mount/Unmount a Logical Drive                                         */
 /*-----------------------------------------------------------------------*/
 
-FRESULT f_mount (
+FRESULT /*f_mount*/abcde (
 	FATFS* fs,			/* Pointer to the filesystem object to be registered (NULL:unmount)*/
 	const TCHAR* path,	/* Logical drive number to be mounted/unmounted */
 	BYTE opt			/* Mount option: 0=Do not mount (delayed mount), 1=Mount immediately */
@@ -3706,6 +3706,120 @@ FRESULT f_mount (
 	res = mount_volume(&path, &fs, 0);	/* Force mounted the volume */
 	LEAVE_FF(fs, res);
 }
+
+
+
+
+#include <stdio.h>
+#include "f_util.h"
+FRESULT f_mount (
+    FATFS* fs,          /* Pointer to the filesystem object to be registered (NULL:unmount) */
+    const TCHAR* path,  /* Logical drive number to be mounted/unmounted */
+    BYTE opt            /* Mount option: 0=Do not mount (delayed mount), 1=Mount immediately */
+)
+{
+    FATFS *cfs;
+    int vol;
+    FRESULT res;
+    const TCHAR *rp = path;
+
+    // 打印函数入口参数
+    printf("[f_mount] Entry: fs=%p, path=\"%s\", opt=%d\n", (void*)fs, path ? path : "(null)", opt);
+
+    /* Get volume ID (logical drive number) */
+    vol = get_ldnumber(&rp);
+    if (vol < 0) {
+        printf("[f_mount] get_ldnumber failed, vol=%d\n", vol);
+        return FR_INVALID_DRIVE;
+    }
+    printf("[f_mount] vol=%d, rp now points to: %s\n", vol, rp ? rp : "(null)");
+
+    cfs = FatFs[vol];   /* Pointer to the filesystem object of the volume */
+    printf("[f_mount] cfs (existing fs object) = %p\n", (void*)cfs);
+
+    if (cfs) {  /* Unregister current filesystem object if registered */
+        printf("[f_mount] Unregistering existing fs object...\n");
+        FatFs[vol] = 0;
+#if FF_FS_LOCK
+        clear_share(cfs);
+        printf("[f_mount] clear_share done\n");
+#endif
+#if FF_FS_REENTRANT
+        ff_mutex_delete(vol);
+        printf("[f_mount] mutex deleted for vol %d\n", vol);
+#endif
+        cfs->fs_type = 0;   /* Invalidate the filesystem object to be unregistered */
+        printf("[f_mount] Old fs object invalidated\n");
+    } else {
+        printf("[f_mount] No existing fs object for vol %d\n", vol);
+    }
+
+    if (fs) {   /* Register new filesystem object */
+        printf("[f_mount] Registering new fs object at %p\n", (void*)fs);
+        fs->pdrv = LD2PD(vol);  /* Volume hosting physical drive */
+        printf("[f_mount] fs->pdrv = %d (derived from vol)\n", fs->pdrv);
+#if FF_FS_REENTRANT
+        fs->ldrv = (BYTE)vol;   /* Owner volume ID */
+        if (!ff_mutex_create(vol)) {
+            printf("[f_mount] ff_mutex_create failed for vol %d\n", vol);
+            return FR_INT_ERR;
+        }
+#if FF_FS_LOCK
+        if (SysLock == 0) {
+            if (!ff_mutex_create(FF_VOLUMES)) {
+                ff_mutex_delete(vol);
+                printf("[f_mount] System mutex creation failed\n");
+                return FR_INT_ERR;
+            }
+            SysLock = 1;
+            printf("[f_mount] System mutex created\n");
+        }
+#endif
+        printf("[f_mount] Mutex created for vol %d\n", vol);
+#endif
+        fs->fs_type = 0;        /* Invalidate the new filesystem object */
+        FatFs[vol] = fs;        /* Register new fs object */
+        printf("[f_mount] New fs object registered in FatFs[%d]\n", vol);
+    } else {
+        printf("[f_mount] fs is NULL, unmounting (no new fs object)\n");
+    }
+
+    if (opt == 0) {
+        printf("[f_mount] opt==0, returning FR_OK (delayed mount)\n");
+        return FR_OK;   /* Do not mount now, it will be mounted in subsequent file functions */
+    }
+
+    printf("[f_mount] opt==1, calling mount_volume...\n");
+    res = mount_volume(&path, &fs, 0);   /* Force mounted the volume */
+    printf("[f_mount] mount_volume returned res = %d (%s)\n", res, FRESULT_str(res) ? FRESULT_str(res) : "unknown");
+
+    // 注意：LEAVE_FF 是一个宏，可能包含 return 或跳转，我们这里用 printf 打印后直接返回
+    // 为了保持原逻辑，我们用 return res; 代替 LEAVE_FF（假设 LEAVE_FF 只是简单返回）
+    // 如果 LEAVE_FF 做了其他事情（如释放资源），请保留原宏，但可在此前加上 printf
+    printf("[f_mount] Leaving with res = %d\n", res);
+
+	LEAVE_FF(fs, res);
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

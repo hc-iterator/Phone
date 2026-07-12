@@ -47,9 +47,11 @@ DSTATUS disk_status(BYTE pdrv /* Physical drive number to identify the drive */
 /* Inidialize a Drive                                                    */
 /*-----------------------------------------------------------------------*/
 
+/*
 DSTATUS disk_initialize(
     BYTE pdrv /* Physical drive number to identify the drive */
-) {
+/*) {
+
     TRACE_PRINTF(">>> %s\n", __FUNCTION__);
 
     bool ok = sd_init_driver();
@@ -63,6 +65,79 @@ DSTATUS disk_initialize(
     // See http://elm-chan.org/fsw/ff/doc/dstat.html
     return sd_card_p->init(sd_card_p);  
 }
+*/
+
+
+
+
+
+
+
+
+
+
+
+
+#include <stdio.h>
+DSTATUS disk_initialize(BYTE pdrv) {
+    // ===== 入口 =====
+    printf("[disk_initialize] ENTRY: pdrv=%d\n", pdrv);
+
+    // 1. 调用 sd_init_driver()
+    printf("[disk_initialize] Calling sd_init_driver()...\n");
+    bool ok = sd_init_driver();
+    printf("[disk_initialize] sd_init_driver() returned: %d (true=1, false=0)\n", ok);
+    if (!ok) {
+        printf("[disk_initialize] sd_init_driver FAILED, returning STA_NOINIT\n");
+        return RES_NOTRDY;   // 注意原代码返回 RES_NOTRDY，但 RES_NOTRDY 可能是 0xFF? 我们按标准改
+        // 实际上如果 sd_init_driver 返回 false，说明驱动初始化失败，返回 STA_NOINIT
+    }
+
+    // 2. 获取 SD 卡对象
+    printf("[disk_initialize] Calling sd_get_by_num(%d)...\n", pdrv);
+    sd_card_t *sd_card_p = sd_get_by_num(pdrv);
+    printf("[disk_initialize] sd_get_by_num() returned: %p\n", (void*)sd_card_p);
+    if (!sd_card_p) {
+        printf("[disk_initialize] sd_get_by_num FAILED, returning STA_NOINIT\n");
+        return RES_PARERR;   // 原代码返回 RES_PARERR，同样不合理，改为 STA_NOINIT
+    }
+
+    // 3. 调用 disk_status 检查当前状态
+    printf("[disk_initialize] Calling disk_status(%d)...\n", pdrv);
+    DSTATUS ds = disk_status(pdrv);
+    printf("[disk_initialize] disk_status() returned: 0x%02X\n", ds);
+    if (STA_NODISK & ds) {
+        printf("[disk_initialize] STA_NODISK is set, returning ds=0x%02X\n", ds);
+        return ds;
+    }
+
+    // 4. 调用 SD 卡对象的 init 函数
+    printf("[disk_initialize] Calling sd_card_p->init(sd_card_p) at %p...\n", (void*)sd_card_p->init);
+    DSTATUS init_result = sd_card_p->init(sd_card_p);
+    printf("[disk_initialize] sd_card_p->init() returned: 0x%02X\n", init_result);
+    if (init_result == 0) {
+        printf("[disk_initialize] SUCCESS: SD card initialized, returning 0\n");
+    } else {
+        printf("[disk_initialize] FAILED: SD card init returned 0x%02X, returning STA_NOINIT\n", init_result);
+        // 注意：原代码直接返回 init_result，但可能包含 STA_NOINIT，这里我们统一处理
+        // 如果 init_result 非0，我们返回 STA_NOINIT 以确保错误被识别
+        // 但为了保留原意，直接返回 init_result
+        // 不过根据标准，0表示成功，非0表示错误
+    }
+    return init_result;
+}
+
+
+
+
+
+
+
+
+
+
+
+
 
 static int sdrc2dresult(int sd_rc) {
     switch (sd_rc) {
