@@ -57,8 +57,15 @@ static void probe_init(void) {
     set_sys_clock_khz(PROBE_CLK_KHZ, true);
 
     for (uint i = 0; i < 8; i++) {
-        gpio_init(PROBE_PIN_BASE + i);
-        gpio_set_dir(PROBE_PIN_BASE + i, GPIO_IN);
+        uint p = PROBE_PIN_BASE + i;
+        gpio_init(p);
+        gpio_set_dir(p, GPIO_IN);
+        /*
+         * ★ 把引脚功能交给 PIO。gpio_init 只把功能设成 SIO，
+         *   而 PIO 采样走的是 PAD 的输入通路 —— pio_gpio_init 会设置 PIO 功能
+         *   并清掉 PAD 的 ISO（隔离）位，这是"PIO 采不到电平"最常见的原因。
+         */
+        pio_gpio_init(pio0, p);
     }
 
     g_pio = pio0;
@@ -179,6 +186,20 @@ int main(void) {
                            (unsigned long)g_pio->sm[g_sm].pinctrl);
                     printf("PIO instr0=0x%04lx  (期望 0x4008 = in pins,8)\n",
                            (unsigned long)g_pio->instr_mem[0]);
+                    /*
+                     * ★ 程序到底装在哪、SM 到底在跑哪条指令？
+                     *   execctrl 的 wrap_bottom(bit16:12) 就是 pio_add_program 返回的 offset
+                     *   （pio_add_program 从指令内存【顶部】向下找空位 ⇒ 1 条指令的程序会落在 31）
+                     *   所以真正该看的是 instr_mem[offset]，而不是 instr_mem[0]。
+                     */
+                    {
+                        uint32_t off = (g_pio->sm[g_sm].execctrl >> 12) & 0x1fu;
+                        uint32_t pc  = g_pio->sm[g_sm].addr & 0x1fu;
+                        printf("PROG offset=%lu pc=%lu  instr[offset]=0x%04lx  instr[pc]=0x%04lx\n",
+                               (unsigned long)off, (unsigned long)pc,
+                               (unsigned long)g_pio->instr_mem[off],
+                               (unsigned long)g_pio->instr_mem[pc]);
+                    }
                     /* ★ DMA 通道 CTRL + 直接把 FIFO 里一个字取出来（读 RXF 会弹出一个字）
                      *   ⇒ 如果这里能读到非零数据，就证明 PIO 确实在生产数据，问题只在 DMA ✗ */
                     printf("DMA ctrl=0x%08lx  FIFO_POP=0x%08lx\n",
