@@ -57,3 +57,9 @@ target_link_libraries(dvi_min pico_stdlib hardware_pio hardware_dma hardware_clo
 pico_enable_stdio_uart(dvi_min 1)
 pico_enable_stdio_usb(dvi_min 1)
 pico_add_extra_outputs(dvi_min)
+
+add_executable(pin_toggle ${CMAKE_CURRENT_LIST_DIR}/pin_toggle.c)
+target_link_libraries(pin_toggle pico_stdlib)
+pico_enable_stdio_usb(pin_toggle 1)
+pico_enable_stdio_uart(pin_toggle 1)
+pico_add_extra_outputs(pin_toggle)

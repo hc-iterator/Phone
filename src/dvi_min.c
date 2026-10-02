@@ -27,6 +27,8 @@
 
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
+#include "pico/bootrom.h"          /* reset_usb_boot：串口后门进 BOOTSEL */
+#include "hardware/watchdog.h"     /* watchdog_reboot：串口后门普通重启 */
 
 #include "hardware/clocks.h"
 #include "hardware/vreg.h"
@@ -120,6 +122,25 @@ int main(void)
         draw_border(c == 0 ? 1 : 0);
 
         i = (i + 1) % (int)(sizeof(seq) / sizeof(seq[0]));
-        sleep_ms(500);
+
+        /*
+         * ── 串口后门（本板没引出 SWD，只能靠它进 BOOTSEL）────────────────
+         *   发 'B' ⇒ 重启进入 BOOTSEL（直接拖 uf2 即可，不用按按键）
+         *   发 'R' ⇒ 普通重启
+         * 用大写，避免与其它命令冲突；用 timeout=0 非阻塞，绝不拖慢 DVI 主循环。
+         */
+        for (int k = 0; k < 20; k++) {          /* 500ms 内分 20 次查，响应快 */
+            int ch = getchar_timeout_us(0);
+            if (ch == 'B') {                    /* 'B' ⇒ BOOTSEL */
+                printf("\n[backdoor] BOOTSEL reboot...\n");
+                sleep_ms(50);
+                reset_usb_boot(0, 0);           /* 不再返回 */
+            } else if (ch == 'R') {             /* 'R' */
+                printf("\n[backdoor] reboot...\n");
+                sleep_ms(50);
+                watchdog_reboot(0, 0, 0);       /* 不再返回 */
+            }
+            sleep_ms(25);
+        }
     }
 }

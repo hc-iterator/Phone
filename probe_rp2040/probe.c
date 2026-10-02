@@ -24,23 +24,14 @@
  */
 #include <stdio.h>
 #include "pico/stdlib.h"
+#include "pico/bootrom.h"          /* reset_usb_boot：串口后门进 BOOTSEL */
+#include "hardware/watchdog.h"     /* watchdog_reboot：串口后门普通重启 */
 #include "hardware/pio.h"
 #include "hardware/dma.h"
 #include "hardware/clocks.h"
 #include "hardware/vreg.h"
 
-/*
- * PIO 程序：手写，不依赖 pioasm。
- *   `in pins, 8` 一条指令 = 每个时钟把 8 根引脚锁存进 ISR。
- *   编码：bit15..13=010(IN)  bit7..5=000(PINS)  bit4..0=8 ⇒ 0x4008
- *   （这样就不需要 pico_generate_pio_header / pioasm 主机工具）
- */
-static const uint16_t sampler_program_instructions[] = { 0x4008 };
-static const struct pio_program sampler_program = {
-    .instructions = sampler_program_instructions,
-    .length       = 1,
-    .origin       = -1,
-};
+#include "sampler.pio.h"       /* 由 pioasm 生成：in pins, 8 */
 
 #define PROBE_PIN_BASE   0            /* 采 GPIO 0..7 */
 #define PROBE_CLK_KHZ    252000       /* 采样时钟（超频，用户已批准） */
@@ -74,7 +65,11 @@ static void probe_init(void) {
     g_sm  = (uint)pio_claim_unused_sm(g_pio, true);
     uint offset = pio_add_program(g_pio, &sampler_program);
 
-    pio_sm_config c = pio_get_default_sm_config();
+    /* ★ 必须用【程序自己的】默认配置：它会把 wrap_top/wrap_bottom 设成该程序的边界。
+     *   若改用 pio_get_default_sm_config()，wrap 会是整片 (0,31)，
+     *   而程序若被装在偏移 2，SM 就会在地址 0/1 的空指令（jmp 0）里死循环，
+     *   永远走不到 in pins,8 ⇒ FIFO 永远空。（本轮实测踩到的坑） */
+    pio_sm_config c = sampler_program_get_default_config(offset);
     sm_config_set_in_pins(&c, PROBE_PIN_BASE);        /* RP2040 窗口固定 0..31 */
     sm_config_set_in_shift(&c, false /* 左移：先来的在高位 */, true /* autopush */, 32);
     sm_config_set_clkdiv(&c, 1.0f);
@@ -86,13 +81,41 @@ static void probe_init(void) {
     channel_config_set_transfer_data_size(&dc, DMA_SIZE_32);
     channel_config_set_read_increment(&dc, false);
     channel_config_set_write_increment(&dc, true);
-    channel_config_set_dreq(&dc, pio_get_dreq(g_pio, g_sm, false));
-    channel_config_set_ring(&dc, true /* write */, 16 /* 2^16 = 64KB 环 */);
-    dma_channel_configure((uint)g_dma, &dc, g_buf, &g_pio->rxf[g_sm], 0xFFFFFFFFu, true);
+    /* ★ 用显式 DREQ 宏（RP2040: DREQ_PIO0_RX0=4），避免任何参数顺序疑问 */
+    channel_config_set_dreq(&dc, DREQ_PIO0_RX0 + g_sm);
+    /*
+     * ★ 不用环形回卷：RP2040 的 DMA ring size 只有 4 位（最大 2^15），
+     *   之前写 16（=2^16）是非法值，很可能就是"一个字都没搬"的原因 ✗
+     *   改成最朴素的一次性采集：填满 16384 字就停，用 'd' 取走后再 'c' 重启。
+     */
+    dma_channel_configure((uint)g_dma, &dc, g_buf, &g_pio->rxf[g_sm], BUF_WORDS, true);
 
     dma_channel_set_irq0_enabled((uint)g_dma, true);
     irq_set_exclusive_handler(DMA_IRQ_0, dma_irq_handler);
     irq_set_enabled(DMA_IRQ_0, true);
+}
+
+static void capture(void) {
+    /*
+     * ★ 不用 DMA：直接用 CPU 紧循环抽干 PIO 的 RX FIFO。
+     *   理由（本轮实测证据）：FIFO 里确实有数据（FIFO_POP=0x2b15528b），
+     *   但 DMA 的 TREQ 触发源没配成 PIO0_RX（ctrl=0x01020029 ⇒ TREQ 字段不对），
+     *   于是 DMA 一个字都没搬。CPU 抽 FIFO 这条路已被证明可用。
+     *
+     * 速度：CPU 读一个 32 位字约 4~8 周期 ⇒ 16384 字 ≈ 260~520 µs 的信号 ✓
+     * （每个字含 4 个采样，采样率 = sys_clk = 252 MHz）
+     */
+    for (uint i = 0; i < BUF_WORDS; i++) {
+        uint32_t guard = 0;
+        while (pio_sm_is_rx_fifo_empty(g_pio, g_sm)) {
+            if (++guard > 2000000u) {   /* ★ 超时保护：宁可采不满，也绝不挂死 */
+                printf("CAPTURE_TIMEOUT at word %lu\n", (unsigned long)i);
+                fflush(stdout);
+                return;
+            }
+        }
+        g_buf[i] = pio_sm_get(g_pio, g_sm);
+    }
 }
 
 static void dump_hex(void) {
@@ -132,8 +155,42 @@ int main(void) {
             case 's':
                 printf("STAT clk=%lu wraps=%lu buf=%u\n",
                        (unsigned long)clock_get_hz(clk_sys), (unsigned long)g_wraps, (unsigned)BUF_WORDS);
+                /* ★ 自证诊断：缓冲里有多少个非零字（证明 DMA 真的写进过数据），
+                 *   以及该 DMA 通道还剩多少传输（0xFFFFFFFF 减去已搬字数）。*/
+                {
+                    uint32_t nz = 0, firstnz = 0xFFFFFFFFu;
+                    for (uint i = 0; i < BUF_WORDS; i++) {
+                        if (g_buf[i]) { if (firstnz == 0xFFFFFFFFu) firstnz = i; nz++; }
+                    }
+                    uint32_t remain = dma_channel_hw_addr((uint)g_dma)->transfer_count;
+                    printf("DIAG nonzero=%lu/%u first_at=%ld dma_remain=%lu sm_en=%u rxf=%u\n",
+                           (unsigned long)nz, (unsigned)BUF_WORDS,
+                           (firstnz == 0xFFFFFFFFu ? -1L : (long)firstnz),
+                           (unsigned long)remain,
+                           (unsigned)((g_pio->ctrl >> (g_sm * 4u)) & 1u),
+                           (unsigned)pio_sm_get_rx_fifo_level(g_pio, g_sm));
+                    /* ★ PIO 寄存器全貌：判断状态机到底在不在执行、配置对不对 */
+                    printf("PIO ctrl=0x%08lx fstat=0x%08lx sm%u: clkdiv=0x%08lx execctrl=0x%08lx shiftctrl=0x%08lx addr=%lu pinctrl=0x%08lx\n",
+                           (unsigned long)g_pio->ctrl, (unsigned long)g_pio->fstat, g_sm,
+                           (unsigned long)g_pio->sm[g_sm].clkdiv,
+                           (unsigned long)g_pio->sm[g_sm].execctrl,
+                           (unsigned long)g_pio->sm[g_sm].shiftctrl,
+                           (unsigned long)g_pio->sm[g_sm].addr,
+                           (unsigned long)g_pio->sm[g_sm].pinctrl);
+                    printf("PIO instr0=0x%04lx  (期望 0x4008 = in pins,8)\n",
+                           (unsigned long)g_pio->instr_mem[0]);
+                    /* ★ DMA 通道 CTRL + 直接把 FIFO 里一个字取出来（读 RXF 会弹出一个字）
+                     *   ⇒ 如果这里能读到非零数据，就证明 PIO 确实在生产数据，问题只在 DMA ✗ */
+                    printf("DMA ctrl=0x%08lx  FIFO_POP=0x%08lx\n",
+                           (unsigned long)dma_channel_hw_addr((uint)g_dma)->ctrl_trig,
+                           (unsigned long)g_pio->rxf[g_sm]);
+                }
                 fflush(stdout); break;
-            case 'd': dump_hex(); break;
+            case 'd': dump_hex();
+                      /* ★ 采完立刻重新装填并启动 DMA，方便连续采 */
+                      dma_channel_set_write_addr((uint)g_dma, g_buf, false);
+                      dma_channel_set_trans_count((uint)g_dma, BUF_WORDS, true);
+                      break;
             case 'b': {
                 uint32_t hdr[2] = { BUF_WORDS, g_wraps };
                 fwrite(hdr, 4, 2, stdout); fflush(stdout);
@@ -143,6 +200,23 @@ int main(void) {
             case 'r': g_wraps = 0; printf("OK\n"); fflush(stdout); break;
             case '0': pio_sm_set_enabled(g_pio, g_sm, false); printf("OK stopped\n"); fflush(stdout); break;
             case '1': pio_sm_set_enabled(g_pio, g_sm, true);  printf("OK running\n"); fflush(stdout); break;
+            /* ── 直接读引脚（绕过 PIO/DMA，用 SIO）⇒ 分清"通路坏"还是"PIO 路坏" ── */
+            case 'g': {
+                printf("GPIO   : 7 6 5 4 3 2 1 0\n");
+                for (int n = 0; n < 5; n++) {
+                    uint32_t m = 0;
+                    for (int i = 0; i < 8; i++) if (gpio_get(PROBE_PIN_BASE + i)) m |= (1u << i);
+                    printf("read%-2d : %d %d %d %d %d %d %d %d   0x%02lx\n", n,
+                           (int)((m >> 7) & 1), (int)((m >> 6) & 1), (int)((m >> 5) & 1), (int)((m >> 4) & 1),
+                           (int)((m >> 3) & 1), (int)((m >> 2) & 1), (int)((m >> 1) & 1), (int)(m & 1),
+                           (unsigned long)m);
+                    sleep_ms(200);
+                }
+                fflush(stdout); break;
+            }
+            /* ── 串口后门：本板没 SWD 时靠它进 BOOTSEL ── */
+            case 'B': printf("\n[backdoor] BOOTSEL reboot...\n"); fflush(stdout); sleep_ms(50); reset_usb_boot(0, 0); break;
+            case 'R': printf("\n[backdoor] reboot...\n");        fflush(stdout); sleep_ms(50); watchdog_reboot(0, 0, 0); break;
             default: break;
         }
     }

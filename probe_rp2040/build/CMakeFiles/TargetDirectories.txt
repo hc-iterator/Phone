@@ -1,4 +1,5 @@
 C:/Users/Chen/Desktop/Pico/PicoPhone/DeepSeekCode/probe_rp2040/build/CMakeFiles/probe_rp2040.dir
+C:/Users/Chen/Desktop/Pico/PicoPhone/DeepSeekCode/probe_rp2040/build/CMakeFiles/probe_rp2040_sampler_pio_h.dir
 C:/Users/Chen/Desktop/Pico/PicoPhone/DeepSeekCode/probe_rp2040/build/CMakeFiles/edit_cache.dir
 C:/Users/Chen/Desktop/Pico/PicoPhone/DeepSeekCode/probe_rp2040/build/CMakeFiles/rebuild_cache.dir
 C:/Users/Chen/Desktop/Pico/PicoPhone/DeepSeekCode/probe_rp2040/build/pico-sdk/CMakeFiles/edit_cache.dir
@@ -166,7 +167,6 @@ C:/Users/Chen/Desktop/Pico/PicoPhone/DeepSeekCode/probe_rp2040/build/pico-sdk/sr
 C:/Users/Chen/Desktop/Pico/PicoPhone/DeepSeekCode/probe_rp2040/build/pico-sdk/src/rp2_common/pico_async_context/CMakeFiles/rebuild_cache.dir
 C:/Users/Chen/Desktop/Pico/PicoPhone/DeepSeekCode/probe_rp2040/build/pico-sdk/src/rp2_common/pico_btstack/CMakeFiles/edit_cache.dir
 C:/Users/Chen/Desktop/Pico/PicoPhone/DeepSeekCode/probe_rp2040/build/pico-sdk/src/rp2_common/pico_btstack/CMakeFiles/rebuild_cache.dir
-C:/Users/Chen/Desktop/Pico/PicoPhone/DeepSeekCode/probe_rp2040/build/pico-sdk/src/rp2_common/pico_cyw43_driver/CMakeFiles/pioasmBuild.dir
 C:/Users/Chen/Desktop/Pico/PicoPhone/DeepSeekCode/probe_rp2040/build/pico-sdk/src/rp2_common/pico_cyw43_driver/CMakeFiles/cyw43_driver_picow_cyw43_bus_pio_spi_pio_h.dir
 C:/Users/Chen/Desktop/Pico/PicoPhone/DeepSeekCode/probe_rp2040/build/pico-sdk/src/rp2_common/pico_cyw43_driver/CMakeFiles/edit_cache.dir
 C:/Users/Chen/Desktop/Pico/PicoPhone/DeepSeekCode/probe_rp2040/build/pico-sdk/src/rp2_common/pico_cyw43_driver/CMakeFiles/rebuild_cache.dir

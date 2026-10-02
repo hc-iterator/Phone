@@ -1,4 +1,5 @@
 C:/Users/Chen/Desktop/Pico/PicoPhone/DeepSeekCode/wboard_dvi/build/CMakeFiles/dvi_min.dir
+C:/Users/Chen/Desktop/Pico/PicoPhone/DeepSeekCode/wboard_dvi/build/CMakeFiles/pin_toggle.dir
 C:/Users/Chen/Desktop/Pico/PicoPhone/DeepSeekCode/wboard_dvi/build/CMakeFiles/edit_cache.dir
 C:/Users/Chen/Desktop/Pico/PicoPhone/DeepSeekCode/wboard_dvi/build/CMakeFiles/rebuild_cache.dir
 C:/Users/Chen/Desktop/Pico/PicoPhone/DeepSeekCode/wboard_dvi/build/pico-sdk/CMakeFiles/edit_cache.dir
