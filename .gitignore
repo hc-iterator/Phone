@@ -48,3 +48,13 @@ libs/**/.git/
 # Altium / KiCad 的自动生成缓存（体积大、会无意义变化）
 libs/**/fp-info-cache
 libs/**/*.kicad_prl
+
+# 独立子工程的构建产物（不该进版本库：会污染 diff、且多智能体并行时互相干扰）
+probe_rp2040/build/
+wboard_dvi/build/
+core1_monitor/build/
+# 采集下来的临时数据
+sampler_capture.txt
+cap_div*.txt
+probe_build.log
+wboard_build.log
