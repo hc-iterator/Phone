@@ -1,0 +1,36 @@
+set confirm off
+set pagination off
+set height 0
+set width 0
+target extended-remote localhost:3333
+
+echo \n===== progress beacon =====\n
+printf "g_probe_marks = %u   (300+ => DVI main loop reached)\n", g_probe_marks
+printf "g_probe_svc_n = %u\n", g_probe_svc_n
+
+echo \n===== privilege samples =====\n
+printf "ctrl[0] 1st-SVC-entry  = 0x%08x  (1 => nPRIV survives exception entry)\n", g_probe_ctrl[0]
+printf "ctrl[1] before nPRIV=1 = 0x%08x\n", g_probe_ctrl[1]
+printf "ctrl[2] after 3 SVCs   = 0x%08x  (1 => app stayed unprivileged)\n", g_probe_ctrl[2]
+printf "ctrl[3] after SYS_EXIT = 0x%08x  (0 => kernel took privilege back)\n", g_probe_ctrl[3]
+printf "ctrl[4] dvi entry      = 0x%08x  (0 => DVI inits privileged)\n", g_probe_ctrl[4]
+printf "mpu_type (behavioural) = 0x%08x  (non-zero => privileged)\n", g_probe_mpu_type
+
+echo \n===== syscalls =====\n
+printf "calls=%u denied=%u last_no=%u result=0x%08x ctrl_seen=0x%08x\n", g_sys_calls, g_sys_denied, g_sys_last_no, g_sys_result, g_sys_ctrl_seen
+printf "done_magic=0x%08x  (0x5AFE0001 => demo completed)\n", g_sys_done_magic
+
+echo \n===== stdio integrity (the r5 bug) =====\n
+printf "stdout = 0x%08x  (expect 0x20008358)\n", *(unsigned int*)0x20005e60
+x/4xw 0x20008358
+
+echo \n===== where did it stop =====\n
+printf "PC=0x%08x LR=0x%08x SP=0x%08x\n", $pc, $lr, $sp
+printf "CFSR=0x%08x HFSR=0x%08x SHCSR=0x%08x\n", *(unsigned int*)0xE000ED28, *(unsigned int*)0xE000ED2C, *(unsigned int*)0xE000ED24
+printf "crash magic @0x20000110 = 0x%08x  (0xcafebabe => had a HardFault)\n", *(unsigned int*)0x20000110
+
+echo \n===== DVI engine =====\n
+printf "heartbeat frames=%u lines=%u\n", frank_hdmi_heartbeat_frames, frank_hdmi_heartbeat_lines
+printf "dvi0.dvi_frame_count = %u\n", dvi0.dvi_frame_count
+detach
+quit

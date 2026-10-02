@@ -1,0 +1,8 @@
+set confirm off
+set pagination off
+set height 0
+target extended-remote localhost:3333
+printf "count1=%u\n", dvi0.dvi_frame_count
+monitor resume
+detach
+quit

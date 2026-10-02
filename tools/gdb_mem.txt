@@ -1,0 +1,32 @@
+set confirm off
+set pagination off
+set height 0
+set width 0
+target extended-remote localhost:3333
+
+echo \n===== newlib stdio globals =====\n
+p/x _impure_ptr
+p/x stdout
+p/x stdin
+p/x __sglue
+p/x &__sf
+p/x &impure_data
+
+echo \n===== __sf array (first 16 words) =====\n
+x/16xw &__sf
+
+echo \n===== our globals: where do they live? =====\n
+p/x &g_sys_page
+p/x &g_probe_ctrl
+p/x &g_sys_done_magic
+p/x &g_sys_calls
+p/x &g_sys_result
+
+echo \n===== section boundaries =====\n
+p/x &__tbss_end
+p/x &_impure_ptr
+
+echo \n===== marks =====\n
+p/x g_probe_marks
+detach
+quit

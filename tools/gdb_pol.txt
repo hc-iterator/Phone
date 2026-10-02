@@ -1,0 +1,32 @@
+set confirm off
+set pagination off
+set height 0
+set width 0
+
+target extended-remote localhost:3333
+
+echo \n===== 引擎计数 =====\n
+p frank_hdmi_heartbeat_frames
+p frank_hdmi_heartbeat_lines
+p dvi0.dvi_frame_count
+
+echo \n===== GPIO 输出极性覆盖（IO_BANK0_GPIOx_CTRL 的 OUTOVER 位 [9:8]）=====\n
+echo "invert=false 时 OUTOVER 应为 0；invert=true 时为 1"
+echo "GPIO32:"
+x/1xw 0x40028104
+echo "GPIO34:"
+x/1xw 0x40028114
+echo "GPIO36:"
+x/1xw 0x40028124
+echo "GPIO38:"
+x/1xw 0x40028134
+
+echo \n===== PIO 使能 =====\n
+x/1xw 0x50200000
+
+echo \n===== PWM 时钟 =====\n
+x/1xw 0x400A80F0
+x/1xw 0x400A80DC
+
+detach
+quit

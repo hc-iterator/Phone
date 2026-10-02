@@ -1,0 +1,17 @@
+set confirm off
+set pagination off
+set height 0
+target extended-remote localhost:3333
+printf "\n===== 1) ??? panic?????=====\n"
+bt
+printf "\n===== 2) ????? =====\n"
+info threads
+printf "\n===== 3) ???? =====\n"
+printf "g_probe_marks=%u\n", g_probe_marks
+printf "????: done=%u ????=0x%04x ?????=%d\n", g_wt_done, g_wt_hung_mask, g_wt_resumed_from
+printf "?????: status=%u steps=%u fail_at=%u\n", g_kres_selftest_status, g_kres_selftest_steps, g_kres_selftest_fail_at
+printf "????: status=%u steps=%u fail_at=%u ???=%u\n", g_kmem_selftest_status, g_kmem_selftest_steps, g_kmem_selftest_fail_at, g_kmem_sram_arena_size
+printf "CFSR=%08x HFSR=%08x\n", *(unsigned int*)0xE000ED28, *(unsigned int*)0xE000ED2C
+printf "\n=== GDB_SCRIPT_COMPLETE ===\n"
+detach
+quit

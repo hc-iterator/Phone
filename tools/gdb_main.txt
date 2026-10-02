@@ -1,0 +1,39 @@
+set confirm off
+set pagination off
+set height 0
+set width 0
+
+target extended-remote localhost:3333
+
+echo \n===== 目标主线：系统调用链路验证 =====\n
+echo "g_sys_calls @0x2001E5E8  (内核受理次数，期望 >=3):"
+x/1xw 0x2001E5E8
+echo "g_sys_ctrl_seen @0x2001E5EC (处理程序入口 CONTROL):"
+x/1xw 0x2001E5EC
+echo "g_sys_denied @0x2001E5F0 (被拒绝次数):"
+x/1xw 0x2001E5F0
+echo "g_sys_done_magic @0x2001E5F4 (0x5AFE0001 = 演示走完):"
+x/1xw 0x2001E5F4
+echo "g_sys_last_no @0x2001E5FC (最后一次调用号):"
+x/1xw 0x2001E5FC
+echo "g_sys_result @0x2001E608 (返回值):"
+x/1xw 0x2001E608
+
+echo \n===== 第 17 轮诊断结果（应保持通过）=====\n
+echo "r17_step (期望 4):"
+x/1xw 0x2001EE58
+echo "r17_done (期望 1):"
+x/1xw 0x2001EE50
+
+echo \n===== 故障状态 =====\n
+echo "CFSR(0xE000ED28) 期望 0:"
+x/1xw 0xE000ED28
+
+echo \n===== crash_info 魔数（0xCAFEBABE = 进过 HardFault）=====\n
+x/1xw 0x20000110
+
+echo \n===== Core0 位置 =====\n
+info registers pc
+
+detach
+quit

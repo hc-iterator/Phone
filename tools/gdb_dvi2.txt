@@ -1,0 +1,15 @@
+set confirm off
+set pagination off
+set height 0
+set width 0
+target extended-remote localhost:3333
+echo \n== Core0 ==\n
+info registers pc sp lr
+echo \n== ??????0 ?????==\n
+x/1xw 0xE000ED28
+x/1xw 0xE000ED34
+echo \n== crash_info magic ==\n
+x/1xw 0x20000110
+echo \n== clk_sys ???Hz?@ 0x40010000+0x3C ? SELECTED ???????? ==\n
+detach
+quit

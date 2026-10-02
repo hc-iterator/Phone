@@ -1,0 +1,31 @@
+set confirm off
+set pagination off
+set height 0
+set width 0
+
+target extended-remote localhost:3333
+
+echo \n== DVI 引擎计数（冷启动后读）==\n
+p frank_hdmi_heartbeat_lines
+p frank_hdmi_heartbeat_frames
+p dvi0.dvi_frame_count
+p dvi0.late_scanline_ctr
+p dvi0.dvi_started
+
+echo \n== GPIO 32..39 的 FUNCSEL（应当是 PIO 功能）==\n
+echo "GPIO32_CTRL @0x40028004+32*8:"
+x/1xw 0x40028104
+echo "GPIO38_CTRL:"
+x/1xw 0x40028134
+
+echo \n== PIO0 GPIOBASE 寄存器（0 表示基址 0）==\n
+echo "PIO0_GPIOBASE @0x50200000+0x168:"
+x/1xw 0x50200168
+echo "PIO1_GPIOBASE:"
+x/1xw 0x50300168
+
+echo \n== 两核 ==\n
+info threads
+
+detach
+quit

@@ -1,0 +1,30 @@
+set confirm off
+set pagination off
+set height 0
+set width 0
+
+target extended-remote localhost:3333
+
+echo \n== 心跳（lines 每扫描线+1 / frames 每帧+1）==\n
+p frank_hdmi_heartbeat_lines
+p frank_hdmi_heartbeat_frames
+p dvi0.dvi_frame_count
+
+echo \n== 帧缓冲前 16 字节（看 Core0 有没有画进去）==\n
+p &g_fb
+x/16xb g_fb
+
+echo \n== 调色板前 4 项（看是否设置成功）==\n
+p g_fb[0]
+
+echo \n== dvi0 关键字段 ==\n
+p dvi0.fb_w
+p dvi0.fb_h
+p dvi0.dvi_started
+p dvi0.late_scanline_ctr
+
+echo \n== 两个核都在哪 ==\n
+info threads
+
+detach
+quit

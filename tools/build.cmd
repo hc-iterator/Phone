@@ -1,0 +1,57 @@
+@echo off
+REM ============================================================================
+REM  tools\build.cmd - configure + build the SPI_PICO_TEST firmware
+REM
+REM  Why this exists: the shell sandbox blocks capturing a child process's
+REM  output through a pipe, so cmake/ninja cannot be run directly from the
+REM  agent's PowerShell. Redirecting their output to a file inside the
+REM  workspace and reading that file afterwards avoids the pipe entirely.
+REM
+REM  It writes only inside this repository:
+REM     build\            (cmake + ninja output)
+REM     debug_logs\build_log.txt  (captured stdout+stderr of both steps)
+REM
+REM  Read debug_logs\build_log.txt to see the result. Last line is BUILD_EXIT=<code>.
+REM ============================================================================
+
+cd /d "%~dp0.."
+
+set "CMAKE=%USERPROFILE%\.pico-sdk\cmake\v3.31.5\bin\cmake.exe"
+set "NINJA=%USERPROFILE%\.pico-sdk\ninja\v1.12.1\ninja.exe"
+if not exist debug_logs mkdir debug_logs
+set "LOG=debug_logs\build_log.txt"
+
+if not exist "%CMAKE%" ( echo ERROR: cmake not found at %CMAKE% > "%LOG%" & echo BUILD_EXIT=1 >> "%LOG%" & exit /b 1 )
+if not exist "%NINJA%" ( echo ERROR: ninja not found at %NINJA% > "%LOG%" & echo BUILD_EXIT=1 >> "%LOG%" & exit /b 1 )
+
+echo ==== cmake configure ==== > "%LOG%"
+REM  Explicitly pass CMAKE_MAKE_PROGRAM and the compilers.
+REM  Trap we already hit: after deleting build\CMakeCache.txt, CMake reports
+REM    "CMake was unable to find a build program corresponding to Ninja"
+REM  because it no longer remembers ninja from the cache and ninja is not in PATH.
+REM  Keep the command on ONE line: with ^ continuation, a trailing space at the
+REM  end of a line breaks parsing.
+REM  KEEP THIS FILE PURE ASCII.  cmd.exe reads .cmd with the OEM code page, so
+REM  UTF-8 non-ASCII comments get mangled and can split the command line apart
+REM  (this file had 210 non-ASCII bytes and worked only by luck - see cuotiben 14).
+set "TOOLCHAIN=%USERPROFILE%\.pico-sdk\toolchain\13_3_Rel1\bin"
+"%CMAKE%" -G Ninja -S . -B build -DCMAKE_MAKE_PROGRAM="%NINJA%" -DCMAKE_C_COMPILER="%USERPROFILE%\.pico-sdk\toolchain\13_3_Rel1\bin\arm-none-eabi-gcc.exe" -DCMAKE_CXX_COMPILER="%USERPROFILE%\.pico-sdk\toolchain\13_3_Rel1\bin\arm-none-eabi-g++.exe" -DCMAKE_ASM_COMPILER="%USERPROFILE%\.pico-sdk\toolchain\13_3_Rel1\bin\arm-none-eabi-gcc.exe" >> "%LOG%" 2>&1
+set CFG=%ERRORLEVEL%
+
+echo. >> "%LOG%"
+echo ==== ninja build ==== >> "%LOG%"
+"%NINJA%" -C build >> "%LOG%" 2>&1
+set BLD=%ERRORLEVEL%
+
+echo. >> "%LOG%"
+echo ---- artifacts ---- >> "%LOG%"
+if exist "build\SPI_PICO_TEST.uf2" (
+    for %%F in ("build\SPI_PICO_TEST.uf2") do echo uf2: %%~zF bytes  %%~tF >> "%LOG%"
+) else (
+    echo uf2: MISSING >> "%LOG%"
+)
+echo CMAKE_EXIT=%CFG% >> "%LOG%"
+echo BUILD_EXIT=%BLD% >> "%LOG%"
+
+if not "%BLD%"=="0" exit /b %BLD%
+exit /b 0

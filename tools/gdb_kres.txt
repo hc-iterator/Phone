@@ -1,0 +1,47 @@
+# tools\gdb_kres.txt —— 读内核资源登记表 + 内存管理器 + PSRAM 的结论
+#
+# 为什么要有这个脚本：2026-09-28 把 kernel_res 接进了构建和 main()，
+# 这是"内核掌握所有外延权限"那本账第一次真正跑起来，要看它的自检结果。
+#
+# 纪律（错题本-工具.md 里那几条）：
+#   - 第一句必须 target extended-remote
+#   - GDB 批处理【一条命令报错，后面全不执行】⇒ 最要紧的放最前
+#     ⇒ 不 p 宏、不用 printf --、不在双引号里嵌双引号
+#   - 【不调用目标上的函数】⇒ 只读内存变量
+#   - 结尾必须有完成哨兵，没有它出现就说明脚本被截断了
+
+set confirm off
+set pagination off
+set height 0
+target extended-remote localhost:3333
+monitor halt
+
+printf "\n===== 1) 内核资源登记表自检（本次接入的主角）=====\n"
+printf "状态=%u  步数=%u  首个失败步=%u   (状态 1 = 全过, 步数应 >= 20)\n", g_kres_selftest_status, g_kres_selftest_steps, g_kres_selftest_fail_at
+
+printf "\n===== 2) 内核内存管理器 =====\n"
+printf "SRAM 竞技场=%u 字节 (%u KiB)  自检=%u 步数=%u 失败步=%u\n", g_kmem_sram_arena_size, g_kmem_sram_arena_size / 1024, g_kmem_selftest_status, g_kmem_selftest_steps, g_kmem_selftest_fail_at
+printf "SRAM 池: 总=%u 空闲=%u 已用=%u 峰值=%u 分配次数=%u 失败次数=%u\n", g_pool_sram.size, g_pool_sram.free_bytes, g_pool_sram.used_bytes, g_pool_sram.peak_used, g_pool_sram.alloc_count, g_pool_sram.fail_count
+printf "PSRAM 池: in_use=%d\n", g_pool_psram.in_use
+
+printf "\n===== 3) PSRAM 诊断与写入实验 =====\n"
+printf "诊断 done=%u   SDK 认定的片选=GPIO%u\n", g_psram_diag_done, g_psram_diag_sdk_cs_gpio
+printf "候选脚 0/8/19/47 的 KGD = 0x%02x 0x%02x 0x%02x 0x%02x   (GPIO47 应为 0x5d)\n", g_psram_diag_kgd[0], g_psram_diag_kgd[1], g_psram_diag_kgd[2], g_psram_diag_kgd[3]
+printf "QMI timing=0x%08x clkdiv=%u rxdelay=%u maxsel=%u mindesel=%u\n", g_psram_diag_qmi_timing, g_psram_diag_divisor, g_psram_diag_rxdelay, g_psram_diag_max_select, g_psram_diag_min_deselect
+printf "写入实验: done=%u  挂死步位图=0x%04x  上次挂死步=%d\n", g_wt_done, g_wt_hung_mask, g_wt_resumed_from
+printf "结果矩阵 [组][步] (0没跑 1通过 2挂死 3不符 4重初始化失败):\n"
+set $ci = 0
+while $ci < 3
+  printf "  组%d: %u %u %u %u %u\n", $ci, g_wt_result[$ci][0], g_wt_result[$ci][1], g_wt_result[$ci][2], g_wt_result[$ci][3], g_wt_result[$ci][4]
+  set $ci = $ci + 1
+end
+
+printf "\n===== 4) 进度与故障 =====\n"
+printf "g_probe_marks=%u  (110-117=内核初始化 125=PSRAM诊断 126=写入实验 130=系统调用 140=准备点屏 200+=DVI)\n", g_probe_marks
+printf "CFSR=%08x HFSR=%08x\n", *(unsigned int*)0xE000ED28, *(unsigned int*)0xE000ED2C
+info threads
+
+printf "\n=== GDB_SCRIPT_COMPLETE ===\n"
+monitor resume
+detach
+quit

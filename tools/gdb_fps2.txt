@@ -1,0 +1,8 @@
+set confirm off
+set pagination off
+set height 0
+target extended-remote localhost:3333
+printf "count2=%u marks=%u hb_frames=%u\n", dvi0.dvi_frame_count, g_probe_marks, frank_hdmi_heartbeat_frames
+monitor resume
+detach
+quit

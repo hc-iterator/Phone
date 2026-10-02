@@ -1,0 +1,36 @@
+set confirm off
+set pagination off
+set height 0
+set width 0
+
+target extended-remote localhost:3333
+
+echo \n===== 第 17 轮（第二次）：进度标记 =====\n
+echo "r17_step @0x2001EE58  (1=进应用 2=第1次SVC返回 3=第2次SVC返回 4=走完):"
+x/1xw 0x2001EE58
+echo "r17_svc_entry @0x2001EE5C (处理程序调用次数):"
+x/1xw 0x2001EE5C
+echo "r17_flags @0x2001EE54 (bit0|bit1|bit2 = 7 表示特权操作全部成功):"
+x/1xw 0x2001EE54
+echo "r17_svc_r1_seen @0x2001EE60 (第1次返回值，期望 0x600D):"
+x/1xw 0x2001EE60
+echo "r17_svc_r2_seen @0x2001EE64 (第2次返回值):"
+x/1xw 0x2001EE64
+echo "r17_done @0x2001EE50:"
+x/1xw 0x2001EE50
+echo "r17_ctrl_at_entry @0x2001EE4C:"
+x/1xw 0x2001EE4C
+
+echo \n===== 故障状态 =====\n
+echo "CFSR(0xE000ED28):"
+x/1xw 0xE000ED28
+echo "MMFAR(0xE000ED34):"
+x/1xw 0xE000ED34
+
+echo \n===== crash_info（0xcafebabe = 进过 HardFault）=====\n
+x/1xw 0x20000110
+echo "crash 现场 [r0 r1 r2 r3 r12 lr pc psr]:"
+x/8xw 0x20000120
+
+detach
+quit

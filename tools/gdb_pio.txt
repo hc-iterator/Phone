@@ -1,0 +1,44 @@
+set confirm off
+set pagination off
+set height 0
+set width 0
+
+target extended-remote localhost:3333
+
+echo \n===== PIO0 CTRL @0x50200000 (bit0-3 = SM0-3 ENABLE) =====\n
+x/1xw 0x50200000
+
+echo \n===== PIO0 各状态机地址（SMx_ADDR @0x50200000 + 0xD0/0xE0/0xF0/0x100）=====\n
+echo "总 ADDR @0x502000D0 (低4位各SM使能):"
+x/1xw 0x502000D0
+echo "SM0_ADDR @0x502000E0:"
+x/1xw 0x502000E0
+echo "SM1_ADDR @0x502000E8:"
+x/1xw 0x502000E8
+echo "SM2_ADDR @0x502000F0:"
+x/1xw 0x502000F0
+echo "SM3_ADDR @0x502000F8:"
+x/1xw 0x502000F8
+
+echo \n===== PIO0 SM 配置（SM0_CLKDIV / SM0_EXECCTRL）=====\n
+echo "SM0_CLKDIV @0x502000C8:"
+x/1xw 0x502000C8
+echo "SM0_EXECCTRL @0x502000CC:"
+x/1xw 0x502000CC
+echo "SM0_SHIFTCTRL @0x502000D0+... :"
+x/1xw 0x502000D4
+
+echo \n===== DMA 通道占用情况（DVI 用哪些）=====\n
+echo "DMA 全局 EN @0x50000000+0x520 附近先看几个通道:"
+x/1xw 0x50000000
+echo "DMA 通道0 CTRL_TRIG:"
+x/1xw 0x50000008
+echo "DMA 通道1 CTRL_TRIG:"
+x/1xw 0x50000048
+
+echo \n===== 引擎计数 =====\n
+p frank_hdmi_heartbeat_frames
+p dvi0.dvi_frame_count
+
+detach
+quit

@@ -1,0 +1,30 @@
+set confirm off
+set pagination off
+set height 0
+set width 0
+
+target extended-remote localhost:3333
+
+echo \n== clk_sys 寄存器 ==\n
+echo "CLK_SYS_CTRL(0x4001003C):"
+x/1xw 0x4001003c
+echo "CLK_SYS_DIV(0x40010040):"
+x/1xw 0x40010040
+echo "CLK_SYS_SELECTED(0x40010044):"
+x/1xw 0x40010044
+
+echo \n== PLL_SYS 状态（看倍频是否生效）==\n
+echo "PLL_SYS_CS(0x40050000):"
+x/1xw 0x40050000
+echo "PLL_SYS_PRIM(0x40050008):"
+x/1xw 0x40050008
+
+echo \n== vreg ==\n
+x/1xw 0x40100000
+
+echo \n== 心跳 ==\n
+p frank_hdmi_heartbeat_lines
+p frank_hdmi_heartbeat_frames
+
+detach
+quit

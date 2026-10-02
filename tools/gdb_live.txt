@@ -1,0 +1,20 @@
+set confirm off
+set pagination off
+set height 0
+set width 0
+target extended-remote localhost:3333
+echo \n===== live memory around __sglue / _impure_data =====\n
+x/16xw 0x20005e40
+echo \n===== the stdout field itself =====\n
+printf "&_impure_ptr=0x20005e54  _impure_ptr=0x%08x\n", *(unsigned int*)0x20005e54
+printf "_stdin =0x%08x\n", *(unsigned int*)0x20005e5c
+printf "_stdout=0x%08x   <-- should be 0x20008358\n", *(unsigned int*)0x20005e60
+printf "_stderr=0x%08x\n", *(unsigned int*)0x20005e64
+echo \n===== FILE structs __sf[0..2] =====\n
+x/16xw 0x200082f0
+x/8xw 0x20008358
+x/8xw 0x200083c0
+echo \n===== does 0x40f45f6b appear anywhere near? =====\n
+find /w 0x20005c00, 0x20006000, 0x40f45f6b
+detach
+quit

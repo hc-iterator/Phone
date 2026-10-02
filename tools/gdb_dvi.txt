@@ -1,0 +1,22 @@
+set confirm off
+set pagination off
+set height 0
+set width 0
+target extended-remote localhost:3333
+
+echo \n== Core0（应当停在 dvi_screen_test 的画图循环里）==\n
+info registers pc sp lr
+
+echo \n== 是否 panic / 崩过 ==\n
+x/1xw 0x20000110
+
+echo \n== 故障寄存器 ==\n
+x/1xw 0xE000ED28
+x/1xw 0xE000ED34
+x/1xw 0xE000ED94
+
+echo \n== crash_info 现场 ==\n
+x/10xw 0x20000120
+
+detach
+quit

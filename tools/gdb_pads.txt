@@ -1,0 +1,55 @@
+set confirm off
+set pagination off
+set height 0
+set width 0
+
+target extended-remote localhost:3333
+
+echo \n===== FUNCSEL: GPIO32..39 @IO_BANK0_CTRL =====\n
+echo "偏移 = 0x104 + (n-32)*8"
+echo "GPIO32 (期望 6=PIO0):"
+x/1xw 0x40028104
+echo "GPIO33:"
+x/1xw 0x4002810C
+echo "GPIO34 (期望 6=PIO0):"
+x/1xw 0x40028114
+echo "GPIO35:"
+x/1xw 0x4002811C
+echo "GPIO36 (期望 6=PIO0):"
+x/1xw 0x40028124
+echo "GPIO37:"
+x/1xw 0x4002812C
+echo "GPIO38 (期望 4=PWM_A_11):"
+x/1xw 0x40028134
+echo "GPIO39:"
+x/1xw 0x4002813C
+
+echo \n===== PADS: GPIO32..39 @PADS_BANK0 =====\n
+echo "偏移 = 0x04 + n*4  (期望: IE|SLEWFAST|DRIVE=12mA -> 0x7E/0x3E)"
+echo "GPIO32:"
+x/1xw 0x40038084
+echo "GPIO33:"
+x/1xw 0x40038088
+echo "GPIO34:"
+x/1xw 0x4003808C
+echo "GPIO35:"
+x/1xw 0x40038090
+echo "GPIO36:"
+x/1xw 0x40038094
+echo "GPIO37:"
+x/1xw 0x40038098
+echo "GPIO38:"
+x/1xw 0x4003809C
+echo "GPIO39:"
+x/1xw 0x400380A0
+
+echo \n===== 对照：一个确定正常的引脚 GPIO25 =====\n
+echo "PADS GPIO25:"
+x/1xw 0x40038068
+
+echo \n===== PADS ISOLATION 寄存器 =====\n
+echo "PADS_BANK0_ISOLATION @0x40038000+... :"
+x/1xw 0x40038F00
+
+detach
+quit

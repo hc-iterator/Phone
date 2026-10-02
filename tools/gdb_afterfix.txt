@@ -1,0 +1,47 @@
+# tools\gdb_afterfix.txt —— 补丁后的现场
+#
+# 三个问题：
+#   1. 空槽到底被填上了没有？（看 dma_list_active 的 l0[4..5] / l1[2..6]）
+#   2. g_dvi_tcr_timeouts 有没有被记？（有 ⇒ 还是"跑过头踩空槽"这一类）
+#   3. Core1 现在停在哪？
+#
+# 纪律：GDB 批处理模式下一条命令报错，后面全不执行。
+#   ⇒ 不 p 宏、不用 printf --、不在双引号里嵌双引号、最要紧的放最前。
+#   ⇒ dma_debug_hw/dma_hw 是宏，用硬地址：0x50000000 + n*0x40，调试区 0x50000800 + n*0x40
+
+set confirm off
+set pagination off
+set height 0
+target extended-remote localhost:3333
+monitor halt
+
+printf "\n===== 1) Core1 停在哪 =====\n"
+info threads
+thread apply all bt
+
+printf "\n===== 2) 补丁探针 =====\n"
+printf "g_dvi_tcr_timeouts = %u   <-- 非 0 说明还是踩过空槽\n", g_dvi_tcr_timeouts
+printf "frame_count=%u v_ctr=%u v_state=%u late=%u\n", dvi0.dvi_frame_count, dvi0.timing_state.v_ctr, dvi0.timing_state.v_state, dvi0.late_scanline_ctr
+
+printf "\n===== 3) dma_list_active 原始内存（验证空槽是否已被填满）=====\n"
+x/72xw &dvi0.dma_list_active
+
+printf "\n===== 4) 全部 16 个 DMA 通道 =====\n"
+set $i = 0
+while $i < 16
+  printf "ch%02d CTRL=%08x TRANS=%08x READ=%08x WRITE=%08x | dbg_tcr=%08x dbg_ctdreq=%08x\n", $i, *(unsigned int*)(0x50000000+$i*0x40+0x0c), *(unsigned int*)(0x50000000+$i*0x40+0x08), *(unsigned int*)(0x50000000+$i*0x40+0x00), *(unsigned int*)(0x50000000+$i*0x40+0x04), *(unsigned int*)(0x50000800+$i*0x40+0x04), *(unsigned int*)(0x50000800+$i*0x40+0x00)
+  set $i = $i + 1
+end
+
+printf "\n===== 5) 队列与中断 =====\n"
+p dvi0.q_tmds_free
+p dvi0.q_tmds_valid
+p dvi0.q_colour_free
+p dvi0.q_colour_valid
+p/x dvi0.tmds_buf_release[0]
+p/x dvi0.tmds_buf_release[1]
+printf "INTR=%08x INTE1=%08x INTS1=%08x\n", *(unsigned int*)0x50000400, *(unsigned int*)0x50000414, *(unsigned int*)0x5000041c
+
+monitor resume
+detach
+quit

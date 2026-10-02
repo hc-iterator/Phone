@@ -1,0 +1,23 @@
+set confirm off
+set pagination off
+set height 0
+set print frame-arguments none
+target extended-remote localhost:3333
+thread 2
+echo \n===== DMA lanes: what the wait is comparing =====\n
+set $c0 = dvi0.dma_cfg[0].chan_data
+set $c1 = dvi0.dma_cfg[1].chan_data
+set $c2 = dvi0.dma_cfg[2].chan_data
+printf "channels = %u %u %u      expected dbg_tcr = %u\n", $c0, $c1, $c2, dvi0.timing->h_active_pixels / 2
+printf "dbg_tcr  = %u %u %u\n", *(unsigned int*)(0x50000804 + $c0*0x40), *(unsigned int*)(0x50000804 + $c1*0x40), *(unsigned int*)(0x50000804 + $c2*0x40)
+printf "CTRL     = 0x%08x 0x%08x 0x%08x\n", *(unsigned int*)(0x5000000c + $c0*0x40), *(unsigned int*)(0x5000000c + $c1*0x40), *(unsigned int*)(0x5000000c + $c2*0x40)
+printf "TRANS_CT = %u %u %u\n", *(unsigned int*)(0x50000008 + $c0*0x40), *(unsigned int*)(0x50000008 + $c1*0x40), *(unsigned int*)(0x50000008 + $c2*0x40)
+printf "ctdreq   = %u %u %u\n", *(unsigned int*)(0x50000800 + $c0*0x40), *(unsigned int*)(0x50000800 + $c1*0x40), *(unsigned int*)(0x50000800 + $c2*0x40)
+echo \n===== which lane index is the loop stuck on? =====\n
+printf "loop index i = %d\n", i
+echo \n===== engine state =====\n
+printf "h_active=%u v_ctr=%u late_ctr=%d\n", dvi0.timing->h_active_pixels, dvi0.timing_state.v_ctr, dvi0.late_scanline_ctr
+printf "queues tmds_valid=%d tmds_free=%d colour_valid=%d colour_free=%d\n", dvi0.q_tmds_valid, dvi0.q_tmds_free, dvi0.q_colour_valid, dvi0.q_colour_free
+printf "heartbeat frames=%u lines=%u   dvi_frame_count=%u\n", frank_hdmi_heartbeat_frames, frank_hdmi_heartbeat_lines, dvi0.dvi_frame_count
+detach
+quit

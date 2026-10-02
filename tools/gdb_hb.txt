@@ -1,0 +1,23 @@
+set confirm off
+set pagination off
+set height 0
+set width 0
+
+target extended-remote localhost:3333
+
+echo \n== 心跳帧计数（DVI 引擎每帧 +1）==\n
+p frank_hdmi_heartbeat_frames
+
+echo \n== dvi0 里的帧计数与"迟到"计数 ==\n
+p dvi0.dvi_frame_count
+p dvi0.late_scanline_ctr
+p dvi0.dvi_started
+
+echo \n== 再读一次心跳（确认在增长）==\n
+p frank_hdmi_heartbeat_frames
+
+echo \n== 两核状态 ==\n
+info threads
+
+detach
+quit

@@ -1,0 +1,32 @@
+set confirm off
+set pagination off
+set height 0
+set width 0
+
+target extended-remote localhost:3333
+
+echo \n== PWM 全局使能 PWM_EN @0x400A80F0（bit11 应置位）==\n
+x/1xw 0x400A80F0
+
+echo \n== PWM slice 11 寄存器 ==\n
+echo "CH11_CSR @0x400A80DC:"
+x/1xw 0x400A80DC
+echo "CH11_DIV @0x400A80E0:"
+x/1xw 0x400A80E0
+echo "CH11_CTR @0x400A80E4:"
+x/1xw 0x400A80E4
+echo "CH11_CC  @0x400A80E8:"
+x/1xw 0x400A80E8
+echo "CH11_TOP @0x400A80EC:"
+x/1xw 0x400A80EC
+
+echo \n== GPIO38 的 PADS 寄存器（看输出使能/驱动强度）==\n
+echo "PADS_BANK0_GPIO38 @0x40038000+4+38*4:"
+x/1xw 0x4003809C
+
+echo \n== DVI 引擎计数 ==\n
+p frank_hdmi_heartbeat_frames
+p dvi0.dvi_frame_count
+
+detach
+quit

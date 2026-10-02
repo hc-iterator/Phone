@@ -1,0 +1,37 @@
+set confirm off
+set pagination off
+set height 0
+set width 0
+
+target extended-remote localhost:3333
+
+echo \n===== 系统调用链路 =====\n
+echo "g_sys_calls @0x2001E5E8 (返回前应已清零，看最后值):"
+x/1xw 0x2001E5E8
+echo "g_sys_denied:"
+x/1xw 0x2001E5F0
+echo "g_sys_done_magic @0x2001E5F4 (0x5AFE0001 = 演示走完):"
+x/1xw 0x2001E5F4
+
+echo \n===== 演示之后的特权态（关键：SYS_EXIT 是否真的生效）=====\n
+echo "g_sys_last_no:"
+x/1xw 0x2001E5FC
+echo "读 CONTROL 实际值（0 = 特权态，1 = 非特权态）:"
+monitor reg control
+
+echo \n===== DVI 引擎（在演示之后启动，若它崩了这里就是 0）=====\n
+p frank_hdmi_heartbeat_frames
+p dvi0.dvi_frame_count
+
+echo \n===== 故障状态 =====\n
+echo "CFSR(0xE000ED28) 期望 0:"
+x/1xw 0xE000ED28
+
+echo \n===== crash_info（0xCAFEBABE = 进过 HardFault）=====\n
+x/1xw 0x20000110
+
+echo \n===== Core0 在哪 =====\n
+info registers pc
+
+detach
+quit

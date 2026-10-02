@@ -1,0 +1,20 @@
+set confirm off
+set pagination off
+set height 0
+set print frame-arguments none
+target extended-remote localhost:3333
+echo \n===== threads =====\n
+info threads
+echo \n===== core0 =====\n
+thread 1
+printf "core0 pc=0x%08x lr=0x%08x sp=0x%08x\n", $pc, $lr, $sp
+echo \n===== core1 =====\n
+thread 2
+printf "core1 pc=0x%08x lr=0x%08x sp=0x%08x\n", $pc, $lr, $sp
+bt
+echo \n===== crash record =====\n
+p/x crash_info_ram.cy_faultFrame
+printf "heartbeat frames=%u lines=%u\n", frank_hdmi_heartbeat_frames, frank_hdmi_heartbeat_lines
+printf "core0 frames=%u\n", dvi0.dvi_frame_count
+detach
+quit

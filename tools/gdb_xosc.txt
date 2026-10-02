@@ -1,0 +1,35 @@
+set confirm off
+set pagination off
+set height 0
+set width 0
+
+target extended-remote localhost:3333
+
+echo \n===== XOSC 实际频率（MHz）=====\n
+p (unsigned)(xosc_hw->freq / 1000000)
+
+echo \n===== clk_sys 源与分频 =====\n
+echo "CLK_SYS_CTRL(0x4001003C) 期望 bit0=1(PLL_SYS), bit5=0:"
+x/1xw 0x4001003C
+echo "CLK_SYS_DIV(0x40010040) 期望 0x00010000 (整数1,小数0):"
+x/1xw 0x40010040
+
+echo \n===== PLL_SYS =====\n
+echo "CS(0x40050000) bit31=LOCK bit0=EN:"
+x/1xw 0x40050000
+echo "PWR(0x40050004):"
+x/1xw 0x40050004
+echo "FBDIV_INT(0x40050008) 期望 0x7E=126:"
+x/1xw 0x40050008
+echo "PRIM(0x4005000C) 后置分频:"
+x/1xw 0x4005000C
+
+echo \n===== clk_hstx（库不用，但看有没有被设）=====\n
+x/1xw 0x40010054
+
+echo \n===== DVI 引擎仍在产帧吗 =====\n
+p frank_hdmi_heartbeat_frames
+p dvi0.dvi_frame_count
+
+detach
+quit

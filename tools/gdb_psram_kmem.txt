@@ -1,0 +1,42 @@
+# tools\gdb_psram_kmem.txt —— 读 PSRAM 诊断 + 内核内存管理器自检的结论（第 2 版）
+#
+# 第 1 版教训：不要在 GDB 表达式里【调用目标上的函数】
+#   （我写了 psram_is_available()，GDB 真的去目标上执行它，
+#     结果撞上已经存在的 HardFault，整个脚本被打断）。
+#   ⇒ 只读纯内存变量，全是 SWD 直接可读的。
+#
+# 纪律：GDB 批处理模式下一旦有命令报错，后面全部不执行。
+#   ⇒ 不 p 宏、不用 printf --、不在双引号里嵌双引号、最要紧的放最前。
+
+set confirm off
+set pagination off
+set height 0
+target extended-remote localhost:3333
+monitor halt
+
+printf "\n===== 1) PSRAM 诊断（只读变量，不调用函数）=====\n"
+printf "done=%u  SDK 认定的片选脚=GPIO%u\n", g_psram_diag_done, g_psram_diag_sdk_cs_gpio
+printf "QMI M1 timing=0x%08x  clkdiv=%u rxdelay=%u max_sel=%u min_desel=%u\n", g_psram_diag_qmi_timing, g_psram_diag_divisor, g_psram_diag_rxdelay, g_psram_diag_max_select, g_psram_diag_min_deselect
+set $i = 0
+while $i < 4
+  printf "  候选脚 #%d = GPIO%-2u  KGD=0x%02x EID=0x%02x 容量=%u 字节  raw=0x%08x\n", $i, g_psram_diag_pin[$i], g_psram_diag_kgd[$i], g_psram_diag_eid[$i], g_psram_diag_size[$i], g_psram_diag_raw[$i]
+  set $i = $i + 1
+end
+
+printf "\n===== 2) 内核内存管理器 =====\n"
+printf "SRAM 竞技场实际大小 = %u 字节 (%u KiB)\n", g_kmem_sram_arena_size, g_kmem_sram_arena_size / 1024
+printf "自检状态=%u  步数=%u  首个失败步=%u\n", g_kmem_selftest_status, g_kmem_selftest_steps, g_kmem_selftest_fail_at
+printf "SRAM 池: in_use=%d 总=%u 空闲=%u 已用=%u 峰值=%u 分配次数=%u 失败次数=%u max_order=%u\n", g_pool_sram.in_use, g_pool_sram.size, g_pool_sram.free_bytes, g_pool_sram.used_bytes, g_pool_sram.peak_used, g_pool_sram.alloc_count, g_pool_sram.fail_count, g_pool_sram.max_order
+printf "SRAM 池基址=%p\n", g_pool_sram.base
+printf "PSRAM 池: in_use=%d\n", g_pool_psram.in_use
+printf "PSRAM 标志: detected=%u size=%u ok=%u\n", g_kmem_psram_detected, g_kmem_psram_size, g_kmem_psram_ok
+
+printf "\n===== 3) 崩溃现场与进度 =====\n"
+printf "g_probe_marks=%u  (110/115/116=内核内存 125=PSRAM诊断后 130=系统调用后 140=准备点屏 200+=DVI)\n", g_probe_marks
+printf "CFSR=%08x HFSR=%08x MMFAR=%08x BFAR=%08x SHCSR=%08x\n", *(unsigned int*)0xE000ED28, *(unsigned int*)0xE000ED2C, *(unsigned int*)0xE000ED34, *(unsigned int*)0xE000ED38, *(unsigned int*)0xE000ED24
+p/x crash_info_ram.cy_faultFrame
+info threads
+
+monitor resume
+detach
+quit

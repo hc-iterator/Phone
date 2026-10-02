@@ -1,0 +1,41 @@
+set confirm off
+set pagination off
+set height 0
+set width 0
+
+target extended-remote localhost:3333
+
+echo \n== ???? ==\n
+p frank_hdmi_heartbeat_frames
+p frank_hdmi_heartbeat_lines
+p dvi0.dvi_frame_count
+p dvi0.late_scanline_ctr
+
+echo \n== ?????????????????? + ?????==\n
+echo "??????120??160??:"
+x/1xb (g_fb + 120*320 + 160)
+echo "?0??4?????????????:"
+x/4xb g_fb
+
+echo \n== ?? ==\n
+x/1xw 0x40010040
+x/1xw 0x40050008
+
+echo \n== PIO / PWM ==\n
+x/1xw 0x50200000
+x/1xw 0x400A80F0
+
+echo \n== ?? FUNCSEL ==\n
+x/1xw 0x40028104
+x/1xw 0x40028134
+
+echo \n== ???OUTOVER ? [9:8]?invert=0 ?? 0?==\n
+echo "GPIO32 CTRL:"
+x/1xw 0x40028104
+
+echo \n== ?? ==\n
+info threads
+
+detach
+quit
+

@@ -1,0 +1,11 @@
+set confirm off
+set pagination off
+set height 0
+set width 0
+target extended-remote localhost:3333
+echo \n== crash_info [r0 r1 r2 r3 r12 lr pc psr] @0x20000120 ==\n
+x/8xw 0x20000120
+echo \n== Core0 PC ==\n
+info registers pc sp lr
+detach
+quit

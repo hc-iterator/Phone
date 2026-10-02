@@ -1,0 +1,27 @@
+set confirm off
+set pagination off
+set height 0
+set width 0
+
+target extended-remote localhost:3333
+
+echo \n== 实际系统时钟（Hz）==\n
+p (unsigned)clock_get_hz(clk_sys)
+
+echo \n== clk_sys 相关寄存器 ==\n
+x/1xw 0x4001003c
+x/1xw 0x40010040
+x/1xw 0x40010044
+
+echo \n== 心跳再读（看是否在长）==\n
+p frank_hdmi_heartbeat_lines
+
+echo \n== vreg 电压设置 ==\n
+x/1xw 0x40100000
+p (unsigned)vreg_get_voltage()
+
+echo \n== 两核在哪 ==\n
+info threads
+
+detach
+quit

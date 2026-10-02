@@ -1,0 +1,33 @@
+set confirm off
+set pagination off
+set height 0
+set width 0
+target extended-remote localhost:3333
+
+echo \n===== crash_info_ram (symbolic) =====\n
+p crash_info_ram
+echo \n===== faulting frame =====\n
+p/x crash_info_ram.cy_faultFrame
+
+echo \n===== raw around crash record =====\n
+x/20xw 0x20000110
+echo \n===== DBG_FAULT_REGS @0x200000F0 =====\n
+x/8xw 0x200000f0
+
+echo \n===== probes =====\n
+printf "marks=%u svc_n=%u\n", g_probe_marks, g_probe_svc_n
+printf "ctrl = %08x %08x %08x %08x %08x\n", g_probe_ctrl[0],g_probe_ctrl[1],g_probe_ctrl[2],g_probe_ctrl[3],g_probe_ctrl[4]
+printf "sys: calls=%u denied=%u last_no=%u ctrl_seen=%08x magic=%08x\n", g_sys_calls, g_sys_denied, g_sys_last_no, g_sys_ctrl_seen, g_sys_done_magic
+printf "PC=%08x LR=%08x SP=%08x\n", $pc, $lr, $sp
+
+echo \n===== MPU state (is the MPU on at all?) =====\n
+printf "MPU_TYPE=0x%08x MPU_CTRL=0x%08x CCR=0x%08x\n", *(unsigned int*)0xE000ED90, *(unsigned int*)0xE000ED94, *(unsigned int*)0xE000ED14
+set $i=0
+while $i < 8
+  set *(unsigned int*)0xE000ED98 = $i
+  printf "region %d: RBAR=0x%08x RLAR=0x%08x\n", $i, *(unsigned int*)0xE000ED9C, *(unsigned int*)0xE000EDA0
+  set $i = $i + 1
+end
+
+detach
+quit

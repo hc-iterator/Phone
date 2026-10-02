@@ -1,0 +1,10 @@
+set confirm off
+set pagination off
+set height 0
+target extended-remote localhost:3333
+printf "TIMERAWL=%u  TIMERAWH=%u  (0x400b0028/2c)\n", *(unsigned int*)0x400b0028, *(unsigned int*)0x400b002c
+printf "frames=%u pc=0x%08x\n", dvi0.dvi_frame_count, $pc
+printf "clk_sys=%u clk_ref=%u\n", *(unsigned int*)0x4001003c, *(unsigned int*)0x40010030
+monitor resume
+detach
+quit

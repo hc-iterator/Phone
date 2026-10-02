@@ -1,0 +1,19 @@
+set confirm off
+set pagination off
+set height 0
+set width 0
+target extended-remote localhost:3333
+
+echo \n== 切到 Core1 ==\n
+thread 2
+info registers pc sp lr r0 r1 r2 r3
+
+echo \n== Core1 栈 ==\n
+x/16xw $sp
+
+echo \n== 切回 Core0 ==\n
+thread 1
+info registers pc
+
+detach
+quit

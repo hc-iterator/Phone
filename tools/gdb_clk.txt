@@ -1,0 +1,19 @@
+set confirm off
+set pagination off
+set height 0
+set width 0
+target extended-remote localhost:3333
+echo \n== CLK_SYS_CTRL @0x4001003C ? CLK_SYS_DIV @0x40010040 ==\n
+x/2xw 0x4001003C
+echo \n== CLK_HSTX_CTRL/DIV?????? HSTX?????==\n
+x/2xw 0x40010054
+echo \n== VREG ??????????????==\n
+x/1xw 0x40100000
+echo \n== Core0 ==\n
+info registers pc
+echo \n== Core1?DVI ?????????==\n
+thread 2
+info registers pc
+thread 1
+detach
+quit

@@ -1,0 +1,11 @@
+set confirm off
+set pagination off
+set height 0
+target extended-remote localhost:3333
+printf "PRIMASK=0x%02x  (bit0=1 => interrupts globally disabled)\n", $primask
+printf "BASEPRI=0x%02x FAULTMASK=0x%02x CONTROL=0x%02x\n", $basepri, $faultmask, $control
+printf "frames=%u marks=%u pc=0x%08x\n", dvi0.dvi_frame_count, g_probe_marks, $pc
+printf "NVIC ISER0=0x%08x ISER1=0x%08x  (enabled IRQs)\n", *(unsigned int*)0xE000E100, *(unsigned int*)0xE000E104
+printf "TIMER INTE=0x%08x  TIMER INTS=0x%08x\n", *(unsigned int*)0x400b0038, *(unsigned int*)0x400b003c
+detach
+quit

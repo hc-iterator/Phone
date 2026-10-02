@@ -1,0 +1,36 @@
+# tools\gdb_wt.txt —— 读 PSRAM 连续写入实验的结果
+#
+# 纪律：不 p 宏、不用 printf --、不在双引号里嵌双引号、只读纯变量不调函数、
+#       最要紧的放最前（GDB 批处理下一旦报错，后面全不执行）。
+
+set confirm off
+set pagination off
+set height 0
+target extended-remote localhost:3333
+monitor halt
+
+printf "\n===== PSRAM 连续写入实验结果 =====\n"
+printf "实验完成=%u  上次挂死步=%d (0xFFFFFFFF=没发生过)  挂死位图=0x%04x  参数还原成功=%u\n", g_wt_done, g_wt_resumed_from, g_wt_hung_mask, g_wt_end_config_ok
+printf "\n配色: 0=没跑 1=通过 2=挂死 3=数据不符 4=重初始化失败\n"
+printf "        长度    A基线75MHz   B短突发      C降频37.5MHz\n"
+set $si = 0
+while $si < 5
+  printf "    步%1d  ", $si
+  set $ci = 0
+  while $ci < 3
+    printf " %10u(%u)", g_wt_result[$ci][$si], g_wt_us[$ci][$si]
+    set $ci = $ci + 1
+  end
+  printf "\n"
+  set $si = $si + 1
+end
+
+printf "\n===== PSRAM 诊断（顺带重看）=====\n"
+printf "done=%u SDK认定的片选=GPIO%u timing=0x%08x clkdiv=%u rxdelay=%u maxsel=%u mindesel=%u\n", g_psram_diag_done, g_psram_diag_sdk_cs_gpio, g_psram_diag_qmi_timing, g_psram_diag_divisor, g_psram_diag_rxdelay, g_psram_diag_max_select, g_psram_diag_min_deselect
+
+printf "\n===== 进度 =====\n"
+printf "g_probe_marks=%u  (115/116=内核内存 125=PSRAM诊断 126=写入实验后 130+=后续)\n", g_probe_marks
+
+monitor resume
+detach
+quit

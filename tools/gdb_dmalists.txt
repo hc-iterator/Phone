@@ -1,0 +1,59 @@
+# tools\gdb_dmalists.txt —— 把 DMA 控制块表的内存打出来
+#
+# 目的：三个数据通道的 CTRL 被写成了 0x00000000（整个寄存器全零），
+#       说明控制通道装进去的是一个"全零控制块"。
+#       这个脚本把 dvi0 里各张控制块表的地址和原始内容都打出来，
+#       看看到底哪一块是零、控制通道的读指针又落在哪。
+#
+# 铁律（第 1 版就是死在这上面）：
+#   ⚠️ GDB 批处理模式下一旦有命令报错，【后面全部不执行】。
+#   ⚠️ 所以：不许 p 宏（如 DVI_SYNC_LANE_CHUNKS_WITH_AUDIO），
+#            不许 printf --，不许双引号里嵌双引号。
+#   ⚠️ 最要紧的放最前面。
+
+set confirm off
+set pagination off
+set height 0
+target extended-remote localhost:3333
+monitor halt
+
+printf "\n===== 1) 各控制块表的地址（用来验证结构体布局）=====\n"
+p/x &dvi0
+p/x &dvi0.dma_list_active
+p/x &dvi0.dma_list_active.l0
+p/x &dvi0.dma_list_active.l1
+p/x &dvi0.dma_list_active.l2
+p/x &dvi0.dma_list_active_blank
+p/x &dvi0.dma_list_error
+p/x &dvi0.dma_list_vblank_sync
+p/x &dvi0.dma_list_vblank_nosync
+
+printf "\n===== 2) TMDS 缓冲释放与四个队列 =====\n"
+p/x dvi0.tmds_buf_release[0]
+p/x dvi0.tmds_buf_release[1]
+p dvi0.q_tmds_free
+p dvi0.q_tmds_valid
+p dvi0.q_colour_free
+p dvi0.q_colour_valid
+
+printf "\n===== 3) dma_list_active 原始内存 =====\n"
+x/80xw &dvi0.dma_list_active
+
+printf "\n===== 4) dma_list_active_blank 原始内存 =====\n"
+x/80xw &dvi0.dma_list_active_blank
+
+printf "\n===== 5) 全部 16 个 DMA 通道 =====\n"
+set $i = 0
+while $i < 16
+  printf "ch%02d CTRL=%08x TRANS=%08x READ=%08x WRITE=%08x | dbg_tcr=%08x dbg_ctdreq=%08x\n", $i, *(unsigned int*)(0x50000000+$i*0x40+0x0c), *(unsigned int*)(0x50000000+$i*0x40+0x08), *(unsigned int*)(0x50000000+$i*0x40+0x00), *(unsigned int*)(0x50000000+$i*0x40+0x04), *(unsigned int*)(0x50000800+$i*0x40+0x04), *(unsigned int*)(0x50000800+$i*0x40+0x00)
+  set $i = $i + 1
+end
+
+printf "\n===== 6) DVI 状态 / 中断 / PIO =====\n"
+printf "frame_count=%u v_ctr=%u v_state=%u late=%u\n", dvi0.dvi_frame_count, dvi0.timing_state.v_ctr, dvi0.timing_state.v_state, dvi0.late_scanline_ctr
+printf "INTR=%08x INTE1=%08x INTS1=%08x\n", *(unsigned int*)0x50000400, *(unsigned int*)0x50000414, *(unsigned int*)0x5000041c
+printf "PIO0 CTRL=%08x FDEBUG=%08x\n", *(unsigned int*)0x50200000, *(unsigned int*)0x50200008
+
+monitor resume
+detach
+quit

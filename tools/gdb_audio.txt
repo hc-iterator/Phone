@@ -1,0 +1,33 @@
+set confirm off
+set pagination off
+set height 0
+set width 0
+
+target extended-remote localhost:3333
+
+echo \n===== 音频环形缓冲状态 =====\n
+echo "size:"
+p dvi0.audio_ring.size
+echo "read (DVI 中断消费位置):"
+p dvi0.audio_ring.read
+echo "write (Core0 生产位置):"
+p dvi0.audio_ring.write
+
+echo \n===== 音频帧计数（库内部）=====\n
+p dvi0.audio_frame_count
+
+echo \n===== 屏幕/引擎计数 =====\n
+p frank_hdmi_heartbeat_frames
+p dvi0.dvi_frame_count
+
+echo \n===== 相位累加器（确认在生成音调）=====\n
+p g_phase
+
+echo \n===== 屏幕内容抽查：帧缓冲若干行 =====\n
+echo "g_fb 第0行前8像素（彩条区，应为 1=白）:"
+x/8xb g_fb
+echo "g_fb 第200行前8像素（深蓝底，应为 9=NAVY）:"
+x/8xb (g_fb + 200*320)
+
+detach
+quit

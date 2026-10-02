@@ -1,0 +1,8 @@
+set confirm off
+set pagination off
+set height 0
+target extended-remote localhost:3333
+printf "B frames=%u marks=%u pc=0x%08x\n", dvi0.dvi_frame_count, g_probe_marks, $pc
+monitor resume
+detach
+quit

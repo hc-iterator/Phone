@@ -1,0 +1,8 @@
+set confirm off
+set pagination off
+set height 0
+target extended-remote localhost:3333
+printf "SAMPLE core0_loop=%u core1_frames=%u marks=%u\n", g_dvi_loop_frames, dvi0.dvi_frame_count, g_probe_marks
+monitor resume
+detach
+quit
