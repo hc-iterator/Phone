@@ -1,0 +1,107 @@
+;
+; PIO program that converts a stream of pre-encoded TMDS symbols into a
+; 1-bit-per-cycle differential serial output, two GPIOs wide. One
+; state-machine instance per lane (R/G/B).
+;
+; (c) 2026 Mikhail Matveev <xtreme@rh1.tech>, https://rh1.tech
+;
+; SPDX-License-Identifier: BSD-3-Clause
+;
+; Based on libdvi by Luke Wren and contributors
+; (https://github.com/Wren6991/PicoDVI).
+;
+; Copyright (c) 2021 Luke Wren and contributors.
+;
+.program dvi_serialiser
+.side_set 2
+.origin 0
+
+; Single-ended -> differential serial
+
+	out pc, 1    side 0b10
+	out pc, 1    side 0b01
+
+.program dvi_serialiser_debug
+.side_set 1 opt
+
+; The debug variant behaves as a UART with 1 start bit, 10 data bits, 1 stop
+; bit, and 5/6ths the data throughput of the TMDS version.
+
+	pull ifempty  side 1 ; Extend stop bit with FIFO stall
+	nop           side 0
+	out pins, 1          ; Unrolled because we require 1 bit / clk
+	out pins, 1
+	out pins, 1
+	out pins, 1
+	out pins, 1
+	out pins, 1
+	out pins, 1
+	out pins, 1
+	out pins, 1
+	out pins, 1
+	
+% c-sdk {
+#include "frank_dvi_config.h"
+
+static inline void dvi_serialiser_program_init(PIO pio, uint sm, uint offset, uint data_pins, bool debug) {
+    pio_gpio_init(pio, data_pins);
+    pio_gpio_init(pio, data_pins + 1);
+
+    pio_sm_config c;
+    if (debug) {
+        c = dvi_serialiser_debug_program_get_default_config(offset);
+    }
+    else {
+        c = dvi_serialiser_program_get_default_config(offset);
+    }
+    sm_config_set_sideset_pins(&c, data_pins);
+    /* ★★★ 2026-10-02 根因修复：原来 SET_COUNT=0 ⇒ 下面那句 pio_sm_set_pindirs_with_mask
+     * 【什么都没写】⇒ DVI 数据脚一直是【输入】⇒ side-set 写上去也没用 ⇒ 永远没信号。
+     * 这里给 SM 配上 SET 引脚（本程序不用 set 指令，纯粹为了让 pindirs 能写）。 */
+    sm_config_set_set_pins(&c, data_pins, 2);
+    if (debug)
+	    sm_config_set_out_pins(&c, data_pins, 1);
+    sm_config_set_out_shift(&c, true, !debug, 10 * DVI_SYMBOLS_PER_WORD);
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
+    /* PATCH (frank-hdmi-sound): when sys_clock runs at an integer multiple
+     * of the TMDS bit clock (e.g. 504 MHz CPU vs 252 MHz TMDS), apply
+     * the matching clkdiv to the serialiser SM so TMDS comes out at
+     * spec rate without forcing the CPU down to TMDS speed. */
+#ifdef DVI_SM_CLKDIV
+    sm_config_set_clkdiv(&c, DVI_SM_CLKDIV);
+#endif
+
+
+    pio_sm_init(pio, sm, offset, &c);
+
+
+    /* ★★★ 2026-10-02 根因修复：原来这里（init 之前）用的是
+
+
+     *     pio_sm_set_pins_with_mask(pio, sm, 2u << data_pins, 3u << data_pins)
+
+
+     *     pio_sm_set_pindirs_with_mask(pio, sm, ~0u, 3u << data_pins)
+
+
+     * 而 data_pins 是 32/34/36 ⇒ 【3u << 32/34/36 是 32 位移位溢出 ⇒ 掩码=0】
+
+
+     * ⇒ 这两句其实什么都没做 ⇒ DVI 数据脚的方向从没被设成输出、一直是输入
+
+
+     * ⇒ side-set 写上去也出不去 ⇒ 【引脚上永远没有信号】。
+
+
+     * 换成 64 位安全的 API（pio_sm_set_consecutive_pindirs 内部按 GPIO 处理，不会溢出）。 */
+
+
+    pio_sm_set_consecutive_pindirs(pio, sm, data_pins, 2, true);
+
+
+    pio_sm_set_pins_with_mask64(pio, sm, 2ull << data_pins, 3ull << data_pins);
+
+    /* ★ 配上 SET 引脚之后，这里才真正把两根数据脚设成输出 */
+    pio_sm_set_enabled(pio, sm, false);
+}
+%}
