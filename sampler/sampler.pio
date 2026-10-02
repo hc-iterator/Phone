@@ -1,0 +1,7 @@
+; TMDS 采样探针：把 8 根线整拍锁存
+;
+; 原理：`in pins, 8` 每条指令锁存一次（1 个时钟 1 个采样）。
+;       配合 autopush=32bit ⇒ 每 4 个采样推出一个 32 位字给 DMA。
+;       引脚窗口用 pio_set_gpio_base() 把 IN 基址挪到 32（RP2350B 的 DVI 引脚 32..39）。
+.program sampler
+    in pins, 8
