@@ -117,6 +117,11 @@ static volatile uint32_t g_core0_heartbeat;   // Core0 活着就一直在涨；�
 static volatile uint32_t g_spin;              // 自旋计数器（volatile 防止循环被优化掉）
 static volatile uint32_t g_flash_release;     // Core1 写 1 -> 放 Core0 出停车位
 
+// 只有 1ms 唤醒闹钟真的建起来了，Core0 才敢用 __wfi()。
+// 为什么这么小心：M0+ 的 WFI 必须有中断才会醒，万一 alarm pool 满了导致闹钟没建上，
+// WFI 就成了"永远醒不来的挂死" —— 那正是我们要消灭的东西，不能自己制造一个。
+static volatile bool g_wfi_ok;
+
 static uint32_t g_chip_flash_size;            // 由 JEDEC ID 推出来的芯片容量（0 = 未知）
 static uint32_t g_jedec_id;                   // 原始 24 位 ID
 
@@ -304,7 +309,7 @@ static void core0_pause_loop(void) {
             }
             // 其它消息忽略
         }
-        __wfi();
+        if (g_wfi_ok) __wfi();   // 同上：闹钟没建好就退化成忙等，绝不睡死
     }
     g_core0_state = CORE0_RUNNING;
 }
@@ -336,7 +341,7 @@ static void __attribute__((noreturn)) core0_idle_loop(void) {
             }
         }
         g_core0_heartbeat++;
-        __wfi();   // 1ms 心跳闹钟保证醒得来（这也是为什么必须有那个闹钟）
+        if (g_wfi_ok) __wfi();   // 1ms 心跳闹钟保证醒得来（这也是为什么必须有那个闹钟）
     }
 }
 
@@ -876,7 +881,7 @@ static void dispatch(char *line) {
     uint32_t a = 0, b = 0;
 
     switch (c) {
-        case '?': case '/':  print_help();  return;
+        case '?':  print_help();  return;
 
         // 读：只认小写 r（大写 R 是重启）
         case 'r':
@@ -1020,9 +1025,10 @@ int main(void) {
         g_chip_flash_size = jedec_cap_to_size(rx[3]);
     }
 
-    // Core0 的 1ms 唤醒源：没有它 __wfi() 在 M0+ 上可能永远醒不来
+    // Core0 的 1ms 唤醒源：没有它 __wfi() 在 M0+ 上可能永远醒不来。
+    // 建不上就退化成忙等（g_wfi_ok 为 false），宁可费电也绝不睡死。
     static repeating_timer_t tick;
-    add_repeating_timer_ms(1, core0_tick_cb, NULL, &tick);
+    g_wfi_ok = add_repeating_timer_ms(1, core0_tick_cb, NULL, &tick);
 
     // 把 USB 的两条中断从本核摘掉，Core1 起来后再挂到它自己头上
     usb_service_disable_here();
