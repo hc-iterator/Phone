@@ -265,3 +265,19 @@ target_link_libraries(sampler
     hardware_clocks
     hardware_vreg)
 pico_add_extra_outputs(sampler)
+
+# ============================================================================
+# 引脚连通性测试固件（焊接后查连锡，避免带短路接信号上电）
+#   不需要接任何外部信号：只检查 GPIO 8..15 之间/对 GND/对 3V3 是否相通
+# ============================================================================
+add_executable(pin_test src/pin_test.c)
+pico_set_program_name(pin_test "pin_test")
+pico_set_program_version(pin_test "0.1")
+pico_enable_stdio_usb(pin_test 1)
+pico_enable_stdio_uart(pin_test 1)
+target_compile_definitions(pin_test PRIVATE
+    PIN_TEST_BASE=8        # 被测引脚起始 GPIO（按你的引出脚改）
+    PIN_TEST_COUNT=8       # 被测引脚个数
+)
+target_link_libraries(pin_test pico_stdlib)
+pico_add_extra_outputs(pin_test)

@@ -8,6 +8,7 @@
 #>
 param(
     [Parameter(Position=0)][string]$Message = "",
+    [string]$Body = "",
     [switch]$NoPush,
     [int]$Retries = 4
 )
@@ -19,7 +20,8 @@ git -C $root add -A
 $staged = (git -C $root diff --cached --name-only) -join ', '
 if ([string]::IsNullOrWhiteSpace($staged)) { Write-Host "没有改动可提交" -ForegroundColor Yellow }
 else {
-    git -C $root commit -q -m $Message
+    if ([string]::IsNullOrWhiteSpace($Body)) { git -C $root commit -q -m $Message }
+    else { git -C $root commit -q -m $Message -m $Body }
     if ($LASTEXITCODE -ne 0) { Write-Host "commit 失败" -ForegroundColor Red; exit 1 }
     Write-Host "已提交：$((git -C $root log --oneline -1))" -ForegroundColor Green
 }
