@@ -219,6 +219,28 @@ int main(void) {
                 break;
             }
             case 'r': g_wraps = 0; printf("OK\n"); fflush(stdout); break;
+            /*
+             * ★ 'c' = 设分频 + 重装 DMA。
+             *   为什么需要：满速（clkdiv=1）时 PIO 每 4 个采样推 1 个字 = 63 Mwords/s，
+             *   而 RX FIFO 只有 4 深 ⇒ DMA 必须 64ns 内响应，RP2040 的 DMA 延迟恰在这个量级
+             *   ⇒ 一溢出 PIO 就停顿 ⇒ 【丢样本 ⇒ 时间轴断裂 ⇒ 无法抽符号】。
+             *   降速后 FIFO 永不溢出，样本在时间上连续。
+             *   测 TMDS 用【相干欠采样】即可：采样率与位率不成整数关系时，
+             *   每个样本落在不同的比特相位上 ⇒ 足够多的样本可重建整条眼图/波形。
+             *   用法： c <div>  例如 c 4 ⇒ 63 MSa/s
+             */
+            case 'c': {
+                float d = 4.0f;
+                /* 允许 "c 8" 这样带个整数参数（简单解析：读一个十进制数） */
+                int ch2 = getchar_timeout_us(20000);
+                if (ch2 >= '1' && ch2 <= '9') d = (float)(ch2 - '0');
+                pio_sm_set_clkdiv(g_pio, g_sm, d);
+                dma_channel_set_write_addr((uint)g_dma, g_buf, false);
+                dma_channel_set_trans_count((uint)g_dma, BUF_WORDS, true);
+                printf("OK clkdiv=%.1f  =>  %.1f MSa/s\n", (double)d,
+                       (double)clock_get_hz(clk_sys) / d / 1e6);
+                fflush(stdout); break;
+            }
             case '0': pio_sm_set_enabled(g_pio, g_sm, false); printf("OK stopped\n"); fflush(stdout); break;
             case '1': pio_sm_set_enabled(g_pio, g_sm, true);  printf("OK running\n"); fflush(stdout); break;
             /* ── 直接读引脚（绕过 PIO/DMA，用 SIO）⇒ 分清"通路坏"还是"PIO 路坏" ── */

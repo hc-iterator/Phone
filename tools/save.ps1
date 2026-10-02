@@ -9,6 +9,7 @@
 param(
     [Parameter(Position=0)][string]$Message = "",
     [string]$Body = "",
+    [string[]]$Paths = @(),        # ★ 只提交这些路径（多智能体并行时必备，避免提交别人的在途改动）
     [switch]$NoPush,
     [int]$Retries = 4
 )
@@ -16,7 +17,13 @@ $ErrorActionPreference = 'Continue'
 $root = Split-Path -Parent $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($Message)) { Write-Host "用法: .\tools\save.ps1 \"提交说明\"" -ForegroundColor Yellow; exit 1 }
 
-git -C $root add -A
+if ($Paths.Count -gt 0) {
+    # ★ 只把这些路径加入暂存区。多智能体并行时，git add -A 会把别人正在改的文件
+    #   （以及构建产物）一起提交进去 —— 本项目已实际发生过一次。
+    git -C $root add -- $Paths
+} else {
+    git -C $root add -A
+}
 $staged = (git -C $root diff --cached --name-only) -join ', '
 if ([string]::IsNullOrWhiteSpace($staged)) { Write-Host "没有改动可提交" -ForegroundColor Yellow }
 else {
