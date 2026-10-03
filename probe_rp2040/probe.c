@@ -91,6 +91,14 @@ static void probe_init(void) {
     /* ★ 用显式 DREQ 宏（RP2040: DREQ_PIO0_RX0=4），避免任何参数顺序疑问 */
     channel_config_set_dreq(&dc, DREQ_PIO0_RX0 + g_sm);
     /*
+     * ★ 高优先级：实测数据里 CLK 边沿间隔是 min=1 median=1 max=4455 ——
+     *   那个 4455 采样的空洞说明 PIO 的 FIFO 溢出过 ⇒ SM 停顿 ⇒【丢样、时间轴断裂】。
+     *   FIFO 只有 4 深，DMA 必须在 4 个采样内响应；DMA 一旦被总线上的其它流量
+     *   （USB、以及我们自己在 dump 的串口）挤后，就会来不及。
+     *   给这个通道开高优先级是 RP2040 上"别让 DMA 饿死"的标准做法。
+     */
+    channel_config_set_high_priority(&dc, true);
+    /*
      * ★ 不用环形回卷：RP2040 的 DMA ring size 只有 4 位（最大 2^15），
      *   之前写 16（=2^16）是非法值，很可能就是"一个字都没搬"的原因 ✗
      *   改成最朴素的一次性采集：填满 16384 字就停，用 'd' 取走后再 'c' 重启。
@@ -220,6 +228,39 @@ int main(void) {
             }
             case 'r': g_wraps = 0; printf("OK\n"); fflush(stdout); break;
             /*
+             * ★ 'm' = 测量 DMA 的【实际搬运速率】，并在测量瞬间读 PIO 的 FIFO 状态。
+             *   这一步把"PIO 不产数据"与"DMA 不搬数据"彻底分开：
+             *     · FIFO 满(rxf=4) 且 搬运速率远低于期望 ⇒ DMA 被卡住（查 DREQ/总线）
+             *     · FIFO 空 且 搬运速率远低于期望 ⇒ PIO 没在产（查 SM/程序）
+             *   期望速率 = sys_clk / clkdiv / 4  （每 4 个采样推 1 个字）
+             */
+            case 'm': {
+                dma_channel_set_write_addr((uint)g_dma, g_buf, false);
+                dma_channel_set_trans_count((uint)g_dma, BUF_WORDS, true);
+                sleep_us(200);                       /* 让它先跑起来 */
+                uint32_t t1 = time_us_32();
+                uint32_t c1 = dma_channel_hw_addr((uint)g_dma)->transfer_count;
+                uint32_t rxf1 = pio_sm_get_rx_fifo_level(g_pio, g_sm);
+                sleep_us(2000);                      /* 2 ms 观测窗 */
+                uint32_t c2 = dma_channel_hw_addr((uint)g_dma)->transfer_count;
+                uint32_t rxf2 = pio_sm_get_rx_fifo_level(g_pio, g_sm);
+                uint32_t t2 = time_us_32();
+                uint32_t moved = c1 - c2;
+                double dt = (double)(t2 - t1);
+                /* 当前 clkdiv：从寄存器算出来（整数部分 16.8 定点） */
+                uint32_t cd = g_pio->sm[g_sm].clkdiv;
+                double div = (double)(cd >> 8) + (double)(cd & 0xFF) / 256.0;
+                if (div < 1.0) div = 1.0;
+                double expect = (double)clock_get_hz(clk_sys) / div / 4.0;
+                printf("MEAS moved=%lu words in %.0f us => %.2f Mwords/s (expect %.2f)  rxf=%lu->%lu\n",
+                       (unsigned long)moved, dt, moved / dt, expect / 1e6,
+                       (unsigned long)rxf1, (unsigned long)rxf2);
+                printf("     => %s\n",
+                       (moved / dt < expect * 0.5) ? "DMA/搬运 跟不上（瓶颈在这一侧）"
+                                                   : "搬运速率正常（瓶颈不在这侧）");
+                fflush(stdout); break;
+            }
+            /*
              * ★ 'c' = 设分频 + 重装 DMA。
              *   为什么需要：满速（clkdiv=1）时 PIO 每 4 个采样推 1 个字 = 63 Mwords/s，
              *   而 RX FIFO 只有 4 深 ⇒ DMA 必须 64ns 内响应，RP2040 的 DMA 延迟恰在这个量级
@@ -230,10 +271,19 @@ int main(void) {
              *   用法： c <div>  例如 c 4 ⇒ 63 MSa/s
              */
             case 'c': {
+                /* 解析十进制分频：1~2 位（例如 c4 / c11 / c12）。
+                 * ★ 上限的来历（实测）：DMA 的实际搬运速率约 7 Mwords/s，
+                 *   而 PIO 每 4 个采样推 1 个字 ⇒ 采样率必须 ≤ 28 MSa/s 才不积压。
+                 *   为了留余量、并让采样率与 TMDS 位率不成整数比（相干欠采样，
+                 *   相位会缓慢漂移，便于重建波形），推荐 11~12。 */
                 float d = 4.0f;
-                /* 允许 "c 8" 这样带个整数参数（简单解析：读一个十进制数） */
-                int ch2 = getchar_timeout_us(20000);
-                if (ch2 >= '1' && ch2 <= '9') d = (float)(ch2 - '0');
+                int n1 = getchar_timeout_us(20000);
+                if (n1 >= '0' && n1 <= '9') {
+                    int v = n1 - '0';
+                    int n2 = getchar_timeout_us(20000);
+                    if (n2 >= '0' && n2 <= '9') v = v * 10 + (n2 - '0');
+                    if (v >= 1 && v <= 64) d = (float)v;
+                }
                 pio_sm_set_clkdiv(g_pio, g_sm, d);
                 dma_channel_set_write_addr((uint)g_dma, g_buf, false);
                 dma_channel_set_trans_count((uint)g_dma, BUF_WORDS, true);
