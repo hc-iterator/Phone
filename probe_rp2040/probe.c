@@ -91,6 +91,14 @@ static void probe_init(void) {
     /* ★ 用显式 DREQ 宏（RP2040: DREQ_PIO0_RX0=4），避免任何参数顺序疑问 */
     channel_config_set_dreq(&dc, DREQ_PIO0_RX0 + g_sm);
     /*
+     * ★ 高优先级：实测数据里 CLK 边沿间隔是 min=1 median=1 max=4455 ——
+     *   那个 4455 采样的空洞说明 PIO 的 FIFO 溢出过 ⇒ SM 停顿 ⇒【丢样、时间轴断裂】。
+     *   FIFO 只有 4 深，DMA 必须在 4 个采样内响应；DMA 一旦被总线上的其它流量
+     *   （USB、以及我们自己在 dump 的串口）挤后，就会来不及。
+     *   给这个通道开高优先级是 RP2040 上"别让 DMA 饿死"的标准做法。
+     */
+    channel_config_set_high_priority(&dc, true);
+    /*
      * ★ 不用环形回卷：RP2040 的 DMA ring size 只有 4 位（最大 2^15），
      *   之前写 16（=2^16）是非法值，很可能就是"一个字都没搬"的原因 ✗
      *   改成最朴素的一次性采集：填满 16384 字就停，用 'd' 取走后再 'c' 重启。
