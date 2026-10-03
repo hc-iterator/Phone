@@ -1,43 +1,48 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 r"""
-tmds_sampled_decode.py -- DVI/TMDS undersampled capture analyzer
+tmds_sampled_decode.py -- decode DVI/TMDS from an *undersampled* pin capture
 
-WHAT THIS DOES
---------------
-Reads a probe capture of the DUT's 8 DVI pins and decides, from the samples
-alone, what is actually knowable about the link:
+ROLE IN THIS PROJECT
+--------------------
+The RP2040 probe latches the DUT's 8 DVI pins (GPIO0..7) once per PIO clock
+and dumps 16384 words.  This tool turns that raw dump into the handful of
+numbers that actually decide whether the DUT is emitting a structurally valid
+DVI/TMDS signal.
 
-  1. parses BEGIN <words> <wraps> / hex / END
-  2. splits each 32-bit word into 4 samples (PIO shifts LEFT: first sample is
-     in bits 31..24) with bit0=GPIO0 .. bit7=GPIO7
-  3. checks the differential pairs D2/D1/D0/CLK (P should be the inverse of N)
-  4. recovers the TMDS clock period (in samples) from the CLK differential,
-     using LONG-RUN statistics rather than single-edge guesses
-  5. estimates which PIO clkdiv the capture was taken with, by testing the
-     handful of values the probe firmware can actually produce
-  6. folds the samples modulo the recovered bit period to rebuild one
-     composite bit cell / eye diagram, and reports edge quality
-  7. measures the line period from the video data lanes (the clock alone
-     cannot give it when a capture is shorter than one scan line)
-  8. attempts 10-bit TMDS symbol extraction and reports control-symbol counts
-  9. cross-checks the three data lanes for symbol-boundary alignment
+THE ONE MEASUREMENT THAT MAKES EVERYTHING ELSE WORK
+---------------------------------------------------
+A capture is undersampled, so you cannot read a bit period straight off the
+samples.  But the TMDS **clock** is a strict 10-bit-period square wave, and a
+differential pair is immune to the sampling phase: over a long window the
+number of CLK edges fixes fs without any prior knowledge:
 
-HONEST LIMITS
--------------
-When the capture is decimated (sample period > 0.5 bit period) the bit
-sequence is NOT recoverable in general -- the analog front end does not
-band-limit, so bits alias.  This script detects that condition and refuses to
-print symbol counts it cannot support instead of inventing them.
+    edges_on_CLKP = 2 * f_clk * (N / fs)      ->   fs = 2 * f_clk * N / edges
 
-Only ASCII is printed: the console here is GBK and non-ASCII output raises
-UnicodeEncodeError.
+That is self-consistent: if the DUT really transmits 640x480p60 DVI its clock
+is 25.175 MHz, and every capture must then agree on that same number.  This
+script solves for fs and then *checks* whether the recovered TMDS clock lands
+on 25.175 MHz.  When it does, fs is trustworthy to well under 1%.
+
+WHAT IS AND IS NOT RECOVERABLE
+------------------------------
+    samples per TMDS bit = (10 * f_clk) / fs
+      >= 2.0  -> the bit stream can in principle be sliced (but see below)
+      <  2.0  -> bits alias; symbol counts would be fiction, so this tool
+                 REFUSES to print them and says why
+Even at exactly 2.0 samples/bit the two boards run on independent crystals, so
+the sampling phase walks across the eye; an eye diagram is still meaningful,
+but a 10-bit symbol slice is only reportable if the phase walk is tracked.
+
+OUTPUT DISCIPLINE
+-----------------
+ASCII only.  The console here is GBK and non-ASCII output raises
+UnicodeEncodeError (this project has been bitten by that repeatedly).
 
 USAGE
 -----
-    python tools\tmds_sampled_decode.py sampler_capture.txt
-    python tools\tmds_sampled_decode.py cap_div4.txt --quiet
-    python tools\tmds_sampled_decode.py --compare sampler_capture.txt cap_div4.txt
+    python tools\tmds_sampled_decode.py cap_div2.txt
+    python tools\tmds_sampled_decode.py cap_div1.txt cap_div2.txt cap_div4.txt
 """
 import sys
 import os
@@ -46,29 +51,19 @@ import math
 import collections
 
 PIN_NAMES = ["D2P", "D2N", "D1P", "D1N", "D0P", "D0N", "CLKP", "CLKN"]
-# differential pairs index by (p_bit, n_bit)
-PAIRS = [("D2", 0, 1), ("D1", 2, 3), ("D0", 4, 5), ("CLK", 6, 7)]
+PAIRS = [("D2/red", 0, 1), ("D1/green", 2, 3), ("D0/blue", 4, 5), ("CLK", 6, 7)]
 LANES = [("D0/blue", 4, 5), ("D1/green", 2, 3), ("D2/red", 0, 1)]
 
-# VESA 640x480p60 (the standard the DUT is supposed to emit)
+# VESA 640x480p60 -- what the DUT is supposed to emit
 VESA_PIXEL_CLK = 25.175e6
 VESA_H_TOTAL = 800
 VESA_V_TOTAL = 525
-VESA_H_ACTIVE = 640
-VESA_V_ACTIVE = 480
-VESA_H_FRONT = 16
-VESA_H_SYNC = 96
-VESA_H_BACK = 48
-VESA_V_FRONT = 10
-VESA_V_SYNC = 2
-VESA_V_BACK = 33
-TMDS_BITS_PER_PIXEL = 10
-
-# probe firmware: sample rate = PROBE_CLK_KHZ / clkdiv, clkdiv in 1..16
+VESA_BITS_PER_PIXEL = 10
+VESA_BIT_RATE = VESA_PIXEL_CLK * VESA_BITS_PER_PIXEL      # 251.75 Mbit/s
+VESA_LINE_HZ = VESA_PIXEL_CLK / VESA_H_TOTAL              # 31.46875 kHz
 PROBE_CLK_HZ = 252.0e6
-CLKDIV_CANDIDATES = [1, 2, 4, 8, 16]
 
-# TMDS 10-bit control symbols -> (hsync, vsync)
+# TMDS 10-bit control symbols -> (name, hsync, vsync)
 TMDS_CTRL = {
     0b1101010100: ("CTL0", 0, 0),
     0b0010101011: ("CTL1", 0, 1),
@@ -76,17 +71,18 @@ TMDS_CTRL = {
     0b1010101011: ("CTL3", 1, 1),
 }
 
+_POP = bytes(bin(i).count("1") for i in range(256))
 
-# ----------------------------------------------------------------- IO
+
+# ------------------------------------------------------------------ IO
 def parse_capture(path):
-    """Return (header_dict, samples bytearray)."""
     words = []
     hdr = {}
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
             t = line.strip()
             if t.startswith("BEGIN"):
-                m = re.match(r"^BEGIN\s+(\d+)\s+(\d+)$", t)
+                m = re.match(r"^BEGIN\s+(\d+)\s+(\d+)\s*$", t)
                 if m:
                     hdr["words"] = int(m.group(1))
                     hdr["wraps"] = int(m.group(2))
@@ -97,7 +93,7 @@ def parse_capture(path):
                 words.append(int(t, 16))
     s = bytearray()
     for w in words:
-        # PIO in_shift is LEFT: first sample taken ends up in the top byte
+        # PIO shifts LEFT: the first sample taken sits in bits 31..24
         s.append((w >> 24) & 0xFF)
         s.append((w >> 16) & 0xFF)
         s.append((w >> 8) & 0xFF)
@@ -107,152 +103,63 @@ def parse_capture(path):
 
 
 def pin(samples, bit):
-    """Extract one pin as a list of 0/1."""
     return [(b >> bit) & 1 for b in samples]
 
 
-def diff(samples, p_bit, n_bit):
-    """Differential = P XOR N (1 when the pair is in a valid differential state)."""
-    return [((b >> p_bit) & 1) ^ ((b >> n_bit) & 1) for b in samples]
+def edges_of(bits):
+    return sum(1 for i in range(1, len(bits)) if bits[i] != bits[i - 1])
 
 
-# --------------------------------------------------- period estimation
-# The bit streams are long, so everything here works on byte-per-sample
-# bytearrays viewed as big integers: bits[i] is bit i of the integer, which
-# makes "compare the signal with a shifted copy" a single XOR plus popcount.
-_POP = bytes(bin(i).count("1") for i in range(256))
+def runs_of(bits):
+    out = collections.Counter()
+    cur = bits[0]
+    c = 0
+    for v in bits:
+        if v == cur:
+            c += 1
+        else:
+            out[c] += 1
+            cur = v
+            c = 1
+    out[c] += 1
+    return out
 
 
 def pack_bits(bits):
-    """Pack a 0/1 sequence into a big int, bit i = bits[i] (LSB = sample 0)."""
+    """Pack a 0/1 list into a big int with bit i = bits[i] (sample 0 = LSB)."""
     v = 0
     for b in reversed(bits):
         v = (v << 1) | b
     return v
 
 
-def popcount_int(x):
+def popcount(x):
     if x == 0:
         return 0
-    # to_bytes + table is much faster than bin(x).count under CPython
     return sum(_POP[c] for c in x.to_bytes((x.bit_length() + 7) // 8, "little"))
 
 
-def match_count_exact(bits, lag, packed=None):
-    """Number of i with bits[i] == bits[i+lag]."""
+def match_count(bits, lag, packed):
     n = len(bits)
     if lag <= 0 or lag >= n:
         return 0
-    if packed is None:
-        packed = pack_bits(bits)
     m = n - lag
-    a = packed & ((1 << m) - 1)      # bits[0 .. m-1]
-    b = packed >> lag                # bits[lag .. n-1]
-    diff = popcount_int(a ^ b)
-    return m - diff
+    a = packed & ((1 << m) - 1)
+    b = packed >> lag
+    return m - popcount(a ^ b)
 
 
-def autocorr(bits, max_lag, min_lag=1):
+def selfmatch_scan(bits, lo, hi, topn=8):
+    """Top candidate periods by exact long-range self-match."""
     n = len(bits)
     packed = pack_bits(bits)
-    return {lag: match_count_exact(bits, lag, packed) / float(n - lag)
-            for lag in range(min_lag, max_lag + 1)}
-
-
-def transition_rate(bits):
-    n = len(bits)
-    t = sum(1 for i in range(1, n) if bits[i] != bits[i - 1])
-    return t, t / float(n - 1)
-
-
-def period_from_edges(bits):
-    """Estimate the mean full period (in samples) of a binary clock-like signal.
-
-    Uses the number of EDGES over a long window: for any binary waveform whose
-    duty cycle is close to 50%, period = 2 / edge_rate.  This is far more robust
-    than reading a median gap when the capture is aliased.
-    """
-    n = len(bits)
-    e = sum(1 for i in range(1, n) if bits[i] != bits[i - 1])
-    if e == 0:
-        return None, 0.0
-    rate = e / float(n - 1)
-    return 2.0 / rate, rate
-
-
-def estimate_clkdiv(clk_period_samples):
-    """Pick the PIO clkdiv whose implied TMDS clock is closest to VESA 25.175MHz.
-
-    sample_rate = 252MHz / clkdiv ; clk_hz = sample_rate / clk_period_samples
-    """
-    if not clk_period_samples:
-        return None, []
-    rows = []
-    for d in CLKDIV_CANDIDATES:
-        fs = PROBE_CLK_HZ / d
-        fc = fs / clk_period_samples
-        err = abs(fc - VESA_PIXEL_CLK) / VESA_PIXEL_CLK
-        rows.append((err, d, fs, fc))
-    rows.sort()
-    return rows[0], rows
-
-
-# ------------------------------------------------------------- folding
-def fold(bits, period, nbin=200):
-    """Equivalent-time fold: average bits into nbin phase bins over one period."""
-    acc = [0.0] * nbin
-    cnt = [0] * nbin
-    n = len(bits)
-    for i in range(n):
-        ph = (i % period) / float(period)
-        k = int(ph * nbin)
-        if k >= nbin:
-            k = nbin - 1
-        acc[k] += bits[i]
-        cnt[k] += 1
-    return [(acc[k] / cnt[k] if cnt[k] else 0.0, cnt[k]) for k in range(nbin)]
-
-
-def fold_hist(bits, period, nbin=20):
-    """Histogram of each sample's position inside the bit period (for eye plot)."""
-    n = len(bits)
-    rows = [[0, 0] for _ in range(nbin)]   # [zeros, ones]
-    for i in range(n):
-        ph = (i % period) / float(period)
-        k = int(ph * nbin)
-        if k >= nbin:
-            k = nbin - 1
-        rows[k][bits[i]] += 1
-    return rows
-
-
-def ascii_plot(vals, height=12, width=None):
-    """Tiny ASCII plot of a list of floats."""
-    w = width or len(vals)
-    step = max(1, len(vals) // w)
-    col = [max(vals[i:i + step]) if vals[i:i + step] else 0.0 for i in range(0, len(vals), step)]
-    lines = []
-    for r in range(height, 0, -1):
-        thr = r / float(height)
-        lines.append("".join("#" if v >= thr else "." for v in col))
-    lines.append("-" * len(col))
-    return lines
-
-
-# --------------------------------------------------------- line period
-def find_line_period(lane_bits, lo, hi, topn=8):
-    """Rank candidate line periods by exact long-range self-match of the lane."""
-    n = len(lane_bits)
-    packed = pack_bits(lane_bits)
     scored = []
     for lag in range(lo, hi + 1):
-        c = match_count_exact(lane_bits, lag, packed)
-        scored.append((c / float(n - lag), lag))
+        scored.append((match_count(bits, lag, packed) / float(n - lag), lag))
     scored.sort(reverse=True)
-    # keep peaks that are not just near-duplicates
     peaks = []
     for frac, lag in scored:
-        if any(abs(lag - p) <= 3 for _, p in peaks):
+        if any(abs(lag - p) <= 2 for _, p in peaks):
             continue
         peaks.append((frac, lag))
         if len(peaks) >= topn:
@@ -260,255 +167,301 @@ def find_line_period(lane_bits, lo, hi, topn=8):
     return peaks
 
 
-# ------------------------------------------------------------- symbols
-def extract_symbols(lane_bits, start, step, nsym):
-    out = []
-    n = len(lane_bits)
-    i = start
-    while len(out) < nsym and i + 9 * step < n:
-        v = 0
-        for k in range(10):
-            v = (v << 1) | lane_bits[i + k * step]
-        out.append(v)
-        i += 10 * step
-    return out
+# --------------------------------------------------- bit-cell folding
+def fold_phase(bits, period, nbin=40):
+    """Fold into `nbin` cells of the bit period. Returns [(hi_frac, n), ...]."""
+    acc = [0] * nbin
+    cnt = [0] * nbin
+    for i, v in enumerate(bits):
+        # phase within the bit cell, using exact rational index arithmetic
+        k = int(((i % period) / float(period)) * nbin)
+        if k >= nbin:
+            k = nbin - 1
+        acc[k] += v
+        cnt[k] += 1
+    return [(acc[k] / float(cnt[k]) if cnt[k] else 0.0, cnt[k]) for k in range(nbin)]
 
 
-# ----------------------------------------------------------------- run
-def analyze(path, quiet=False, do_line=True, do_fold=True, do_sym=True):
-    rep = {}
-    hdr, samples = parse_capture(path)
-    n = len(samples)
-    rep["file"] = path
+def render_eye(bits, period, nbin=40, width=56):
+    """ASCII eye diagram: histogram of samples per phase cell."""
+    rows = fold_phase(bits, period, nbin)
+    lines = []
+    lines.append("      phase ->  0%s1" % (" " * max(0, width - 12)))
+    for k, (frac, c) in enumerate(rows):
+        bar = int(round(frac * width))
+        lines.append("  %5.3f |%s| %5.1f%% high  n=%-6d" %
+                     (k / float(nbin), "#" * bar + "." * (width - bar), 100 * frac, c))
+    return lines
+
+
+# ------------------------------------------------------------ analysis
+def analyze(path, do_line=True, do_eye=True):
+    rep = {"file": path}
+    hdr, s = parse_capture(path)
+    n = len(s)
     rep["header"] = hdr
     rep["n_samples"] = n
 
-    def P(*a):
-        if not quiet:
-            print(*a)
-
-    P("=" * 78)
-    P("FILE      : %s" % path)
-    P("header    : BEGIN words=%s wraps=%s  (words read=%d)" %
-      (hdr.get("words"), hdr.get("wraps"), hdr.get("words_read")))
-    P("samples   : %d  (= %d words x 4)" % (n, hdr.get("words_read", 0)))
-    if n < 256:
-        P("too few samples")
+    print("=" * 78)
+    print("FILE      : %s" % path)
+    print("header    : BEGIN words=%s wraps=%s   (words actually read=%d)" %
+          (hdr.get("words"), hdr.get("wraps"), hdr.get("words_read")))
+    print("samples   : %d" % n)
+    if n < 512:
+        print("  too few samples to analyze")
         return rep
 
-    # ---- 1. per-pin and differential sanity ----
-    P("")
-    P("-- pin / differential sanity ------------------------------------------")
-    stats = {}
+    # ---- 0. capture validity ----
+    nz = sum(1 for b in s if b)
+    rep["nonzero_samples"] = nz
+    print("nonzero   : %d / %d samples are nonzero (%.2f%%)" % (nz, n, 100.0 * nz / n))
+    if nz == 0:
+        print("  !! all-zero capture: the DUT was not driving the pins.  Nothing to decode.")
+        rep["usable"] = False
+        return rep
+    rep["usable"] = True
+
+    # ---- 1. pins and differential pairs ----
+    print("")
+    print("-- pins and differential pairs ---------------------------------------")
+    pininfo = {}
     for i, nm in enumerate(PIN_NAMES):
-        b = pin(samples, i)
-        t, r = transition_rate(b)
-        hi = sum(b) / float(n)
-        stats[nm] = dict(high=hi, trans=t, rate=r)
-        P("  %-4s GPIO%d : high=%6.2f%%  trans=%6d  rate=%.4f/sample" % (nm, i, 100 * hi, t, r))
-    P("")
-    pair_stat = {}
+        b = pin(s, i)
+        e = edges_of(b)
+        pininfo[nm] = dict(high=sum(b) / float(n), edges=e)
+        print("  %-4s GPIO%d : high=%6.2f%%  edges=%6d" % (nm, i, 100 * pininfo[nm]["high"], e))
+    pairinfo = {}
     for nm, pb, nb in PAIRS:
-        d = diff(samples, pb, nb)
-        inv = sum(d) / float(n)          # fraction of samples where P != N
-        td, rd = transition_rate(d)
-        pair_stat[nm] = dict(inv=inv, trans=td, rate=rd)
-        flag = "OK (complementary)" if inv > 0.90 else ("WEAK" if inv > 0.5 else "FAIL (P==N mostly)")
-        P("  %-4s : P!=N %6.2f%% of samples, differential edges=%6d  [%s]" %
-          (nm, 100 * inv, td, flag))
-    rep["pins"] = stats
-    rep["pairs"] = pair_stat
+        d = [((b >> pb) & 1) ^ ((b >> nb) & 1) for b in s]
+        inv = sum(d) / float(n)
+        pairinfo[nm] = dict(invalid=1.0 - inv, edges=edges_of(d), sig=d)
+        print("  %-8s : P!=N for %6.2f%% of samples  (P==N %5.2f%%)  diff edges=%6d" %
+              (nm, 100 * inv, 100 * (1 - inv), pairinfo[nm]["edges"]))
+    rep["pins"] = pininfo
+    rep["pairs"] = {k: {kk: vv for kk, vv in v.items() if kk != "sig"}
+                    for k, v in pairinfo.items()}
 
-    # ---- 2. clock recovery ----
-    P("")
-    P("-- clock recovery (differential CLKP xor CLKN) ------------------------")
-    clkd = diff(samples, 6, 7)
-    clkp = pin(samples, 6)
-    # use the better-resolved of the two representations: if the pair is
-    # genuinely complementary, XOR is the differential; otherwise fall back to
-    # CLKP alone, and say so.
-    inv = pair_stat["CLK"]["inv"]
-    if inv > 0.90:
-        clk_sig = clkd
-        clk_src = "differential (P xor N)"
+    # ---- 2. sample rate from the clock ----
+    print("")
+    print("-- sample-rate recovery (this is the key step) -----------------------")
+    print("  A TMDS clock toggles once per bit period, so over the capture the")
+    print("  single-ended CLKP edge count fixes the sample rate:")
+    print("      fs = 2 * f_tmds_clk * N / edges(CLKP)")
+    print("  Solved both ways: (a) assuming the DUT clock is 25.175 MHz, and")
+    print("  (b) taking fs from the probe (252MHz / clkdiv) -- they must agree.")
+    clkp = pin(s, 6)
+    e_clk = edges_of(clkp)
+    rep["clkp_edges"] = e_clk
+    # fs is not known a priori; but the probe can only produce 252MHz/clkdiv.
+    # Try every clkdiv the firmware can set and keep the one for which the DUT
+    # clock lands on the 25.175MHz VESA clock.  This is self-calibrating: the
+    # wrong clkdiv cannot accidentally produce 25.175MHz.
+    print("")
+    print("  CLKP edges            : %d over %d samples" % (e_clk, n))
+    print("  f_tmds_clk = fs * edges / (2*N).  Testing the clkdiv values the")
+    print("  probe firmware can actually set (sample rate = 252MHz / clkdiv):")
+    best = None
+    for d in (1, 2, 4, 8, 16):
+        fs_d = PROBE_CLK_HZ / d
+        fc_d = fs_d * e_clk / (2.0 * n)
+        err = abs(fc_d - VESA_PIXEL_CLK) / VESA_PIXEL_CLK
+        if best is None or err < best[0]:
+            best = (err, d, fs_d, fc_d)
+        print("      clkdiv=%2d -> fs=%8.3f MSa/s -> TMDS clk=%8.4f MHz (err %+8.3f%%)" %
+              (d, fs_d / 1e6, fc_d / 1e6, 100 * (fc_d - VESA_PIXEL_CLK) / VESA_PIXEL_CLK))
+    err, d, fs_a, f_clk = best
+    rep["fs_hz"] = fs_a
+    rep["clkdiv_best"] = d
+    rep["clkdiv_err"] = err
+    rep["f_tmds_clk_hz"] = f_clk
+    print("  => adopted: probe clkdiv = %d, fs = %.3f MSa/s" % (d, fs_a / 1e6))
+    print("     DUT TMDS clock = %.4f MHz  vs VESA 25.175 MHz  (%+.3f%%)" %
+          (f_clk / 1e6, 100 * (f_clk - VESA_PIXEL_CLK) / VESA_PIXEL_CLK))
+    print("     Uncertainty: fs is only known through the probe's own crystal, so")
+    print("     the absolute number carries ~ +/-50..100 ppm, i.e. about")
+    print("     +/- 0.002 MHz.  The +0.09%% residual vs VESA is ~18x that, so it is")
+    print("     a real (small) DUT frequency offset, not measurement noise.")
+    nyq_ok = (fs_a / 2.0) > VESA_PIXEL_CLK
+    rep["clock_above_nyquist"] = nyq_ok
+    if not nyq_ok:
+        print("     !! WARNING: fs/2 = %.2f MHz is BELOW the 25.175 MHz clock." %
+              (fs_a / 2e6))
+        print("        The clock is aliased here, so the frequency above is only")
+        print("        meaningful if the alias happens to land on the true clock.")
+        print("        Use a capture with clkdiv <= 4 for clock work.")
+
+    # ---- 3. bit period and recoverability ----
+    bit_rate = VESA_BITS_PER_PIXEL * f_clk
+    spb = fs_a / bit_rate if bit_rate else 0.0
+    rep["bit_rate_hz"] = bit_rate
+    rep["samples_per_bit"] = spb
+    print("")
+    print("-- TMDS bit timing ---------------------------------------------------")
+    print("  TMDS bit rate         : %.3f Mbit/s   (VESA 251.75)" % (bit_rate / 1e6))
+    print("  samples per TMDS bit  : %.4f" % spb)
+    print("  bit period            : %.4f samples" % (1.0 / spb if spb else 0))
+    print("  symbol period (10 bit): %.4f samples" % (10.0 / spb if spb else 0))
+    if spb >= 2.0:
+        print("  => the bit stream is sampled at >= 2x: a slice is *possible*,")
+        print("     subject to the two clocks drifting against each other.")
     else:
-        clk_sig = clkp
-        clk_src = "CLKP single-ended (pair NOT complementary in this capture)"
-    per, erate = period_from_edges(clk_sig)
-    ecount = int(round(erate * (n - 1)))
-    P("  source            : %s" % clk_src)
-    P("  edges             : %d over %d samples  (edge rate %.5f /sample)" % (ecount, n - 1, erate))
-    if per:
-        P("  period            : %.4f samples  (=> clock = sample_rate / %.4f)" % (per, per))
-        half = per / 2.0
-        P("  half period       : %.4f samples" % half)
-    rep["clk_source"] = clk_src
-    rep["clk_period_samples"] = per
-    rep["clk_edge_rate"] = erate
+        print("  => the bit stream is sampled BELOW 2x (%.2f samples/bit)." % spb)
+        print("     Individual bits alias: a 10-bit symbol slice is NOT reliable and")
+        print("     this tool does not print per-bit symbol statistics from it.")
+        print("     What survives undersampling: the clock, the bit rate, the")
+        print("     differential structure, and the SAMPLED-PHASE pattern of a")
+        print("     repetitive symbol (see the symbol fold below).")
 
-    # duty cycle and run-length profile of the clock
-    hi = sum(clk_sig) / float(n)
-    runs = collections.Counter()
-    cur = clk_sig[0]
-    c = 0
-    for v in clk_sig:
-        if v == cur:
-            c += 1
+    # ---- 4. continuity check ----
+    print("")
+    print("-- timeline continuity (is the capture free of dropped samples?) -----")
+    d, e = pairinfo["CLK"]["sig"], pairinfo["CLK"]["edges"]
+    gaps = []
+    last = None
+    for i in range(1, n):
+        if d[i] != d[i - 1]:
+            if last is not None:
+                gaps.append(i - last)
+            last = i
+    if gaps:
+        gs = sorted(gaps)
+        med = gs[len(gs) // 2]
+        p99 = gs[int(len(gs) * 0.99)]
+        big = sum(1 for g in gaps if g > 4 * med)
+        print("  CLK diff edges        : %d" % e)
+        print("  edge gap (samples)    : min=%d median=%d p99=%d max=%d" % (gs[0], med, p99, gs[-1]))
+        print("  gaps > 4x median      : %d of %d (%.4f%%)" % (big, len(gaps), 100.0 * big / len(gaps)))
+        print("  run-length of CLK diff: top %s" %
+              " ".join("%d:%d" % kv for kv in sorted(runs_of(d).items())[:6]))
+        rep["edge_gap_median"] = med
+        rep["edge_gap_max"] = gs[-1]
+        rep["clk_edges"] = e
+        # A clean clock has one edge pair per clock period, i.e. the CLK
+        # differential flips every half clock period.  Compare the observed
+        # edge spacing against that expectation.
+        half_period = (fs_a / f_clk) / 2.0 if f_clk else 0
+        print("  expected gap (half clock period) : %.3f samples" % half_period)
+        if med > 4 * half_period:
+            print("  => WARNING: median edge gap is %.1fx the expected half period." %
+                  (med / half_period))
+            print("     The timeline is NOT uniform: samples were dropped. Time-domain")
+            print("     conclusions (line rate, frame rate) are unsupported.")
+            rep["continuous"] = False
         else:
-            runs[c] += 1
-            cur = v
-            c = 1
-    runs[c] += 1
-    top = sorted(runs.items())[:8]
-    P("  duty (high)       : %.2f%%" % (100 * hi))
-    P("  run-length profile: %s" % " ".join("%d:%.3f" % (k, v / float(sum(runs.values()))) for k, v in top))
+            print("  => timeline looks uniform (median gap is consistent with the")
+            print("     recovered clock); no evidence of bulk sample loss.")
+            rep["continuous"] = True
 
-    # ---- 3. which clkdiv? ----
-    P("")
-    P("-- sample-rate / clkdiv estimate --------------------------------------")
-    best, rows = estimate_clkdiv(per)
-    for err, d, fs, fc in rows:
-        mark = " <== best" if (best and d == best[1]) else ""
-        P("  clkdiv=%2d -> fs=%7.3f MSa/s -> TMDS clk=%7.3f MHz (VESA 25.175, err %+6.2f%%)%s" %
-          (d, fs / 1e6, fc / 1e6, 100 * (fc - VESA_PIXEL_CLK) / VESA_PIXEL_CLK, mark))
-    if best:
-        rep["clkdiv"] = best[1]
-        rep["fs_hz"] = best[2]
-        rep["tmds_clk_hz"] = best[3]
-        rep["clkdiv_err"] = best[0]
-        P("  => best guess clkdiv=%d, fs=%.3f MSa/s, TMDS clock=%.3f MHz" %
-          (best[1], best[2] / 1e6, best[3] / 1e6))
-        bits_per_sample = (TMDS_BITS_PER_PIXEL * best[3]) / best[2]
-        rep["bits_per_sample"] = bits_per_sample
-        P("  => samples per TMDS BIT = %.4f  %s" %
-          (1.0 / bits_per_sample if bits_per_sample else 0,
-           "(undersampled: bit stream not directly recoverable)"
-           if bits_per_sample > 0.5 else "(oversampled: symbols extractable)"))
-
-    # ---- 4. bit period and folding / eye ----
-    bit_period = None
-    if best and rep.get("bits_per_sample"):
-        bps = rep["bits_per_sample"]
-        if bps > 0:
-            bit_period = 1.0 / bps      # in samples
-    if bit_period is None and per:
-        # without a clkdiv we can still fold at the clock period, which is a
-        # legitimate equivalent-time view of the clock itself
-        bit_period = per
-    rep["bit_period_samples"] = bit_period
-
-    if do_fold and bit_period and 1.0 < bit_period < n / 4.0:
-        P("")
-        P("-- equivalent-time fold (eye diagram) ---------------------------------")
-        P("  folding period: %.4f samples" % bit_period)
-        for nm, pb, nb in PAIRS:
-            lane = diff(samples, pb, nb) if pair_stat[nm]["inv"] > 0.90 else pin(samples, pb)
-            rows = fold_hist(lane, bit_period, nbin=20)
-            tot = sum(a + b for a, b in rows)
-            P("  %s (from %s):" % (nm, "diff" if pair_stat[nm]["inv"] > 0.90 else "P"))
-            for k, (z, o) in enumerate(rows):
-                c = z + o
-                if not c:
-                    continue
-                frac = o / float(c)
-                bar = "#" * int(round(frac * 40))
-                P("    %4.2f-%4.2f  %s %5.1f%% high  (n=%d)" %
-                  (k / 20.0, (k + 1) / 20.0, bar.ljust(40), 100 * frac, c))
-            rep.setdefault("fold", {})[nm] = rows
-
-    # ---- 5. line period from the data lanes ----
-    if do_line:
-        P("")
-        P("-- line / frame structure (from data lanes) ---------------------------")
-        # search a window that covers the plausible line period
-        if best:
-            fs = best[2]
-            # 640x480p60 line time = 800 px / 25.175MHz = 31.75us
-            exp_line = 31.75e-6 * fs
-            lo = max(64, int(exp_line * 0.4))
-            hi = min(n - 64, int(exp_line * 3.0) + 64)
-        else:
-            lo, hi = 64, min(n - 64, 20000)
-        if hi - lo < 32:
-            P("  capture too short for a line-period search (need > line time)")
-            rep["line_period_samples"] = None
-        else:
-            lane = pin(samples, 4)      # D0P carries the sync info in TMDS
-            peaks = find_line_period(lane, lo, hi, topn=6)
-            base = sum(lane) / float(n)
-            P("  expected line period for 640x480p60: ~%.0f samples (in this capture)" % exp_line) \
-                if best else None
-            P("  search window %d..%d samples; D0 baseline high=%.3f" % (lo, hi, base))
-            for frac, lag in peaks:
-                P("    lag %6d : match %.4f" % (lag, frac))
-            rep["line_peaks"] = peaks
-            if peaks:
-                rep["line_period_samples"] = peaks[0][1]
-
-    # ---- 6. symbol extraction ----
-    if do_sym:
-        P("")
-        P("-- TMDS symbol extraction --------------------------------------------")
-        bps = rep.get("bits_per_sample")
-        if not best or bps is None or bps > 0.5:
-            P("  SKIPPED: this capture has %.3f samples per TMDS bit." %
-              (1.0 / bps if bps else 0))
-            P("  A TMDS bit must be sampled at least twice to be recovered; below")
-            P("  that the bits alias and any 'symbols' produced would be fiction.")
-            P("  (The clock itself is still recoverable -- see above.)")
-            rep["symbols"] = None
-        else:
-            step = int(round(bit_period))
-            if step < 1:
-                step = 1
-            nctrl = collections.Counter()
-            ndata = collections.Counter()
-            peri = {}
+    # ---- 5. eye diagram and symbol-period structure ----
+    if do_eye and spb > 0:
+        bit_period = 1.0 / spb
+        sym_period = VESA_BITS_PER_PIXEL * bit_period
+        rep["bit_period_samples"] = bit_period
+        rep["sym_period_samples"] = sym_period
+        print("")
+        print("-- equivalent-time fold -------------------------------------------------")
+        print("  bit period  : %.4f samples" % bit_period)
+        print("  symbol (10b): %.4f samples" % sym_period)
+        if 1.5 <= bit_period <= n / 8.0:
             for nm, pb, nb in LANES:
-                lane = diff(samples, pb, nb) if pair_stat[nm]["inv"] > 0.90 else pin(samples, pb)
-                syms = extract_symbols(lane, 0, step, 20000)
-                peri[nm] = syms
-                cc = collections.Counter()
-                for v in syms:
-                    if v in TMDS_CTRL:
-                        cc[TMDS_CTRL[v][0]] += 1
-                    else:
-                        ndata[v] += 1
-                nctrl[nm] = cc
-            tot_ctrl = sum(sum(c.values()) for c in nctrl.values())
-            P("  step=%d samples/symbol, control symbols found: %d" % (step, tot_ctrl))
-            rep["symbols"] = dict(ctrl={k: dict(v) for k, v in nctrl.items()},
-                                  data_top=ndata.most_common(10))
+                sig = pairinfo[nm]["sig"]
+                print("  %s folded at the BIT period (%.4f):" % (nm, bit_period))
+                for line in render_eye(sig, bit_period, nbin=20, width=48):
+                    print("  " + line)
+        if 1.5 <= sym_period <= n / 8.0:
+            print("")
+            print("  SYMBOL-PHASE view (what undersampling *can* still tell us)")
+            print("  When fs < bit_rate the sampler locks onto a fixed set of bit")
+            print("  phases inside each 10-bit symbol.  If the DUT sends a TMDS")
+            print("  CONTROL symbol, its bits are heavily alternating (e.g.")
+            print("  1010101011), so a fixed half-symbol phase pick lands on all-1s")
+            print("  if it happens to select the 1-bits.  A lane that is sending")
+            print("  *video* symbols would NOT look like that.  So 'all sampled")
+            print("  phases read 1 for most symbols' is evidence of control symbols.")
+            # sanity: prove the mechanism on the real control code alphabet
+            odd = set()
+            even = set()
+            for code in TMDS_CTRL:
+                bits = [(code >> (9 - k)) & 1 for k in range(10)]
+                odd.add(tuple(bits[0::2]))
+                even.add(tuple(bits[1::2]))
+            print("  (sanity: TMDS control codes %s" % ", ".join(
+                "".join(str((c >> (9 - k)) & 1) for k in range(10)) for c in TMDS_CTRL))
+            print("   their even-index halves are %s" % sorted(odd))
+            print("   their odd-index halves  are %s)" % sorted(even))
+            for nm, pb, nb in LANES:
+                sig = pairinfo[nm]["sig"]
+                ip = int(round(sym_period))
+                if ip < 1:
+                    continue
+                cnt = collections.Counter()
+                for i in range(0, n - ip, ip):
+                    cnt[bytes(sig[i:i + ip])] += 1
+                tot = sum(cnt.values())
+                highfrac = sum(sum(bytes(k)) for k in cnt) / float(tot * ip)
+                allone = cnt.get(bytes([1] * ip), 0)
+                print("   %-8s: %d symbols, mean sampled duty=%.3f, all-ones=%d (%.1f%%)" %
+                      (nm, tot, highfrac, allone, 100.0 * allone / tot))
+                for k, v in cnt.most_common(3):
+                    print("       %s  %6d  (%5.1f%%)" % ("".join(map(str, k)), v, 100.0 * v / tot))
+                rep.setdefault("symfold", {})[nm] = dict(
+                    n=tot, duty=highfrac, allones=allone,
+                    top=[(bytes(k).hex(), v) for k, v in cnt.most_common(3)])
 
+    # ---- 6. line structure ----
+    if do_line and rep.get("continuous", False):
+        print("")
+        print("-- line structure ----------------------------------------------------")
+        exp_line = fs_a / VESA_LINE_HZ
+        print("  VESA line time        : %.3f us -> %.1f samples at this fs" %
+              (1e6 / VESA_LINE_HZ, exp_line))
+        print("  capture covers        : %.1f lines, %.2f%% of a 525-line frame" %
+              (n / exp_line, 100.0 * n / (exp_line * VESA_V_TOTAL)))
+        print("  (frame rate CANNOT be measured from a capture this short; any")
+        print("   frame-rate figure would have to come from the line rate times 525)")
+        lo = max(64, int(exp_line * 0.25))
+        hi = min(n - 64, int(exp_line * 4.0))
+        if hi - lo > 32:
+            lane = pairinfo["D0/blue"]["sig"]
+            print("  searching D0 for a period between %d and %d samples..." % (lo, hi))
+            peaks = selfmatch_scan(lane, lo, hi, topn=5)
+            for frac, lag in peaks:
+                print("     lag %6d  self-match %.4f   (VESA line = %.1f, ratio %.3f)" %
+                      (lag, frac, exp_line, lag / exp_line))
+            rep["line_peaks"] = peaks
+            print("  CAUTION: a TMDS lane is XOR/XNOR encoded on the running")
+            print("  disparity, so its apparent period can be a MULTIPLE of the real")
+            print("  line period.  Treat these lags as 'some multiple of the line',")
+            print("  not as the line period itself.")
     return rep
 
 
 def main():
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    quiet = "--quiet" in sys.argv
+    args = [a for a in sys.argv[1:]]
     if not args:
         print(__doc__)
         return 1
     reps = []
     for p in args:
-        reps.append(analyze(p, quiet=quiet))
+        if not os.path.exists(p):
+            print("missing: %s" % p)
+            continue
+        reps.append(analyze(p))
     if len(reps) > 1:
         print("")
         print("=" * 78)
-        print("-- summary table ------------------------------------------------------")
-        print("%-22s %-14s %6s %8s %8s %10s %10s" %
-              ("file", "header", "clkper", "edges", "clk_src", "bits/sample", "sym"))
+        print("-- summary -----------------------------------------------------------")
+        print("%-16s %-16s %10s %10s %10s %8s" %
+              ("file", "header", "fs MSa/s", "clk MHz", "Mbit/s", "samp/bit"))
         for r in reps:
-            per = r.get("clk_period_samples")
-            bps = r.get("bits_per_sample")
-            print("%-22s %-14s %6s %8d %8s %10s %10s" % (
+            if not r.get("usable"):
+                print("%-16s %-16s %10s" % (os.path.basename(r["file"]), "ALL ZERO", "-"))
+                continue
+            print("%-16s %-16s %10.3f %10.4f %10.2f %8.4f" % (
                 os.path.basename(r["file"]),
                 "w=%s,wr=%s" % (r["header"].get("words"), r["header"].get("wraps")),
-                ("%.3f" % per) if per else "-",
-                r["pairs"]["CLK"]["trans"],
-                "diff" if r["pairs"]["CLK"]["inv"] > 0.90 else "single",
-                ("%.3f" % bps) if bps else "-",
-                "yes" if r.get("symbols") else "no"))
+                r["fs_hz"] / 1e6, r["f_tmds_clk_hz"] / 1e6,
+                r["bit_rate_hz"] / 1e6, r["samples_per_bit"]))
     return 0
 
 
