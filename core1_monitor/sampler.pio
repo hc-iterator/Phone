@@ -1,0 +1,12 @@
+; TMDS 采样探针的 PIO 程序（core1_monitor 专用副本）
+;
+; 与 probe_rp2040/sampler.pio 的指令完全一致：一条 `in pins,8` = 1 个时钟锁存 8 根线一次，
+; autopush 32 位 ⇒ 每 4 个采样推出 1 个 32 位字（低采样在前还是高采样在前由 in_shift 决定，
+; 这里用左移 = 先来的在高位，与 probe_rp2040 保持一致）。
+;
+; 为什么复制一份而不是 include 隔壁工程：
+;   ① 纪律要求不许碰 probe_rp2040/ 下的任何文件，跨工程 include 会把两个构建耦在一起；
+;   ② 万一以后探针固件单独演进（比如加条指令），监视器这边不会被连带改坏。
+; 如果哪天修改了这个程序，记得 probe_rp2040/sampler.pio 是"源头"，两边要比对。
+.program sampler
+    in pins, 8

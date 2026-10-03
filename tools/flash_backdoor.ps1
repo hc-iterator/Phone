@@ -42,7 +42,7 @@ function Get-BootDrives {
 }
 
 function Get-SerialPorts {
-    python -c "from serial.tools import list_ports; print(' '.join(p.device for p in list_ports.comports()))" 2>$null
+    python -c "import serial.tools.list_ports as L; ps=[p for p in L.comports() if not (chr(66)+'luetooth' in (p.description or '') or chr(34013)+chr(29273) in (p.description or ''))]; print(' '.join(p.device for p in ps))" 2>$null
 }
 
 # ---- 不带参数：只报告现状 ----
