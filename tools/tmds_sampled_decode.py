@@ -117,31 +117,46 @@ def diff(samples, p_bit, n_bit):
 
 
 # --------------------------------------------------- period estimation
-def match_count_exact(bits, lag):
-    """How many i have bits[i] == bits[i+lag]. Exact, bits is a list of 0/1."""
+# The bit streams are long, so everything here works on byte-per-sample
+# bytearrays viewed as big integers: bits[i] is bit i of the integer, which
+# makes "compare the signal with a shifted copy" a single XOR plus popcount.
+_POP = bytes(bin(i).count("1") for i in range(256))
+
+
+def pack_bits(bits):
+    """Pack a 0/1 sequence into a big int, bit i = bits[i] (LSB = sample 0)."""
+    v = 0
+    for b in reversed(bits):
+        v = (v << 1) | b
+    return v
+
+
+def popcount_int(x):
+    if x == 0:
+        return 0
+    # to_bytes + table is much faster than bin(x).count under CPython
+    return sum(_POP[c] for c in x.to_bytes((x.bit_length() + 7) // 8, "little"))
+
+
+def match_count_exact(bits, lag, packed=None):
+    """Number of i with bits[i] == bits[i+lag]."""
     n = len(bits)
-    c = 0
-    # split into blocks so the big-int XOR stays cheap
-    step = 4096
-    for st in range(0, n - lag, step):
-        en = min(st + step, n - lag)
-        a = 0
-        b = 0
-        for i in range(st, en):
-            a = (a << 1) | bits[i]
-            b = (b << 1) | bits[i + lag]
-        x = a ^ b
-        c += (en - st) - bin(x).count("1")
-    return c
+    if lag <= 0 or lag >= n:
+        return 0
+    if packed is None:
+        packed = pack_bits(bits)
+    m = n - lag
+    a = packed & ((1 << m) - 1)      # bits[0 .. m-1]
+    b = packed >> lag                # bits[lag .. n-1]
+    diff = popcount_int(a ^ b)
+    return m - diff
 
 
 def autocorr(bits, max_lag, min_lag=1):
     n = len(bits)
-    out = {}
-    for lag in range(min_lag, max_lag + 1):
-        c = match_count_exact(bits, lag)
-        out[lag] = c / float(n - lag)
-    return out
+    packed = pack_bits(bits)
+    return {lag: match_count_exact(bits, lag, packed) / float(n - lag)
+            for lag in range(min_lag, max_lag + 1)}
 
 
 def transition_rate(bits):
@@ -228,9 +243,10 @@ def ascii_plot(vals, height=12, width=None):
 def find_line_period(lane_bits, lo, hi, topn=8):
     """Rank candidate line periods by exact long-range self-match of the lane."""
     n = len(lane_bits)
+    packed = pack_bits(lane_bits)
     scored = []
     for lag in range(lo, hi + 1):
-        c = match_count_exact(lane_bits, lag)
+        c = match_count_exact(lane_bits, lag, packed)
         scored.append((c / float(n - lag), lag))
     scored.sort(reverse=True)
     # keep peaks that are not just near-duplicates
