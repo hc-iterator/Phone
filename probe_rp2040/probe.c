@@ -23,6 +23,7 @@
  * ===========================================================================
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include "pico/stdlib.h"
 #include "pico/bootrom.h"          /* reset_usb_boot：串口后门进 BOOTSEL */
 #include "hardware/watchdog.h"     /* watchdog_reboot：串口后门普通重启 */
@@ -215,7 +216,7 @@ int main(void) {
                            (unsigned long)g_pio->rxf[g_sm]);
                 }
                 fflush(stdout); break;
-            case 'd': dump_hex();
+            case 'd': capture(); dump_hex();
                       /* ★ 采完立刻重新装填并启动 DMA，方便连续采 */
                       dma_channel_set_write_addr((uint)g_dma, g_buf, false);
                       dma_channel_set_trans_count((uint)g_dma, BUF_WORDS, true);
@@ -294,6 +295,32 @@ int main(void) {
             case '0': pio_sm_set_enabled(g_pio, g_sm, false); printf("OK stopped\n"); fflush(stdout); break;
             case '1': pio_sm_set_enabled(g_pio, g_sm, true);  printf("OK running\n"); fflush(stdout); break;
             /* ── 直接读引脚（绕过 PIO/DMA，用 SIO）⇒ 分清"通路坏"还是"PIO 路坏" ── */
+            /*
+             * ★ 'f<khz>' = 运行时改主频（不持久化：断电即回默认 252 MHz）。
+             *   为什么要做成运行时：二分试超频极限时，若某档位起不来（PLL 锁不住/USB 掉），
+             *   只需【拔插一次】就回到已知可用的 252 MHz ⇒ 零风险、不用重新烧写 ✓
+             *   用法： f300 = 300 MHz， f350 = 350 MHz
+             */
+            case 'f': {
+                char buf[8]; int n = 0;
+                while (n < 7) {
+                    int c2 = getchar_timeout_us(30000);
+                    if (c2 >= '0' && c2 <= '9') buf[n++] = (char)c2; else break;
+                }
+                buf[n] = 0;
+                if (n == 0) { printf("usage: f<MHz>   e.g. f300\n"); fflush(stdout); break; }
+                uint32_t mhz = (uint32_t)atoi(buf);
+                uint32_t khz = mhz * 1000u;
+                printf("TRY %lu kHz ...\n", (unsigned long)khz); fflush(stdout);
+                bool ok = set_sys_clock_khz(khz, false);   /* false = 尽力而为，不 panic */
+                sleep_ms(50);
+                printf("SET ok=%d  clk_sys=%lu Hz\n", (int)ok,
+                       (unsigned long)clock_get_hz(clk_sys));
+                /* 改完主频后 PIO 的采样率跟着变，这里把当前实际采样率报出来 */
+                printf("     sample rate now = %.1f MSa/s (clkdiv unchanged)\n",
+                       (double)clock_get_hz(clk_sys) / 1000.0 / 1000.0);
+                fflush(stdout); break;
+            }
             case 'g': {
                 printf("GPIO   : 7 6 5 4 3 2 1 0\n");
                 for (int n = 0; n < 5; n++) {
