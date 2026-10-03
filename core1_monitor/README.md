@@ -15,10 +15,10 @@ Core1 串口服务 + 自救 + Core0 的 PIO 采样。采样器跑飞 = Core0 挂
 
 ## 0. 上机验证状态（2026-10-03）
 
-第一版（纯监视器 v1.0）**已在真板上按第 8 节 ①~⑤ 步通过**：
+**独立监视器版（v1.0）与合并版（v1.1）的 `S` / `X` / `P` / `B` 全部实测通过**：
 
 ```
-S ⇒ 完整状态 OK
+S ⇒ 完整状态 OK（含 sys_clk / overclock OK / flash / Core0 心跳）
 X ⇒ 故意挂死 Core0 ⇒ "heartbeat frozen = it is really hung"
 S ⇒ "WARN: heartbeat frozen -> Core0 looks hung"（监视器自己活着）
 P ⇒ "ERR: Core0 no response (hung?) -- nothing was paused, and this monitor is fine."
@@ -27,6 +27,40 @@ B ⇒ 板子真的进了 BOOTSEL（出现 RPI-RP2 盘）  <= 灵魂功能成立�
 
 > ⚠️ **协议细节（实测踩到）**：命令**必须以 CR（`\r`，或 `\n`）结尾**才会被执行。
 > 只发裸字符时固件只回显、不动作 —— 一开始容易被误判成"固件坏了"。
+
+### v1.1.1 修掉的一个真 bug（上机抓到，值得记下来）
+
+**症状**：合并版第一次真正动用采样器（`m` / `d`）时，**Core0 自己死了**（`m`/`d` 报 `Core0 no response`）。
+`g` 却正常 —— 因为 `g` 只读 SIO，是当时唯一不碰 RX FIFO 的采样命令。
+
+**根因**：`samp_drain_fifo()` 被我写成了
+
+```c
+while (!pio_sm_is_rx_fifo_empty(pio, sm)) { (void)pio_sm_get(pio, sm); }   // 错
+```
+
+"抽到空为止"看着天经地义，但 **PIO 的产量可以高于 CPU 的抽取速度**：
+默认 `clkdiv=1` 时 PIO 是 **63 Mwords/s**（每 4 个 clk_sys 推 1 个字），而 CPU 紧循环抽只有 ~30 Mwords/s
+⇒ RX FIFO **永远不会空** ⇒ Core0 就死在这个循环里。
+
+**改法（三层，缺一不可）**：
+
+1. 倒 FIFO 改成**有界**：先读电平，只抽这么多个（RX FIFO 只有 4 深），再夹 8 的上限。
+2. 默认分频从 `1.0` 改成 **12**：clkdiv=1 在本板上本来就不可用（FIFO 恒满 ⇒ 每次采集都丢样），
+   默认 12 只要 5.25 Mwords/s，余量很大，第一次 `d` 就是干净的。要满速自己发 `c1`。
+3. 加**采样器看门狗**（Core0 侧）：复用本来就在跑的 1ms 心跳闹钟，任何一次采样操作超过预算
+   （capture 800ms / measure 500ms / 其它 200ms）就在中断里立 `abort`，采样循环看到就退出，
+   Core1 收到的是"这次操作被中止(status=1)"而不是"Core0 没了"。
+   ⇒ 以后就算又有人写出无界循环，Core0 也只会"这次采集失败"，**绝不会整个核消失**。
+
+**顺带修掉的三个**：
+
+* `s`（小写）以前被我错接成监视器状态（而文档写的是采样器状态）⇒ 现在 `S`=监视器、`s`=采样器。
+* `clkdiv` 解码位域写错：PIO 的 `SM_CLKDIV` 是 **INT 在 [31:16]、FRAC 在 [15:8]**，
+  我原来写成 `>>8 / &0xFF`，会把 12 解成 3072 ⇒ 采样率 / `expect` 全错。现在直接引用
+  `PIO_SM0_CLKDIV_INT_LSB / FRAC_LSB` 宏，不再凭印象。
+* 采样请求失败的提示不再一律说"Core0 挂了"：现在用**心跳**区分
+  "真挂死"、"活着但没答采样请求（协议错位）"和"操作被看门狗中止"三种情况。
 
 ---
 
@@ -88,9 +122,13 @@ mon>
 | `s` | 采样器状态（实时问 Core0；Core0 挂了就报"无响应"+ 上次已知值） |
 | `g` | 用 SIO 直接读 GPIO0..7 五次（与 PIO 交叉验证：是线的问题还是 PIO 通路的问题） |
 
+> **上电默认 `clkdiv = 12`（21 MSa/s）**，不是满速。理由见第 0 节那个 bug：
+> `clkdiv=1` 时 PIO 产 63 Mwords/s 而 CPU 抽不过来，FIFO 恒满、每次采集都丢样。
+> 要满速请自己发 `c1`（那时 `m` 会明确报 RXSTALL）。
+
 > ⚠️ `c`/`C` 与 `r`/`R` 一样**靠大小写区分**：小写 `c<div>` = 设采样分频；大写 `C` = 继续 Core0。
-> `s`/`S` 都印状态（`S` 是监视器总状态 + 采样器摘要，`s` 是采样器详情）。
-> `s` 需要 Core0 活着；`S` 不用（它只读缓存），所以 Core0 挂死时先用 `S`。
+> `S`（大写）= 监视器总状态（只读缓存，Core0 挂了也秒回）；`s`（小写）= 采样器状态（会问 Core0）。
+> 所以 **Core0 挂死时先用 `S` 看心跳**，`s` 会明确告诉你是"真挂死"还是"只是没答采样请求"。
 
 ### 数字格式（重要）
 
@@ -317,6 +355,7 @@ OK clkdiv=12.00  =>  21000 kSa/s  (words/s = 5250000)
 
 `12` 表示 PIO 每 12 个 clk_sys 周期采一次 ⇒ 252 MHz / 12 = **21 MSa/s**。
 推荐从 **11~12** 开始（这是 probe_rp2040 时代的推荐档，FIFO 不会溢出）。
+上电默认就是 12，所以第一次用不必先发 `c12`。
 
 ### 采样器：`m` 量搬运速率 + FIFO 状态
 
@@ -479,6 +518,12 @@ rebooting into BOOTSEL (RP2 mass storage). Close this port.
    （代价是窗口之前少 <16 个采样，见第 6 节）。
 9. **`usb_kick()` 必须限速。** 等 Core0 的自旋循环里如果每次迭代都 `irq_set_pending()`，
    主循环几乎全部时间都耗在 ISR 里；所以改成 1ms 一踢（`usb_kick_throttled()`）。
+10. **采样器看门狗：Core0 不允许被采样路径弄死。**
+    1ms 心跳闹钟兼当看门狗：采样操作超预算就在中断里立 `abort`，采样循环（capture / measure）
+    看到就退出，Core1 收到"被中止"，而不是被拖死。
+    这是 v1.1 被真板打脸之后补的 —— 教训写在文件头和第 0 节：
+    **凡是"直到满足某条件"的循环，都要先问"这条件会不会永远不成立"。**
+    （Core1 侧同时保留了心跳体检：超时后能区分"真挂死 / 活着但没答请求 / 被中止"。）
 
 ---
 
@@ -497,6 +542,9 @@ rebooting into BOOTSEL (RP2 mass storage). Close this port.
 * 上位机串口工具请关闭本地回显；**命令必须以 CR/回车结尾**。
 * **采样器（Core0）相关**：
   * `s`/`d`/`c`/`m`/`g` 都需要 Core0 活着；`P` 暂停或 `X` 挂死时它们会明确报出来（不会假死）。
+  * **上电默认 `clkdiv = 12`**（不是满速）。`c1` 会丢样（PIO 比 CPU 抽得快），只适合做压力/回归测试。
+  * **采样器看门狗**：capture 800ms / measure 500ms / 其它 200ms 为预算；超了报 `aborted (status=1)`，
+    Core0 不会因此死掉。这是 v1.1.1 补的兜底。
   * **`d` 会在采集前把 FIFO 里已有的字（≤4 个）倒掉**，让缓冲从干净的新数据开始：
     代价是时间轴开头少掉 <16 个采样（**在窗口之前**），换来的是"窗口内部连续" +
     "丢样标志只反映窗口内"。比旧 DMA 方案（窗口内部断裂）严格更好。
@@ -574,17 +622,21 @@ $env:PICO_SDK_PATH=$sdk; $env:PICO_TOOLCHAIN_PATH=$tc; $env:PATH="$tc\bin;$env:P
 12. **接线**：探针 GPIO0..7 ← 待测板 GPIO0..7，外加共地；待测板在跑 DVI 输出。
 13. `g` ⇒ 五次读数里 `changes` **不为 0** ⇒ 线是活的。
     若一直是同一个静态值，先查接线/待测板有没有在输出（这一步能把"线的问题"和"PIO 的问题"分开）。
-14. `s` ⇒ `sm enabled=1`、`fdebug` 有值；此时 `rxstall` 可能是 1（上电后没人抽 FIFO，正常）。
-15. `c12` ⇒ 打印 `21000 kSa/s`。
-16. `m` ⇒ `moved` 应该接近 `expect`，并看 **`RXSTALL`**：
-    * 出现 `WARN: PIO RXSTALL is set` ⇒ 把 `clkdiv` 加大（`c16` / `c32`）再来一次，直到没有这个警告；
+14. `s` ⇒ `sm enabled=1`、`fdebug` 有值；注意两个 `rxstall` 的区别（见第 3 节）。
+15. `c12` ⇒ 打印 `clkdiv=12.00` 和 `21000 kSa/s`（若显示 3072.00 之类的怪数字，是位域解码又错了）。
+16. `m` ⇒ `moved` 应该接近 `expect`，并看 **窗口内的 `RXSTALL`**：
+    * 出现 `WARN: ... samples WERE lost` ⇒ 把 `clkdiv` 加大（`c16` / `c32`）再来一次，直到没有这个警告；
     * `moved` 远小于 `expect` ⇒ 瓶颈在抽 FIFO 这一侧，同样加大 `clkdiv`。
-17. `d` ⇒ 应该看到 `captured 16384 words ...`、`nonzero=16384/16384`、`BEGIN 16384 0` / 16384 行 hex / `END`。
-    **把这一屏存成 txt，直接喂 `tools/tmds_sampled_decode.py`**（格式与旧固件一致，见第 3 节的说明）。
-18. **合并的意义（重点）**：在待测板还在输出的情况下 `X`（Core0 故意挂死）⇒
-    * `d` / `s` 应报 `Core0 no response ... sampler is dead`；
+17. **回归测试（v1.1.1 修的那个 bug）**：故意发 `c1`（满速，PIO 63 Mwords/s > CPU 抽取能力），
+    然后连发 `m` 和 `d`：
+    * 期望：**Core0 不能死**。`m`/`d` 要么正常返回并报 `rxstall`/丢样警告，要么明确报"被中止"；
+    * 无论哪种，之后 `S` 的 **`core0` 心跳必须仍在涨**；若报 `FROZEN`，说明这个 bug 又回来了。
+18. `d` ⇒ 应该看到 `captured 16384 words ...`、`nonzero=16384/16384`、`BEGIN 16384 0` / 16384 行 hex / `END`。
+    **把这一屏存成 txt，直接喂 `tools/tmds_sampled_decode.py`**（格式与旧固件一致，见第 3 节）。
+19. **合并的意义（重点）**：在待测板还在输出的情况下 `X`（Core0 故意挂死）⇒
+    * `d` / `s` 应报 `Core0 ... hung`（并且 `s` 会用心跳告诉你"真挂死"还是"没答请求"）；
     * `S` / `r` / `P` / `B` **照常可用**；
     * `B` 能进 BOOTSEL。⇒ 采样器挂了也不用按按键。
-19. `P` 之后敲 `d` ⇒ 应立刻提示 `Core0 is PAUSED -- send C to resume it first`（不白等超时）。
+20. `P` 之后敲 `d` ⇒ 应立刻提示 `Core0 is PAUSED -- send C to resume it first`（不白等超时）。
 
 有任何一条不符合预期，请把那一屏原样贴回来（固件输出全是 ASCII，不会因为编码炸掉）。

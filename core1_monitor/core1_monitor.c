@@ -123,6 +123,11 @@
 #define SAMP_DIV_MIN         1u
 #define SAMP_DIV_MAX         64u
 #define SAMP_DIV_RECOMMEND   11u                 // 推荐 11~12（与 probe_rp2040 的下位机约定一致）
+// 上电默认分频。probe_rp2040 原来默认 1.0（满速），但那在本板上是【不可用】的：
+// clkdiv=1 ⇒ PIO 63 Mwords/s，而 CPU 紧循环抽只有 ~30 Mwords/s ⇒ RX FIFO 恒定满、
+// SM 一直停顿 ⇒ 每次采集都有丢样。默认 12 则只要 5.25 Mwords/s，余量很大，第一次 d 就是干净的。
+// 要满速自己发 c1（那时 m 会明确报 RXSTALL/丢样）。
+#define SAMP_DIV_DEFAULT     12u
 #define SAMP_CAP_TIMEOUT_MS  500u                // Core0 抽 FIFO 的兜底（必须 < Core1 的等待上限，
                                                  // 这样 PIO 真死了 Core1 收到的是"采到 0 字"而不是"没响应"）
 #define SAMP_ACK_TIMEOUT_MS  1500u               // Core1 等采样器请求完成的上限（> Core0 的 500ms 兜底）
@@ -211,10 +216,14 @@ static uint32_t g_samp_cache_words;    // 上次 d 抽到的字数
 static uint32_t g_samp_cache_stall;    // 上次 d 是否丢样
 static bool     g_samp_cache_valid;
 
-// 把 Core0 报回来的 clkdiv（16.8 定点）换成 x100 的整数，便于打印成 "12.00"
+// 把 Core0 报回来的 clkdiv（PIO 寄存器原值）换成 x100 的整数，便于打印成 "12.00"。
+// ★ 位域必须按 RP2040 的 SM_CLKDIV 来：INT 在 [31:16]，FRAC 在 [15:8]（regs/pio.h 的
+//   PIO_SM0_CLKDIV_INT_LSB=16 / FRAC_LSB=8）。第一版我写成 >>8 / &0xFF，结果把 12 解成 3072，
+//   采样率/expect 全错（上机被用户抓到）。这种"寄存器位域凭印象写"的错最难自查，记在这里。
 static uint32_t sres_div_x100(void) {
     uint32_t cd = g_sres.clkdiv;
-    uint32_t i = cd >> 8, f = cd & 0xFFu;
+    uint32_t i = (cd >> PIO_SM0_CLKDIV_INT_LSB) & 0xFFFFu;
+    uint32_t f = (cd >> PIO_SM0_CLKDIV_FRAC_LSB) & 0xFFu;
     return i * 100u + (f * 100u) / 256u;
 }
 
@@ -369,11 +378,43 @@ static void usb_kick_throttled(void) {
 //  Core0 侧：心跳 / 暂停 / 给 flash 让路 / 故意挂死
 // =====================================================================================
 
-// Core0 的 1ms 心跳闹钟：唯一目的是给 __wfi() 提供唤醒源。
+// 采样器的"看门狗"（Core0 侧）：
+// 为什么还要这个 —— v1.1 第一版真的被采样路径弄死过 Core0（一个"抽到空为止"的死循环）。
+// 那次教训说明：光靠"我逐个检查过循环都是有界的"不够，得有个【兜底】。
+// Core0 的 1ms 心跳闹钟本来就在跑，顺手让它兼当看门狗：任何一次采样操作超过预算，
+// 就在中断里把 abort 立起来，采样循环看到就退出。这样即使以后又有人写出无界循环，
+// Core0 也只会"这次采集失败"，绝不会变成"整个核没了"
+// （Core0 没了，采样器、暂停/继续、写 Flash 就全废了 —— 那是本固件的立身之本）。
+static volatile uint64_t g_samp_deadline_us;   // 0 = 未武装
+static volatile bool     g_samp_abort;
+
+// 注意：64 位变量在 Cortex-M0+ 上【不是原子写】。这里写、看门狗（中断）读，
+// 必须关一下中断，否则 ISR 可能读到"半截"的 deadline（上半个字是新的、下半个字是旧的），
+// 结果要么误报中止、要么永远不叫停。开关各一次只花几个周期，值得。
+static void samp_arm(uint32_t budget_ms) {
+    uint32_t save = save_and_disable_interrupts();
+    g_samp_abort = false;
+    g_samp_deadline_us = time_us_64() + (uint64_t)budget_ms * 1000u;
+    restore_interrupts(save);
+}
+
+static void samp_disarm(void) {
+    uint32_t save = save_and_disable_interrupts();
+    g_samp_deadline_us = 0;
+    g_samp_abort = false;
+    restore_interrupts(save);
+}
+
+// Core0 的 1ms 心跳闹钟：给 __wfi() 提供唤醒源 + 兼当采样器看门狗。
 // Cortex-M0+ 的 WFI 必须有中断才会醒；默认 alarm pool 是 Core0 的，所以这个 alarm 天然属于
-// Core0，回调里什么都不做。
+// Core0。回调里做的事必须极短（它在 TIMER_IRQ_0 里跑）。
 static bool core0_tick_cb(repeating_timer_t *t) {
     (void)t;
+    uint64_t dl = g_samp_deadline_us;
+    if (dl && time_us_64() >= dl) {
+        g_samp_abort = true;          // 让正在跑的采样循环自己退出来
+        g_samp_deadline_us = 0;       // 只打一枪
+    }
     return true;   // 继续重复
 }
 
@@ -472,6 +513,11 @@ static void core0_handle_sampler(uint32_t msg) {
         return;
     }
 
+    // ★ 每次采样操作都武装看门狗：预算 = "该操作正常所需时间" + 充足余量，
+    //   超了就让循环退出、回一个"被中止"的 status 给 Core1（而不是把 Core0 卡死在那儿）。
+    //   预算必须【大于】各操作自己的内部兜底，否则会抢在正常流程前面误报：
+    //     capture 内部兜底 500ms -> 给 800ms；measure 窗口最大 200ms -> 给 500ms。
+    samp_arm(200u);
     switch (msg) {
         case MSG_SAMP_CFG: {
             uint32_t div = arg;
@@ -483,7 +529,8 @@ static void core0_handle_sampler(uint32_t msg) {
             break;
         }
         case MSG_SAMP_CAPTURE: {
-            // ★ 采集前先把 FIFO 里已经躺着的字（最多 4 个）倒掉，再清丢样标志。
+            samp_arm(800u);                 // > SAMP_CAP_TIMEOUT_MS(500)，别抢正常兜底的班
+            // ★ 采集前先把 FIFO 里已经躺着的字（≤4 个）倒掉，再清丢样标志。
             //   为什么：SM 从上电起就在跑，FIFO 早就满了、RXSTALL 也早就置位过；
             //   不倒掉的话，(a) 缓冲开头混进采集前的陈旧字，(b) 丢样标志会把"采集前
             //   就发生过的那次停顿"算到本次头上，变成假警报。
@@ -497,13 +544,16 @@ static void core0_handle_sampler(uint32_t msg) {
             bool stall_in_window = samp_stalled();
             g_sres.words = got;
             samp_buffer_diag();
-            samp_fill_common(0);
+            samp_fill_common(g_samp_abort ? 1u : 0u);
             g_sres.stall_window = stall_in_window ? 1u : 0u;   // 覆盖成"窗口内"的结论
-            break;
+            samp_disarm();
+            multicore_fifo_push_blocking_inline(MSG_SAMP_ACK);
+            return;
         }
         case MSG_SAMP_MEASURE: {
+            samp_arm(500u);                 // > 窗口上限(200ms)
             samp_measure(arg);      // 里面会在窗口结束的那一刻快照丢样标志
-            samp_fill_common(0);
+            samp_fill_common(g_samp_abort ? 1u : 0u);
             break;
         }
         case MSG_SAMP_STATUS: {
@@ -520,6 +570,7 @@ static void core0_handle_sampler(uint32_t msg) {
             g_sres.status = 97;
             break;
     }
+    samp_disarm();
     multicore_fifo_push_blocking_inline(MSG_SAMP_ACK);
 }
 
@@ -701,9 +752,19 @@ static bool samp_stalled(void) {
     return (g_probe_pio->fdebug & SAMP_RXSTALL_MASK) != 0;
 }
 
-// 倒掉 FIFO 里的存货（读 RXF 即弹出）。用于采集/测量前把状态拉到"干净边界"。
+// 倒掉 FIFO 里【此刻】躺着的字。
+// ★★ 这个函数曾经把 Core0 弄死过（上机实测，v1.1 第一版）★★
+//   原来写成 `while (!pio_sm_is_rx_fifo_empty(...)) { (void)pio_sm_get(...); }`，
+//   看着天经地义，其实是个死循环：PIO 的产量可以【高于】CPU 的抽取速度 ——
+//   默认 clkdiv=1 时 PIO 是 63 Mwords/s（每 4 个 clk_sys 推 1 个字），
+//   而 CPU 紧循环抽只有 ~30 Mwords/s ⇒ FIFO 永远不会空 ⇒ Core0 就死在这一行里。
+//   教训（写给以后的我）：凡是"抽到空为止/直到满足某条件"的循环，都要先问一句
+//   "这个条件有没有可能永远不成立"。现在改成：先读电平，只抽这么多个
+//   （RP2040 的 RX FIFO 只有 4 深），再夹一个 8 的上限兜底 —— 数学上铁定有界。
 static void samp_drain_fifo(void) {
-    while (!pio_sm_is_rx_fifo_empty(g_probe_pio, g_probe_sm)) {
+    uint32_t n = pio_sm_get_rx_fifo_level(g_probe_pio, g_probe_sm);
+    if (n > 8u) n = 8u;
+    while (n--) {
         (void)pio_sm_get(g_probe_pio, g_probe_sm);
     }
 }
@@ -756,7 +817,7 @@ static void samp_sampler_init(void) {
     pio_sm_config c = sampler_program_get_default_config(offset);
     sm_config_set_in_pins(&c, SAMP_PIN_BASE);              // RP2040 的 in 窗口固定 0..31
     sm_config_set_in_shift(&c, false /* 左移：先采到的在高位 */, true /* autopush */, 32);
-    sm_config_set_clkdiv(&c, 1.0f);
+    sm_config_set_clkdiv(&c, (float)SAMP_DIV_DEFAULT);     // 默认 12，不是 1.0（见宏那里的解释）
     pio_sm_init(g_probe_pio, g_probe_sm, offset, &c);
     pio_sm_set_enabled(g_probe_pio, g_probe_sm, true);
     samp_clear_stall();                                    // 清掉启动瞬间的陈旧标志
@@ -774,6 +835,7 @@ static uint32_t samp_capture(uint32_t want) {
     uint64_t t0 = time_us_64();
     uint32_t got = 0;
     while (got < want) {
+        if (g_samp_abort) break;                 // 看门狗叫停（见 core0_tick_cb）
         if (!pio_sm_is_rx_fifo_empty(g_probe_pio, g_probe_sm)) {
             g_samp_buf[got++] = pio_sm_get(g_probe_pio, g_probe_sm);
         } else if ((time_us_64() - t0) > (uint64_t)SAMP_CAP_TIMEOUT_MS * 1000u) {
@@ -795,6 +857,7 @@ static void samp_measure(uint32_t window_us) {
     uint64_t t0 = time_us_64();
     uint32_t moved = 0;
     for (;;) {
+        if (g_samp_abort) break;                 // 看门狗叫停（见 core0_tick_cb）
         if (!pio_sm_is_rx_fifo_empty(g_probe_pio, g_probe_sm)) {
             (void)pio_sm_get(g_probe_pio, g_probe_sm);
             moved++;
@@ -1028,9 +1091,36 @@ static bool samp_precheck(const char *what) {
     return true;
 }
 
-static bool samp_req(uint32_t msg, uint32_t arg, uint32_t timeout_ms) {
+static bool samp_req(uint32_t msg, uint32_t arg, uint32_t timeout_ms, uint32_t *st_out) {
+    if (st_out) *st_out = 0xFFFFFFFFu;                 // 0xFFFFFFFF = 连 ACK 都没收到
     if (!core0_request_arg(msg, arg, MSG_SAMP_ACK, timeout_ms)) return false;
+    if (st_out) *st_out = g_sres.status;
     return g_sres.status == 0;
+}
+
+// 采样请求失败时，把"到底是哪种失败"说清楚。
+// 为什么值得单独写：第一版所有失败都打印 "Core0 no response (hung?)"，
+// 而实际上很可能是"Core0 活着、但没在答采样请求"（协议错位）或者"操作被看门狗中止了"。
+// 用【心跳】把这两种情况和真挂死区分开 —— 用户上机时就靠这句话省一轮排查。
+static void samp_report_fail(const char *what, uint32_t status) {
+    if (status != 0xFFFFFFFFu) {
+        printf("ERR: %s was aborted on Core0 (status=%lu).\n", what, (unsigned long)status);
+        printf("     => an internal sampler guard tripped; Core0 itself is still alive.\n");
+        printf("     use s (status) and m (measure) to see what the FIFO/SM are doing.\n");
+        return;
+    }
+    uint32_t hb1 = g_core0_heartbeat;
+    bus_delay_ms(20);
+    uint32_t hb2 = g_core0_heartbeat;
+    if (hb1 != hb2) {
+        printf("ERR: %s timed out, but Core0 heartbeat is ALIVE (%lu -> %lu).\n",
+               what, (unsigned long)hb1, (unsigned long)hb2);
+        printf("     => Core0 is running; it is just not answering sampler requests\n");
+        printf("        (protocol/FIFO desync). S / r / w / P / B still all work.\n");
+    } else {
+        printf("ERR: %s timed out and Core0 heartbeat is FROZEN -> Core0 is really hung.\n", what);
+        printf("     => sampler is dead. S / r / w / B still work; R or B recovers the chip.\n");
+    }
 }
 
 // c<div>：设 PIO 分频（1~64，十进制；1~2 位）
@@ -1042,8 +1132,9 @@ static void cmd_samp_cfg(uint32_t div) {
                (unsigned long)SAMP_DIV_RECOMMEND);
         return;
     }
-    if (!samp_req(MSG_SAMP_CFG, div, REQ_TIMEOUT_MS)) {
-        printf("ERR: Core0 no response (hung?) -- sampler is dead, nothing changed.\n");
+    uint32_t st = 0;
+    if (!samp_req(MSG_SAMP_CFG, div, REQ_TIMEOUT_MS, &st)) {
+        samp_report_fail("c<div>", st);
         return;
     }
     samp_cache_update();
@@ -1058,8 +1149,9 @@ static void cmd_samp_cfg(uint32_t div) {
 // m：量"这一侧的搬运能力" + FIFO/FDEBUG 状态
 static void cmd_samp_measure(void) {
     if (!samp_precheck("m")) return;
-    if (!samp_req(MSG_SAMP_MEASURE, SAMP_MEASURE_US, SAMP_ACK_TIMEOUT_MS)) {
-        printf("ERR: Core0 no response (hung?) -- sampler is dead.\n");
+    uint32_t st = 0;
+    if (!samp_req(MSG_SAMP_MEASURE, SAMP_MEASURE_US, SAMP_ACK_TIMEOUT_MS, &st)) {
+        samp_report_fail("m (measure)", st);
         return;
     }
     samp_cache_update();
@@ -1098,7 +1190,7 @@ static void cmd_samp_capture(void) {
     bool ok = core0_request_arg(MSG_SAMP_CAPTURE, SAMP_WORDS, MSG_SAMP_ACK, SAMP_ACK_TIMEOUT_MS);
     uint64_t dt = time_us_64() - t0;
     if (!ok) {
-        printf("ERR: Core0 no response (hung?) -- sampler is dead, no data.\n");
+        samp_report_fail("d (capture)", 0xFFFFFFFFu);
         return;
     }
     uint32_t got = g_sres.words;
@@ -1147,8 +1239,9 @@ static void cmd_samp_capture(void) {
 // s：采样器实时状态（会去问 Core0；Core0 挂了就如实报无响应 + 缓存值）
 static void cmd_samp_status(void) {
     if (!samp_precheck("s")) return;
-    if (!samp_req(MSG_SAMP_STATUS, 0, REQ_TIMEOUT_MS)) {
-        printf("ERR: Core0 no response (hung?) -- sampler is dead.\n");
+    uint32_t st = 0;
+    if (!samp_req(MSG_SAMP_STATUS, 0, REQ_TIMEOUT_MS, &st)) {
+        samp_report_fail("s (status)", st);
         if (g_samp_cache_valid) {
             printf("     last known: clkdiv=%lu -> %lu kSa/s, last capture %lu words, stall=%lu\n",
                    (unsigned long)g_samp_cache_div, (unsigned long)g_samp_cache_ksa,
@@ -1185,8 +1278,9 @@ static void cmd_samp_gpio(void) {
     printf("GPIO   : 7 6 5 4 3 2 1 0\n");
     uint32_t prev = 0xFFFFFFFFu, changes = 0, n = 0;
     for (int i = 0; i < 5; i++) {
-        if (!samp_req(MSG_SAMP_GPIO, 0, REQ_TIMEOUT_MS)) {
-            printf("ERR: Core0 no response (hung?) -- sampler is dead.\n");
+        uint32_t st = 0;
+        if (!samp_req(MSG_SAMP_GPIO, 0, REQ_TIMEOUT_MS, &st)) {
+            samp_report_fail("g (gpio read)", st);
             return;
         }
         uint32_t m = g_sres.gpio_mask & 0xFFu;
@@ -1528,7 +1622,8 @@ static void dispatch(char *line) {
             cmd_write(a, b);
             return;
 
-        case 's': case 'S':  cmd_status();     return;
+        // S（大写）= 监视器总状态（只读缓存，Core0 挂了也秒回）
+        case 'S':  cmd_status();     return;
         case 'p': case 'P':  cmd_pause();      return;
         case 'b': case 'B':  cmd_bootsel();    return;
         case 'x': case 'X':  cmd_hang_core0(); return;
@@ -1537,6 +1632,11 @@ static void dispatch(char *line) {
         case 'C':  cmd_continue(); return;
 
         // ---- 采样器 ----
+        // s（小写）= 采样器状态（要去问 Core0）。第一版这里错把 s 也接到了 cmd_status，
+        // 结果文档写的是"采样器状态"而实际给的是监视器状态 —— 上机被用户抓到（他发 s 想触发
+        // 采样器路径，实际什么也没发）。现在按文档来：S=监视器、s=采样器。
+        case 's':  cmd_samp_status(); return;
+
         case 'c':
             // 走到这里说明是单独一个小写 c（带了参数的连写形式已经在前面处理掉了）
             if (ntok >= 2) {
