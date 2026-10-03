@@ -1,11 +1,32 @@
-# core1_monitor —— 探针板 Core1 串口调试监视器（穷人版 SWD）
+# core1_monitor —— 探针板 Core1 串口调试监视器 + 采样器（穷人版 SWD）
 
 **解决的问题**：探针板（13 元的 RP2040 核心板）没有引出 SWD，唯一的通道是 USB 串口 + BOOTSEL。
 一旦固件跑挂（Core0 卡在死循环里），串口就没人应答了，只能靠人手按 BOOTSEL 才能救回来。
 本固件把**串口服务整个搬到 Core1**，于是 **Core0 死不死都不影响串口**；`P`（暂停）/`B`（进 BOOTSEL）
 在任何状态下都可用。
 
-产物：`core1_monitor/build/core1_monitor.uf2`（约 94 KB，RP2040 family）。
+**第二件活（v1.1）**：把**采样器合并进来**了。以前探针要么跑监视器、要么跑采样器（两个固件），
+而**干活时（跑采样器）挂死照样没人救**。现在一个固件同时具备：
+Core1 串口服务 + 自救 + Core0 的 PIO 采样。采样器跑飞 = Core0 挂死 = 本固件已被上机验证过能扛住的那种故障。
+
+产物：`core1_monitor/build/core1_monitor.uf2`（约 112 KB，RP2040 family）。
+
+---
+
+## 0. 上机验证状态（2026-10-03）
+
+第一版（纯监视器 v1.0）**已在真板上按第 8 节 ①~⑤ 步通过**：
+
+```
+S ⇒ 完整状态 OK
+X ⇒ 故意挂死 Core0 ⇒ "heartbeat frozen = it is really hung"
+S ⇒ "WARN: heartbeat frozen -> Core0 looks hung"（监视器自己活着）
+P ⇒ "ERR: Core0 no response (hung?) -- nothing was paused, and this monitor is fine."
+B ⇒ 板子真的进了 BOOTSEL（出现 RPI-RP2 盘）  <= 灵魂功能成立，不再需要人手按键
+```
+
+> ⚠️ **协议细节（实测踩到）**：命令**必须以 CR（`\r`，或 `\n`）结尾**才会被执行。
+> 只发裸字符时固件只回显、不动作 —— 一开始容易被误判成"固件坏了"。
 
 ---
 
@@ -24,12 +45,12 @@
 ```
 
 **串口工具设置**：CDC 的波特率无所谓（填 115200 即可），但请**关掉本地回显（Local Echo）**，
-因为固件自己会回显你敲的字符（开了会看到双份），并且请用**行模式/单字符即时发送**（不要等回车才发）。
+因为固件自己会回显你敲的字符（开了会看到双份）；**每条命令必须以 CR/回车结尾**（见上面的警告）。
 
 打开后应该看到：
 
 ```
-=== core1_monitor 1.0 : Core1 serial debug monitor (poor man's SWD) ===
+=== core1_monitor 1.1 : Core1 serial debug monitor (poor man's SWD) ===
 USB CDC is serviced by Core1. Core0 never touches stdio.
 Type ? for help.
 mon>
@@ -39,10 +60,12 @@ mon>
 
 ## 2. 命令表
 
+### 2.1 监视器/自救
+
 | 命令 | 作用 |
 |---|---|
 | `?` | 帮助 |
-| `S` | 状态：sys_clk、Core0 是否被暂停/挂死、Flash 大小 + JEDEC ID |
+| `S` | 状态：sys_clk、超频结果、Core0 是否被暂停/挂死、Flash 大小 + JEDEC ID、采样器摘要 |
 | `r <addr> [n]` | 读 n 个 32 位字（n ≤ 64，默认 1） |
 | `w <addr> <val>` | 写一个 32 位字（**只允许 SRAM**） |
 | `P` | 暂停 Core0（Core0 进 WFI 等命令；Core1 照常服务） |
@@ -52,6 +75,22 @@ mon>
 | `E <addr>` | 擦除包含该地址的 4KB 扇区（**addr 必须 4KB 对齐**） |
 | `F <addr> <len> [H]` | 擦除 + 写入 len 字节 + **读回校验**（`H` = 十六进制文本输入） |
 | `X` | **自测用**：故意让 Core0 挂死（关中断 + 死循环），验证监视器不受影响 |
+
+### 2.2 采样器（跑在 Core0，PIO0，采 GPIO0..7）
+
+引脚映射固定：`GPIO0=D2P(红+) 1=D2N 2=D1P(绿+) 3=D1N 4=D0P(蓝+,含同步) 5=D0N 6=CLKP 7=CLKN`
+
+| 命令 | 作用 |
+|---|---|
+| `c<div>` | 设 PIO 分频（1~64，**十进制**，可连写也可空格）。采样率 = sys_clk / clkdiv。推荐 **11~12** |
+| `m` | 量"CPU 抽 FIFO"的实际搬运速率 + 打 FIFO/FDEBUG 状态（诊断用） |
+| `d` | 采一包（**16384 字 = 65536 个采样**）并十六进制 dump |
+| `s` | 采样器状态（实时问 Core0；Core0 挂了就报"无响应"+ 上次已知值） |
+| `g` | 用 SIO 直接读 GPIO0..7 五次（与 PIO 交叉验证：是线的问题还是 PIO 通路的问题） |
+
+> ⚠️ `c`/`C` 与 `r`/`R` 一样**靠大小写区分**：小写 `c<div>` = 设采样分频；大写 `C` = 继续 Core0。
+> `s`/`S` 都印状态（`S` 是监视器总状态 + 采样器摘要，`s` 是采样器详情）。
+> `s` 需要 Core0 活着；`S` 不用（它只读缓存），所以 Core0 挂死时先用 `S`。
 
 ### 数字格式（重要）
 
@@ -84,23 +123,27 @@ Commands. addr/val are ALWAYS hex (0x optional). counts are decimal (0x.. = hex)
 
 ```
 mon> S
-monitor   : core1_monitor 1.0, this is Core1
-sys_clk   : 125000000 Hz
+monitor   : core1_monitor 1.1, this is Core1
+sys_clk   : 252000000 Hz
 peri_clk  : 125000000 Hz
+overclock : OK (target 252000 kHz)
 flash     : build limit 2048 KB, JEDEC id EF4015, chip 2048 KB
 usable    : up to 10200000
-image     : 10000000..1000bbec (writing here is refused on purpose)
+image     : 10000000..1000def4 (writing here is refused on purpose)
 core0     : running, heartbeat 48213 -> 48234
             ok: alive (~21 ticks/20ms)
 core-fifo : status 00000000 (rx not empty = 0)
+sampler   : clkdiv 12 (last known) -> 21000 kSa/s, last capture 16384 words, stall=0
 ```
 
 `JEDEC id EF4015` = 厂商 `EF`(Winbond) / 类型 `40` / 容量 `15`(=2MB)。
-Core0 挂死时这一行会变成：
+`sampler` 那一行读的是**缓存值**（所以 Core0 挂死时 `S` 也不会变慢）；要看实时值请用 `s`。
+Core0 挂死时这两行会变成：
 
 ```
 core0     : running, heartbeat 48213 -> 48213
             WARN: heartbeat frozen -> Core0 looks hung
+sampler   : clkdiv 12 (last known) -> 21000 kSa/s, last capture 16384 words, stall=0
 ```
 
 ### `r` 读内存
@@ -264,6 +307,114 @@ then R or B -- both still work. That is the whole point of this firmware.
 （注意：`X` 之后 Core0 关着中断死在 flash 里，所以这时 **写 Flash 会被拒绝**——见下面的"已知限制"。
 用 `R` 或 `B` 就能恢复。）
 
+### 采样器：`c<div>` 设采样率
+
+```
+mon> c12
+OK clkdiv=12.00  =>  21000 kSa/s  (words/s = 5250000)
+   sample rate = sys_clk(252000000 Hz) / clkdiv(12); 4 samples per 32-bit word
+```
+
+`12` 表示 PIO 每 12 个 clk_sys 周期采一次 ⇒ 252 MHz / 12 = **21 MSa/s**。
+推荐从 **11~12** 开始（这是 probe_rp2040 时代的推荐档，FIFO 不会溢出）。
+
+### 采样器：`m` 量搬运速率 + FIFO 状态
+
+```
+mon> m
+MEAS moved=10512 words in 2001 us => 5254372 words/s (expect 5250000 at clkdiv=12)
+     rxf=0 sm_en=1 fdebug=00000000
+     => drain rate looks fine (bottleneck is not here)
+     ok: no RXSTALL during the window -> no sample loss at this rate.
+```
+
+* `moved` 是 2ms 窗口内 CPU 实际抽走的字数；`expect` = `sys_clk / clkdiv / 4`
+  （PIO 程序是 `in pins,8` + autopush 32 位 ⇒ **每 4 个采样推 1 个字**）。
+* **窗口内的 `RXSTALL` 是判据**：置位 = RX FIFO 满过 = SM 停顿过 = **采样丢过**。
+  看到 `WARN` 就把 `clkdiv` 加大重试（见第 3 节 `s` 下面关于两个 rxstall 的说明）。
+* 用整数打印（`words/s`、`kSa/s`），不走 `%f`。
+
+### 采样器：`d` 采一包并 dump（与旧固件的格式完全一致）
+
+```
+mon> d
+d: capturing 16384 words (65536 samples) ...
+captured 16384 words (65536 samples) in 3204 us, sys_clk 252000000 Hz, clkdiv 12
+fifo: rxf=0 sm_en=1 fdebug=00000000 rxstall=0
+buffer: nonzero=16384/16384 first_nonzero=0
+BEGIN 16384 0
+40080087
+2a0c1b3f
+...
+END
+```
+
+* **格式**：`BEGIN <字数> <stall>` / **每行一个 8 位十六进制字** / `END`。
+  `tools/tmds_decode.py`、`tools/tmds_sampled_decode.py`、`tools/sampler_capture.py` 可以直接吃。
+* ⚠️ **第二字段的含义变了**：旧固件那里是 DMA 回卷次数 `wraps`，而"CPU 抽 FIFO"方案里没有 DMA。
+  现在它表示**本次采集期间 PIO 是否因 RX FIFO 满停顿过**：`0` = 没丢样（时间轴连续），
+  `1` = 丢过（请加大 `clkdiv` 重采）。已核对：上位机三个脚本只把它读出来打印，不参与计算。
+* `nonzero=0` 或 `first_nonzero=-1` 说明**采到全 0** ⇒ 九成是 PAD 输入通路/引脚功能的问题
+  （`pio_gpio_init` 那三个坑之一），配合 `g` 命令一起判断。
+* 16384 行 hex 会走 Core1 的 USB 顺畅吐出去（每 512 行 flush + 踢一次 tud_task）；这段时间
+  Core0 已经采完了，Core1 不等任何人。
+
+### 采样器：`s` 状态 / `g` 交叉验证
+
+```
+mon> s
+sampler   : PIO0 SM0, in-pins 0..7  (GPIO0=D2P 1=D2N 2=D1P 3=D1N 4=D0P 5=D0N 6=CLKP 7=CLKN)
+clk       : sys_clk 252000000 Hz, clkdiv 12.00 -> 21000 kSa/s (4 samples/word)
+sm        : enabled=1  rx fifo level=3  fdebug=00000001
+rxstall   : now=1  during last window=0   (1 = samples may have been lost;
+            'now' is usually 1 because nobody drains the FIFO between commands)
+buffer    : nonzero=16384/16384 first_nonzero=0 (all-zero = PAD input path problem)
+last cap  : 16384 words, stall=0
+```
+
+> ⚠️ **两个 `rxstall` 要分清**：
+> * `now` = 此刻的 RXSTALL。命令与命令之间没人抽 FIFO，FIFO 必然满、这个位**通常就是 1**，不用管它。
+> * `during last window` = **上一次 `d`/`m` 的窗口期间**有没有丢样 —— **这个才是判据**。
+>   它在窗口结束的那一刻被快照下来（晚一步就会被"之后又满了"污染成假警报）。
+>   `d` 的 `BEGIN` 第二字段用的也是这个值。
+
+```
+mon> g
+GPIO   : 7 6 5 4 3 2 1 0
+read0  : 1 0 1 0 1 1 0 0   0xac
+read1  : 1 0 1 0 1 1 0 0   0xac
+read2  : 0 1 0 1 0 0 1 1   0x53
+read3  : 1 0 1 0 1 1 0 0   0xac
+read4  : 1 0 1 0 1 1 0 0   0xac
+changes in 5 reads: 2 (levels are moving -> a live signal is present)
+```
+
+`g` 用的是 SIO 的 pad 输入（`gpio_get`），**不改 FUNCSEL、不打扰正在跑的 PIO**。
+电平在动 = 线/信号是活的，那"采到全 0"就只能是 PIO 那一侧的问题。
+
+### 采样器 + 自救：Core0 挂死时
+
+```
+mon> X
+Core0 heartbeat 62011 -> 62011 (frozen = it is really hung).
+mon> d
+ERR: Core0 no response (hung?) -- sampler is dead, no data.
+mon> s
+ERR: Core0 no response (hung?) -- sampler is dead.
+     last known: clkdiv=12 -> 21000 kSa/s, last capture 16384 words, stall=0
+mon> S
+... core0: running, heartbeat ... frozen ... WARN ...
+sampler   : clkdiv 12 (last known) -> 21000 kSa/s, last capture 16384 words, stall=0
+mon> B
+rebooting into BOOTSEL (RP2 mass storage). Close this port.
+```
+
+**这就是合并的意义**：采样器（跑在 Core0）挂了，串口照样活着，`S`/`B`/`R` 照样能用，
+不用再伸手去按 BOOTSEL 键。
+
+> 注意：`P` 暂停 Core0 之后，采样器命令会直接告诉你 `Core0 is PAUSED -- send C to resume first`，
+> 不会让你白等一次超时（暂停的定义就是 Core0 不再处理 FIFO）。
+
 ---
 
 ## 4. 安全边界（故意做窄的地方）
@@ -310,6 +461,24 @@ then R or B -- both still work. That is the whole point of this firmware.
    万一这个闹钟没建起来（alarm pool 满了），代码会退化成忙等而不是睡死。
 5. **命令解析不猜、不崩。** 空行什么都不做；参数缺失给用法；命令必须是单字母；
    `R` 带参数会被拒绝（防误触）；长度/地址的进制规则固定（见上）。
+6. **采样器为什么放 Core0 而不是 Core1。**
+   Core1 的职责是"永不挂死的串口"，让它再去跑 PIO/抽 FIFO 等于把两个风险绑在一起。
+   放 Core0 之后，采样器跑飞就是"Core0 挂死"——恰恰是本固件已被上机验证能扛住的那种故障；
+   Core1 只负责下命令（FIFO + 超时）和把 16384 行 hex 从 USB 吐出去。
+   数据交换用**共享 RAM 里的一个结果结构体 + 单字 ACK**：结果字段有十来个，全塞 FIFO（只有 8 深）
+   容易和别的请求互相插队。
+7. **采样器保留 252 MHz 超频（vreg 1.25V）。**
+   上位机 `tools/tmds_sampled_decode.py` 里 `PROBE_CLK_HZ = 252.0e6` 是**硬编码**的，报告也写着
+   "固件只能产生 252MHz/clkdiv" ⇒ 采样率是**契约**，不能偷偷改。
+   超频只在 **Core1 启动之前**做一次（做完才 launch Core1），所以监视器那套"永不挂死"的性质
+   一点没被削弱 —— Core1 服务 USB 期间时钟不再变化；USB 用的是独立的 clk_usb(48MHz)。
+   而且用 `set_sys_clock_khz(..., false)`（尽力而为）：万一上不去就留在默认时钟继续跑并如实报告，
+   **绝不在启动阶段 panic**（那时 Core1 还没起来，panic 就等于又要人手按 BOOTSEL）。
+8. **采集前先倒掉 FIFO 存货。** SM 从上电起就在跑，FIFO 早就满了、RXSTALL 也早就置位过；
+   倒掉 + 清标志之后，"丢样标志"才只反映**本次窗口内**，缓冲里也是一段连续的新数据
+   （代价是窗口之前少 <16 个采样，见第 6 节）。
+9. **`usb_kick()` 必须限速。** 等 Core0 的自旋循环里如果每次迭代都 `irq_set_pending()`，
+   主循环几乎全部时间都耗在 ISR 里；所以改成 1ms 一踢（`usb_kick_throttled()`）。
 
 ---
 
@@ -325,13 +494,34 @@ then R or B -- both still work. That is the whole point of this firmware.
 * **`len` 上限 32768 字节**：RAM 缓冲区限制。大文件请分多次写。
 * **暂停时 Core0 只是 WFI**：它会继续响应中断（这是 `C` 能生效的前提），并不是"冻结整个核"。
   要观察 Core0 的现场请用 `r` 读 SRAM。
-* 上位机串口工具请关闭本地回显。
+* 上位机串口工具请关闭本地回显；**命令必须以 CR/回车结尾**。
+* **采样器（Core0）相关**：
+  * `s`/`d`/`c`/`m`/`g` 都需要 Core0 活着；`P` 暂停或 `X` 挂死时它们会明确报出来（不会假死）。
+  * **`d` 会在采集前把 FIFO 里已有的字（≤4 个）倒掉**，让缓冲从干净的新数据开始：
+    代价是时间轴开头少掉 <16 个采样（**在窗口之前**），换来的是"窗口内部连续" +
+    "丢样标志只反映窗口内"。比旧 DMA 方案（窗口内部断裂）严格更好。
+  * **采样缓冲是 16384 字固定大小**（64 KB，静态分配）。要更大的包得改 `SAMP_WORDS` 重新编译。
+  * **写 Flash 期间采样会丢样**：XIP 关闭时 PIO 还在跑，但没人抽 FIFO（Core0 在停车位里）。
+    采样与写 Flash 不要同时用。
+  * **主频与采样率的契约**：`fs = sys_clk / clkdiv`，而固件会把 sys_clk 超到 **252 MHz**
+    （见第 5 节）。`S` 会如实报 `overclock: OK/FAILED`；万一某颗板子上不去，采样率就不是 252MHz/clkdiv 了，
+    送分析脚本时要按实际 sys_clk 换算。
 
 ---
 
 ## 7. 自己重新编译
 
-在 `DeepSeekCode` 目录下（PowerShell）：
+一条命令（推荐，`tools/build_sub.ps1` 会自动处理工具链/平台/板级，并把 elf 转 uf2）：
+
+```powershell
+cd C:\Users\Chen\Desktop\Pico\PicoPhone\DeepSeekCode
+pwsh -NoProfile -File tools\build_sub.ps1 core1_monitor
+```
+
+> ⚠️ 别给这条命令接管道（本机沙箱禁止子进程输出走管道）。
+> 该脚本检测到旧 `build\CMakeCache.txt` 会先自动清理，避免上次的平台参数残留。
+
+手工跑的话（等价）：
 
 ```powershell
 $cmake="$env:USERPROFILE\.pico-sdk\cmake\v3.31.5\bin\cmake.exe"
@@ -353,12 +543,15 @@ $env:PICO_SDK_PATH=$sdk; $env:PICO_TOOLCHAIN_PATH=$tc; $env:PATH="$tc\bin;$env:P
 ```
 
 > `CMakeLists.txt` 开头那段 `sdkVersion / toolchainVersion / picotoolVersion / pico-vscode.cmake`
-> 是**必须**的：没有它，SDK 会去现场编译 pioasm/picotool 这些主机工具，然后因为找不到主机 C++ 编译器而失败。
+> 是**必须**的：没有它，SDK 会去现场编译 pioasm/picotool 这些主机工具，然后因为找不到主机 C++ 编译器而失败
+> （`sampler.pio` → `sampler.pio.h` 这一步正是靠它提供的 pioasm）。
 > 那段代码会把 `PICO_TOOLCHAIN_PATH` 指到 `15_2_Rel1`（比命令行里给的 `13_3_Rel1` 优先），两个工具链都在的话都能编过。
 
 ---
 
 ## 8. 上机自测清单（拿到板子后按顺序做）
+
+**第一轮：监视器/自救（v1.0 已通过，回归时再跑）**
 
 1. 烧 `core1_monitor.uf2`，打开串口 ⇒ 看到 banner 和 `mon>`。**开机不应该需要按任何键。**
 2. `S` ⇒ 有 sys_clk、Flash 大小、JEDEC ID、Core0 心跳在涨。
@@ -370,10 +563,28 @@ $env:PICO_SDK_PATH=$sdk; $env:PICO_TOOLCHAIN_PATH=$tc; $env:PATH="$tc\bin;$env:P
    * `R` `B` 仍然有效。
 6. `E 101FF000` ⇒ 擦除成功、verify 是 0 个非 0xFF；再 `r 101FF000 4` ⇒ 全 `FFFFFFFF`。
 7. `F 10100000 16 H` 按例子敲 16 个字节 ⇒ 写出 + 校验 OK；然后 `r 10100000 4` 看数据对不对。
-8. `F 10000000 256` ⇒ 应被拒绝（头 4KB 保护）。
-9. `E 10000000` ⇒ 应被拒绝（boot2 保护）。
-10. `F 10000000 256`（镜像范围内）⇒ 应被拒绝并提示用 BOOTSEL。
-11. `B` ⇒ 串口消失、出现 `RP2` 盘 ⇒ 拖任意 UF2 能烧进去（证明"再也不用按 BOOTSEL"）。
-12. 断电重上电 ⇒ 还能进 `mon>`。
+8. `F 10000000 256` / `E 10000000` / `F 10000000 256`（镜像内）⇒ 都应被拒绝。
+9. `B` ⇒ 串口消失、出现 `RP2` 盘 ⇒ 拖任意 UF2 能烧进去（证明"再也不用按 BOOTSEL"）。
+10. 断电重上电 ⇒ 还能进 `mon>`。
+
+**第二轮：采样器（v1.1 新增，重点）**
+
+11. `S` ⇒ `overclock : OK`，且 `sys_clk : 252000000 Hz`。
+    若显示 FAILED，先别往下测采样率，把这一屏贴回来（采样率契约变了）。
+12. **接线**：探针 GPIO0..7 ← 待测板 GPIO0..7，外加共地；待测板在跑 DVI 输出。
+13. `g` ⇒ 五次读数里 `changes` **不为 0** ⇒ 线是活的。
+    若一直是同一个静态值，先查接线/待测板有没有在输出（这一步能把"线的问题"和"PIO 的问题"分开）。
+14. `s` ⇒ `sm enabled=1`、`fdebug` 有值；此时 `rxstall` 可能是 1（上电后没人抽 FIFO，正常）。
+15. `c12` ⇒ 打印 `21000 kSa/s`。
+16. `m` ⇒ `moved` 应该接近 `expect`，并看 **`RXSTALL`**：
+    * 出现 `WARN: PIO RXSTALL is set` ⇒ 把 `clkdiv` 加大（`c16` / `c32`）再来一次，直到没有这个警告；
+    * `moved` 远小于 `expect` ⇒ 瓶颈在抽 FIFO 这一侧，同样加大 `clkdiv`。
+17. `d` ⇒ 应该看到 `captured 16384 words ...`、`nonzero=16384/16384`、`BEGIN 16384 0` / 16384 行 hex / `END`。
+    **把这一屏存成 txt，直接喂 `tools/tmds_sampled_decode.py`**（格式与旧固件一致，见第 3 节的说明）。
+18. **合并的意义（重点）**：在待测板还在输出的情况下 `X`（Core0 故意挂死）⇒
+    * `d` / `s` 应报 `Core0 no response ... sampler is dead`；
+    * `S` / `r` / `P` / `B` **照常可用**；
+    * `B` 能进 BOOTSEL。⇒ 采样器挂了也不用按按键。
+19. `P` 之后敲 `d` ⇒ 应立刻提示 `Core0 is PAUSED -- send C to resume it first`（不白等超时）。
 
 有任何一条不符合预期，请把那一屏原样贴回来（固件输出全是 ASCII，不会因为编码炸掉）。
