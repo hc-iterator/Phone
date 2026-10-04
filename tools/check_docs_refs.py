@@ -35,6 +35,17 @@ OLD_NAMES = [
     "指令本.md", "历史本.md", "模型本.md", "引路本.md", "资源表.md",
     "开工前自检.md", "文档与代码规范.md", "本子使用指南.md", "重要：读完就删.md",
 ]
+# ★ 2026-10-04 修正（由 %TEMP% 里的改名演习抓出）：
+#   有 3 个文件是【名字不变、只搬进 docs/】：资源表 / 开工前自检 / 文档与代码规范。
+#   它们改后仍会以 `docs/资源表.md` 这种形式出现在正文里 ⇒ 用"裸子串匹配"会把
+#   **正确的新引用**误判成"旧名残留" ✗（演习里误报 18 处 + 26 处）。
+#   ⇒ 判据改成：只把【前面没有 docs/ 或 docs\ 前缀】的裸名字算残留。
+KEEP_NAME = {"资源表.md", "开工前自检.md", "文档与代码规范.md"}
+def _residual_patterns(name):
+    """返回用于判'旧名残留'的正则；对不改名的三个文件要求前面没有 docs/ 前缀。"""
+    if name in KEEP_NAME:
+        return [re.compile(r"(?<!docs/)(?<!docs\\)" + re.escape(name))]
+    return [re.compile(re.escape(name))]
 # 新名字（改后应出现）
 NEW_NAMES = [
     "docs/陷阱.md", "docs/需求.md", "docs/实测数据.md", "docs/DVI攻坚流水.md",
@@ -68,7 +79,7 @@ for f in md_files:
         with open(f, encoding="utf-8", errors="replace") as fh:
             for i, line in enumerate(fh, 1):
                 for n in OLD_NAMES:
-                    if n in line:
+                    if any(p.search(line) for p in _residual_patterns(n)):
                         hits_old[n].append((rel(f), i, line.strip()[:110]))
     except OSError:
         pass
@@ -193,7 +204,7 @@ for dirpath, dirnames, filenames in os.walk(root):
             with open(p, encoding="utf-8", errors="replace") as fh:
                 for i, line in enumerate(fh, 1):
                     for n in OLD_NAMES:
-                        if n in line:
+                        if any(pt.search(line) for pt in _residual_patterns(n)):
                             hits_nonmd[rel(p)].append((i, n, line.strip()[:100]))
             scanned += 1
         except OSError:
