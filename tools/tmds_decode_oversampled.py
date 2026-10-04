@@ -84,6 +84,7 @@ import collections
 import math
 import os
 import re
+import statistics
 import sys
 
 # ---------------------------------------------------------------- 常量
@@ -197,9 +198,16 @@ def pct(xs, q):
 
 # ---------------------------------------------------------------- 位栅格
 
-def build_bit_grid(samples, streams, clk, max_anchors=None):
+def build_bit_grid(samples, streams, clk, max_anchors=None, phase=None):
     """
     用 CLK 上升沿把采样流切成"位槽"，每个位槽取中间采样。
+
+    phase: {lane_key: 亚位相位偏移(采样)}，默认全 0。
+      ★ 2026-10-04 修：DVI 允许时钟 lane 与数据 lane 之间有相位差，而三条数据 lane 是
+        三个独立 PIO SM、启动时刻不同 ⇒ 各有自己的【位边界偏移】。实测（DUT 250 / 探针 c64，
+        位周期仅 3.9 采样）：D0≈+2.5、D1≈+1.0、D2≈+7.5 采样。不做这个补偿时，
+        跳变密的 lane 采样点会落在跳变附近 ⇒ clean-bit 崩（D0=0.20 / D1=0.94 / D2=0.71）；
+        补偿后三路都回到 0.9996~0.9999。
 
     返回 dict:
       anchors     上升沿采样下标
@@ -225,19 +233,25 @@ def build_bit_grid(samples, streams, clk, max_anchors=None):
             continue
         spacing.append(P)
         for b in range(10):
-            lo = a0 + P * b / 10.0
-            hi = a0 + P * (b + 1) / 10.0
-            c = int(round(0.5 * (lo + hi)))
-            if c >= N:
-                c = N - 1
-            bitpos.append(c)
-            i_lo = int(math.floor(lo)) + 1
-            i_hi = int(math.ceil(hi)) - 1
-            if i_lo < 0:
-                i_lo = 0
-            if i_hi >= N:
-                i_hi = N - 1
+            c0 = int(round(a0 + P * (b + 0.5) / 10.0))
+            if c0 >= N:
+                c0 = N - 1
+            bitpos.append(c0)
             for key, (name, pbit, nbit, pin) in zip(LANE_KEYS, LANES):
+                ph = 0.0 if not phase else phase.get(key, 0.0)
+                lo = a0 + P * b / 10.0 + ph
+                hi = a0 + P * (b + 1) / 10.0 + ph
+                c = int(round(0.5 * (lo + hi)))
+                if c < 0:
+                    c = 0
+                if c >= N:
+                    c = N - 1
+                i_lo = int(math.floor(lo)) + 1
+                i_hi = int(math.ceil(hi)) - 1
+                if i_lo < 0:
+                    i_lo = 0
+                if i_hi >= N:
+                    i_hi = N - 1
                 v = streams[name][c]
                 bits[key].append(v)
                 ok = True
@@ -249,6 +263,64 @@ def build_bit_grid(samples, streams, clk, max_anchors=None):
                     clean[key] += 1
     return {"anchors": anchors, "spacing": spacing, "bits": bits,
             "clean": clean, "bitpos": bitpos, "nbit": len(bitpos)}
+
+
+def lane_clean_fraction(samples, stream, clk, phase, max_anchors=None):
+    """单条 lane 在给定亚位相位下的 clean-bit 比例（供相位搜索用）。"""
+    anchors = rising_edges(clk)
+    if max_anchors:
+        anchors = anchors[:max_anchors]
+    N = len(samples)
+    ok = tot = 0
+    for k in range(len(anchors) - 1):
+        a0 = anchors[k]
+        P = anchors[k + 1] - a0
+        if P < 10:
+            continue
+        for b in range(10):
+            lo = a0 + P * b / 10.0 + phase
+            hi = a0 + P * (b + 1) / 10.0 + phase
+            c = int(round(0.5 * (lo + hi)))
+            if c < 0 or c >= N:
+                continue
+            i_lo = int(math.floor(lo)) + 1
+            i_hi = int(math.ceil(hi)) - 1
+            if i_lo < 0:
+                i_lo = 0
+            if i_hi >= N:
+                i_hi = N - 1
+            v = stream[c]
+            good = True
+            for i in range(i_lo, i_hi + 1):
+                if stream[i] != v:
+                    good = False
+                    break
+            tot += 1
+            if good:
+                ok += 1
+    return ok / max(tot, 1)
+
+
+def search_lane_phase(samples, streams, clk, step=0.5, span_bits=2.0):
+    """逐 lane 搜索使 clean-bit 最大的亚位相位偏移，返回 {lane_key: phase}。"""
+    anchors = rising_edges(clk)
+    if len(anchors) < 3:
+        return dict((k, 0.0) for k in LANE_KEYS)
+    sp = [anchors[i + 1] - anchors[i] for i in range(len(anchors) - 1)]
+    Tb = statistics.median(sp) / 10.0
+    n = int(round(span_bits * Tb / step))
+    out = {}
+    for key, (name, pbit, nbit, pin) in zip(LANE_KEYS, LANES):
+        st = streams[name]
+        best_f, best_p = -1.0, 0.0
+        for j in range(n + 1):
+            ph = j * step
+            f = lane_clean_fraction(samples, st, clk, ph)
+            if f > best_f:
+                best_f, best_p = f, ph
+        out[key] = best_p
+    return out
+
 
 
 def symbols_from_bits(bitarr, offset, msb_first=False):
@@ -544,7 +616,25 @@ def decode_one(path, args, out):
     # ---- 位栅格
     W("")
     W("[2] BIT GRID (anchored on every CLK rising edge; drift absorbed per symbol)")
-    grid = build_bit_grid(samples, streams, clk)
+    # ★ 2026-10-04：先逐 lane 搜索【亚位相位偏移】。三条数据 lane 是三个独立 PIO SM、
+    #   启动时刻不同 ⇒ 位边界各有偏移；不补偿时跳变密的 lane clean-bit 会崩。
+    grid0 = build_bit_grid(samples, streams, clk)
+    for key, (name, pbit, nbit_, pin) in zip(LANE_KEYS, LANES):
+        cf0 = grid0["clean"][key] / float(max(grid0["nbit"], 1))
+        W("  clean-bit fraction %-4s = %.4f  (all samples strictly inside the bit slot"
+          " agree with the centre sample)" % (key, cf0))
+    phases = search_lane_phase(samples, streams, clk)
+    W("  per-lane bit-phase offsets found (samples, searched 0..2 bit periods): "
+      + ", ".join("%s=%+.1f" % (k, phases[k]) for k in LANE_KEYS))
+    if any(abs(phases[k]) > 0.51 for k in LANE_KEYS):
+        W("  NOTE => lanes are NOT phase-aligned to the CLK rising edge; re-slicing with")
+        W("          the offsets above. (DVI allows a clock/data phase offset.)")
+        grid = build_bit_grid(samples, streams, clk, phase=phases)
+        for key, (name, pbit, nbit_, pin) in zip(LANE_KEYS, LANES):
+            W("  clean-bit fraction %-4s = %.4f  (after phase compensation)"
+              % (key, grid["clean"][key] / float(max(grid["nbit"], 1))))
+    else:
+        grid = grid0
     nbit = grid["nbit"]
     W("  anchors used=%d  bit slots=%d (= %d symbols worth of bits)"
       % (max(0, len(grid["anchors"]) - 1), nbit, nbit // 10))
@@ -555,10 +645,6 @@ def decode_one(path, args, out):
     if nbit < 200:
         W("  WARNING: only %d bit slots (%d symbols) - statistics below are weak."
           % (nbit, nbit // 10))
-    for key, (name, pbit, nbit_, pin) in zip(LANE_KEYS, LANES):
-        cf = grid["clean"][key] / float(nbit)
-        W("  clean-bit fraction %-4s = %.4f  (all samples strictly inside the bit slot"
-          " agree with the centre sample)" % (key, cf))
     W("  NOTE drift: the grid is re-anchored every symbol (10 bits), so the ~+900 ppm")
     W("  board-to-board offset shifts the whole grid, it does NOT accumulate. The")
     W("  measured samples/bit above already contains that offset.")
@@ -646,6 +732,14 @@ def decode_one(path, args, out):
             for c, (mode, cnt, nstarts) in sorted(st["period"].items()):
                 W("    PERIOD %s %s: start-to-start mode=%d symbols (x%d of %d starts)"
                   % (key, c, mode, cnt, nstarts))
+            # ★ 2026-10-04：把控制 run 的【起始符号位置】也打出来，便于量行周期
+            #   （640x480p60 一行 = 800 符号；同一种控制码相邻起点之差就是行周期）
+            for c in CTRL_ORDER:
+                stt = st["starts"].get(c) or []
+                if len(stt) >= 2:
+                    gaps = [stt[i] - stt[i - 1] for i in range(1, len(stt))]
+                    W("    STARTS %s %s: %s   gaps=%s"
+                      % (key, c, ",".join(str(x) for x in stt[:12]), gaps[:12]))
         else:
             W("    PERIOD %s: CANNOT-DETERMINE (need >=3 runs of one control code;"
               " one capture holds only ~%d symbols ~= 1 line of 800)"
