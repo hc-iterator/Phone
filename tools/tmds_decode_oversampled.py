@@ -364,7 +364,7 @@ def choose_rotation_per_lane(bits, msb_first=False):
     """
     逐 lane 选符号相位 j：每条 lane 各自取【本 lane 控制符号命中最多】的 j。
 
-    为什么必须逐 lane（2026-10-04 实测，见 陷阱本.md M16 第 12 轮）：
+    为什么必须逐 lane（2026-10-04 实测，见 docs/陷阱.md M16 第 12 轮）：
       三条 lane 的 PIO SM 不是从同一位偏移起步的，符号边界相对公共 CLK 锚点
       可以相差整数个位 ⇒ 用【全局一个 j】会把某些 lane 切错，
       消隐段就被合并/看错（例：把 前肩16+同步96+后肩48 合并成一个 160 的 run）。
@@ -892,7 +892,7 @@ def main():
     ap.add_argument("--global-rotation", action="store_true",
                     help="三条 lane 共用一个符号相位 j（旧行为）。默认逐 lane 各自搜 j —— "
                          "因为三条 lane 的符号边界相对公共 CLK 锚点可差整数个位，"
-                         "共用 j 会把消隐段（前肩16/同步96/后肩48）合并看错。见 陷阱本.md M16。")
+                         "共用 j 会把消隐段（前肩16/同步96/后肩48）合并看错。见 docs/陷阱.md M16。")
     ap.add_argument("--symbol-bitorder", choices=["lsb-first", "msb-first"],                    default="lsb-first",
                     help="bit order inside a 10-bit symbol (default lsb-first, proven "
                          "by frank_serialiser.pio:64)")

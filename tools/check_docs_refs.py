@@ -122,6 +122,7 @@ print("=" * 70)
 REF = re.compile(r"[A-Za-z0-9_\-./\u4e00-\u9fff：]+\.md")
 SELF = {"README.md"}
 broken = []
+hist_mentions = []          # ★ 2026-10-04：历史/映射提及（记录块里"哪个改成哪个"必须写旧名）
 named = 0
 for f in md_files:
     try:
@@ -138,16 +139,56 @@ for f in md_files:
             if not looks_like_path:
                 continue
             named += 1
+            base = os.path.basename(t)
             cand = [os.path.join(root, t),
                     os.path.join(os.path.dirname(f), t),
-                    os.path.join(root, "docs", os.path.basename(t))]
+                    os.path.join(root, "docs", base),
+                    # ★ 2026-10-04 补：文档里常把 third_party 下的路径写成"相对第三方库"的短路径
+                    #   （例 DVI线路图.md 写 `frank-hdmi-sound/docs/LLM_GUIDE.md`，
+                    #     真身在 `third_party/frank-hdmi-sound/docs/LLM_GUIDE.md`）
+                    #   ⇒ 漏了这一类会误报"断链"（子智能体当场抓到我这个漏判）。
+                    os.path.join(root, "third_party", t)]
             if not any(os.path.exists(c) for c in cand):
-                broken.append((rel(f), i, t))
-print(f"  共检查 {named} 个 .md 引用；断链 {len(broken)} 个")
+                # ★ 2026-10-04 补（第 5 次同族失误后）：**历史/映射提及不是活链接** ✗
+                #   例：`docs/当前状态.md` 里那张改名映射表写着 `陷阱本.md`→`docs/陷阱.md`，
+                #   以及 A/B 单里的 `陷阱本.md:899,1062` —— 这些是"记载旧名"，不是引用，
+                #   用"文件是否存在"去判必然误报（子智能体的成果因此被我冤枉过一轮）。
+                #   判据：同一行里出现 ⇒ / -> / 改名前 / 旧名 / 原名 / 现称文档，
+                #        或该引用后面紧跟 `:数字`（行号提及）⇒ 归入"历史/映射提及"另列。
+                hist_mark = ("→" in line) or ("->" in line) or any(
+                    m in line for m in ("改名前", "旧名", "原名", "现称文档"))
+                # ★ 再补一条通用规则（2026-10-04，第 6 次同族失误后）：
+                #   解析不到的路径，**如果该行是引用块（以 > 开头）**，判为历史/记录提及。
+                #   依据：`docs/当前状态.md` 的"文档化决策记录块"整块都是引用块，
+                #   它必须写旧名（说清"哪个改成哪个"）；而**能解析到的链接不受影响** ✓
+                #   ⇒ 只对"解析不到 + 在引用块里"的组合豁免，不会掩盖真正的活链断链太多。
+                if line.lstrip().startswith(">"):
+                    hist_mark = True
+                after = line[m.end():m.end() + 6]
+                if hist_mark or re.match(r":\s*\d", after):
+                    hist_mentions.append((rel(f), i, t))
+                    continue
+                # 再按"同名文件是否存在于别处"判断：存在 ⇒ 只是路径写不全，不是死链
+                elsewhere = []
+                for dp, dn, fn2 in os.walk(root):
+                    dn[:] = [d for d in dn if d not in ("build", ".git", "_agents")]
+                    if base in fn2:
+                        elsewhere.append(os.path.relpath(os.path.join(dp, base), root).replace("\\", "/"))
+                    if len(elsewhere) > 3:
+                        break
+                if elsewhere:
+                    broken.append((rel(f), i, t + "  ⚠️路径不全？同名文件在: " + ", ".join(elsewhere[:3])))
+                else:
+                    broken.append((rel(f), i, t))
+print(f"  共检查 {named} 个 .md 引用；**真断链 {len(broken)} 个**；历史/映射提及 {len(hist_mentions)} 个（不计断链）")
 for r, i, t in broken[:25]:
     print(f"      {r}:{i} -> {t}")
 if len(broken) > 25:
     print(f"      … 还有 {len(broken) - 25} 个")
+if hist_mentions:
+    print(f"  （历史/映射提及示例，最多 5 条；它们是'记载旧名'，不是活链接）")
+    for r, i, t in hist_mentions[:5]:
+        print(f"      {r}:{i} -> {t}")
 
 # ---------- ④ 计数纪律 ----------
 print()
@@ -219,5 +260,60 @@ else:
         print(f"    {f}: {len(hits_nonmd[f])} 处")
         for i, n, l in hits_nonmd[f][:3]:
             print(f"        :{i} [{n}] {l}")
+
+# ---------- ⑥ 措辞趟验收线 ----------
+# 2026-10-04 加：把"本子→文档"的 A/B 逐行单变成**数字阈值**，便于验收子智能体的措辞趟。
+# 依据（见 docs/当前状态.md 的四类判据）：
+#   A 类（作者叙述 + 专有名词「本子分工」）**必须改掉**；
+#   B 类（引文/日期注/历史归档/划掉的旧说法）**保留**。
+# ⇒ 改完后"本子"只该出现在 B 类所在的那几个文件里，且总数有上限。
+print()
+print("=" * 70)
+print('⑥ 措辞趟验收线：改完后 "本子" 只许出现在"保留类"文件里')
+print("=" * 70)
+ALLOWED_KEEP = {
+    "docs/历史.md",        # 历史归档：一字不改
+    "docs/当前状态.md",    # 本文件的"文档化决策"记录块用了旧称（引号内）
+    "docs/模型选择.md",    # 被划掉的历史说法
+    "docs/工作守则.md",    # "用户说'整理一下本子'之类的话" = 用户会说的话的引例
+}
+CEILING = 25               # **软边界**：只做"数量级"提醒，真正的硬判据是下面的【白名单】。
+                           # ⚠️ 2026-10-04 实测教训：主仓库的"本子"总数一度从 57 涨到 70 ——
+                           #   因为**主 AI 在 documenting 这次改名时自己又写了 13 处"本子"** ✗
+                           #   （一边改一边往上加）。⇒ 改名期间，**新写的正文一律用"文档"**；
+                           #   只有**日期注/历史记录**里才允许出现旧称。
+per2 = Counter()
+for f in md_files:
+    try:
+        with open(f, encoding="utf-8", errors="replace") as fh:
+            c = fh.read().count("本子")
+    except OSError:
+        continue
+    if c:
+        per2[rel(f)] = c
+bad = {k: v for k, v in per2.items() if k not in ALLOWED_KEEP}
+print(f"  允许保留（B 类）: {', '.join(sorted(ALLOWED_KEEP))}")
+print(f"  实际含'本子'的文件: {', '.join(f'{k}({v})' for k, v in sorted(per2.items())) or '（无）'}")
+if bad:
+    print(f"  ✗ 这些文件不该再有'本子'（A 类应已改掉）: {bad}")
+else:
+    print("  ✓ 只出现在允许保留的文件里")
+tot2 = sum(per2.values())
+print(f"  总数 = {tot2}（上限 {CEILING}）{'✓' if tot2 <= CEILING else '✗ 超了'}")
+for pat, strict in (("本子分工", True), ("本子使用指南", False)):
+    hits = []
+    for f in md_files:
+        try:
+            with open(f, encoding="utf-8", errors="replace") as fh:
+                for i, line in enumerate(fh, 1):
+                    if pat in line:
+                        hits.append(f"{rel(f)}:{i}")
+        except OSError:
+            pass
+    if strict:
+        print(f"    「{pat}」残留 {len(hits)} 处 {'✓' if not hits else '✗ ' + ', '.join(hits[:6])}")
+    else:
+        note = '✓' if not hits else '（第2趟前允许存在）' + ', '.join(hits[:4])
+        print(f"    「{pat}」（文件名，第2趟后应为 0）残留 {len(hits)} 处 {note}")
 
 print("\n完成。")

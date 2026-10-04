@@ -299,7 +299,7 @@ int main(void) {
      * （硬件异常进入只压 r0-r3/r12/lr/pc/xPSR，不保存 r4-r11），
      * 于是返回后 main 的 r5（常驻 &_impure_ptr）被改坏，
      * 下一次 fflush(stdout) 变成 fflush(野地址) → 非对齐访问 → HardFault。
-     * 详见 小本本.md「真正那个 bug 找到了」一节。
+     * 详见 docs/实测数据.md「真正那个 bug 找到了」一节。
      *
      * 现在演示跑得通，实测 g_sys_done_magic=0x5AFE0001（完整走完）。
      */

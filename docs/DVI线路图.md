@@ -4,7 +4,7 @@
 > 人读不动。这份文件只做一件事：**把"从一幅画面到 HDMI 线上的一位"这条路画出来**，
 > 并标出**哪几处才是关键**、**哪些是我（AI）加的临时东西**。
 >
-> 配套：`小本本.md` 开头 §⭐（问题现状摘要）、`小本本-附录B-DVI攻坚流水.md` §14.23（已排除清单）。
+> 配套：`docs/实测数据.md` 开头 §⭐（问题现状摘要）、`docs/DVI攻坚流水.md` §14.23（已排除清单）。
 
 ---
 
@@ -47,9 +47,9 @@ PIO 串行器 (硬件)  ← 实测瓶颈在这一层
 | **`frank-hdmi-sound/src/frank_serialiser.pio`** | **串行器，只有 2 条指令** | **实测瓶颈就在这两条指令的节拍上**（每 bit ~13 周期，而非注释假定的 1） |
 | `libdvi/dvi_serialiser.pio` | **同一东西的【未修改原版】** | 对照用：原版是 `.side_set 2 opt`，fork 是 `.side_set 2` |
 | `frank-hdmi-sound/src/frank_dvi.c` | 引擎：IRQ 处理器、DMA 链装载、启动 | 每行被拆成 6~7 段、由控制通道逐段触发 |
-| `frank-hdmi-sound/src/frank_dvi_timing.c` | 扫描线 DMA 表的构建 | **341–387 行有一段中文注释，是上一任 AI 写的完整故障诊断**（"全零槽地雷"）—— **项目本子里没有它** |
+| `frank-hdmi-sound/src/frank_dvi_timing.c` | 扫描线 DMA 表的构建 | **341–387 行有一段中文注释，是上一任 AI 写的完整故障诊断**（"全零槽地雷"）—— **项目文档里没有它** |
 | `frank-hdmi-sound/src/frank_hdmi.c` | Core1 的引擎主循环、颜色缓冲、队列 | 引擎产出的真正计数器 `frank_hdmi_heartbeat_lines` 在这里 |
-| `frank-hdmi-sound/docs/LLM_GUIDE.md` | 库自己的说明+排障 | 官方排障只有三条，本项目三条全满足 ⇒ 我们已在它已知问题集之外 |
+| `third_party/frank-hdmi-sound/docs/LLM_GUIDE.md` | 库自己的说明+排障 | 官方排障只有三条，本项目三条全满足 ⇒ 我们已在它已知问题集之外 |
 
 ---
 
