@@ -298,6 +298,18 @@ void dvi_timing_state_init(struct dvi_timing_state *t) {
 	t->v_state = DVI_STATE_FRONT_PORCH;
 }
 
+/* ★★ 2026-10-04 诊断（修 DVI 输出用）：把这些【static 常量表】的地址暴露出去，
+ *   好在 Core0 侧把行中读到的 read_addr（例如 0x20001eac）点成名字。
+ *   必须在同一编译单元里取地址 —— 所以函数放这里。 */
+volatile uint32_t g_dbg_const_addr[5] = {0};
+void dvi_debug_fill_const_addrs(void) {
+	g_dbg_const_addr[0] = (uint32_t)(uintptr_t)&dvi_ctrl_syms[0];        /* CTL0..CTL3 各 4 字节 */
+	g_dbg_const_addr[1] = (uint32_t)(uintptr_t)&empty_scanline_tmds[0];
+	g_dbg_const_addr[2] = (uint32_t)(uintptr_t)&black_scanline_tmds[0];
+	g_dbg_const_addr[3] = (uint32_t)(uintptr_t)&video_gaurdband_syms[0];
+	g_dbg_const_addr[4] = (uint32_t)(uintptr_t)&dvi_ctrl_syms[0] + 16u;   /* 常量表区起点之后 */
+}
+
 void __dvi_func(dvi_timing_state_advance)(const struct dvi_timing *t, struct dvi_timing_state *s) {
 		s->v_ctr++;
 		if ((s->v_state == DVI_STATE_FRONT_PORCH && s->v_ctr == t->v_front_porch) || 

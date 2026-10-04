@@ -116,15 +116,35 @@ void dvi_serialiser_init(struct dvi_serialiser_cfg *cfg) {
 	// 5 cycles high, 5 low. Invert one channel so that we get complementary outputs.
 	pwm_config pwm_cfg = pwm_get_default_config();
 	pwm_config_set_output_polarity(&pwm_cfg, true, false);
-	pwm_config_set_wrap(&pwm_cfg, 9);
+	/* ★★ 2026-10-04 修复（M14 的那个 cap 的真正修法）：
+	 *   原来把像素时钟周期固定成 wrap=9（10 个计数），分频全靠 clkdiv ——
+	 *   而 RP2040 PWM 的分频整数字段只有 8 位（≤255）⇒ DVI_SM_CLKDIV>255 会被【静默截断】，
+	 *   时钟 lane 与数据 lane 速率就不一致（实测：分频 512 时时钟 lane 快了 2 倍）。
+	 *   修法：分频不够就【放大 wrap】—— 周期 = 10*K 个计数、比较值 = 5*K，
+	 *   仍保持 50% 占空与互补输出，等效分频 = clkdiv_int * K（K 可达 6553）。
+	 *   ⇒ DVI_SM_CLKDIV 不再有 255 上限，且时钟 lane 恒等于 数据 lane 的 1/10。 */
+	uint32_t _smp_k = 1u;
+	uint32_t _smp_div = (uint32_t)(DVI_SM_CLKDIV);
+	while (_smp_div > 255u) {
+		/* 取最小的 K 使 div 为整数且 ≤255 */
+		uint32_t k = 2u;
+		while ((DVI_SM_CLKDIV % k) != 0u || (DVI_SM_CLKDIV / k) > 255u) {
+			++k;
+			if (k > 6553u) { k = 1u; break; }
+		}
+		_smp_k = k;
+		_smp_div = (uint32_t)(DVI_SM_CLKDIV) / k;
+		break;
+	}
+	pwm_config_set_wrap(&pwm_cfg, (uint16_t)(10u * _smp_k - 1u));
 	// PATCH (frank-hdmi-sound): when sys_clock is an integer multiple of the
 	// TMDS bit clock, divide the PWM clock by the same factor so the
 	// pixel-clock output runs at spec while the CPU stays fast.
 #ifdef DVI_SM_CLKDIV
-	pwm_config_set_clkdiv_int(&pwm_cfg, DVI_SM_CLKDIV);
+	pwm_config_set_clkdiv_int(&pwm_cfg, (uint8_t)_smp_div);
 #endif
 	pwm_init(slice, &pwm_cfg, false);
-	pwm_set_both_levels(slice, 5, 5);
+	pwm_set_both_levels(slice, (uint16_t)(5u * _smp_k), (uint16_t)(5u * _smp_k));
 #else
 	// Use a state machine to generate the clock
 	clk_sm = pio_claim_unused_sm(cfg->pio, true);

@@ -118,6 +118,79 @@ volatile uint32_t g_dvi_tmo_ctrl[3] = {0, 0, 0};  /* 三条 lane 数据通道的
 volatile uint32_t g_dvi_tmo_cnt[3]  = {0, 0, 0};  /* 三条 lane 数据通道剩余传输数 */
 volatile uint32_t g_dvi_tmo_chan[3] = {0, 0, 0};  /* 三条 lane 的数据通道号 */
 
+/* ★★ 2026-10-04 临时诊断（修 DVI 输出用）：DMA 块表快照 ★★
+ * 背景：探针实测到"同步 lane（蓝/D0）的有效区一直是控制符号，6/6 采集都这样"，
+ *       而代码怎么读都该发 tmdsbuf 里的蓝通道数据 ⇒ 不再靠推理，直接把运行时真实块表抓出来。
+ * 判据：若 L0 第 3 格（非音频路径的有效块）的 read_addr != g_dbg_tmdsbuf，
+ *       就说明有效块被指到了别处（控制符号数组）——bug 坐实。
+ * 填在 IRQ 里（**只写全局、不打印**），Core0 用串口 'D' 走 dvi_debug_dump() 打印。 */
+volatile uint32_t g_dbg_seq      = 0;   /* IRQ 里填过多少次 */
+volatile uint32_t g_dbg_list_id  = 0;   /* 0=active 1=vblank_nosync 2=active_blank 3=error 4=vblank_sync */
+volatile uint32_t g_dbg_island   = 0;   /* data_island_is_enabled */
+volatile uint32_t g_dbg_tmdsbuf  = 0;   /* 最近一次 dvi_update_scanline_data_dma 收到的 tmdsbuf */
+volatile uint32_t g_dbg_blk_addr[3][7] = {{0}};
+volatile uint32_t g_dbg_blk_cnt [3][7] = {{0}};
+volatile uint32_t g_dbg_data_ra[3] = {0}, g_dbg_data_tc[3] = {0};
+volatile uint32_t g_dbg_ctrl_ra[3] = {0}, g_dbg_ctrl_tc[3] = {0};
+volatile uint32_t g_dbg_blkctrl[3][7] = {{0}};
+volatile uint32_t g_dbg_blkwrite[3][7] = {{0}};
+/* ★ 判据升级（2026-10-04）：块表已证实正确 ⇒ 再抓【编码器到底往 tmdsbuf 里写了什么】。
+ *   每条 lane 的切片各取 3 个字（首、次、末）。若这些字本身就是控制符号
+ *   （0x354/0x0AB/0x154/0x2AB 各出现两次的 20 位字），则问题在编码器侧；
+ *   若是正常的成对数据码字，则问题在探针读回侧。 */
+volatile uint32_t g_dbg_buf[3][3] = {{0}};
+/* ★★ 诊断 2（2026-10-04）：在【IRQ 入口】抓 —— 那一刻上一行刚跑完、还没重装，
+ *   所以看到的就是"这一行究竟跑了什么"的现场。
+ *   dbg_tcr 尤其关键：IRQ 等的就是它 == h_active/2 (=320)。
+ *   若某条 lane 的 dbg_tcr 停在 1（续命段字数）而不是 320 ⇒ 它这一行【没跑到有效段】。 */
+volatile uint32_t g_dbg2_seq = 0;
+volatile uint32_t g_dbg2_tcr[3]   = {0}, g_dbg2_tc[3]  = {0}, g_dbg2_ra[3] = {0};
+volatile uint32_t g_dbg2_ctrl[3]  = {0};
+volatile uint32_t g_dbg2_cra[3]   = {0}, g_dbg2_ctc[3] = {0};
+/* ★★ 诊断 3（2026-10-04）：查 "DMA 读 X 却写出 Y" 唯一剩下的方向 ——
+ *   DMA→TX FIFO→PIO SM→引脚 这条链有没有接错。
+ *   判据：dma_cfg[i].tx_fifo 必须等于 &pio->txf[sm_tmds[i]]，
+ *         且各格的 write_addr 也必须等于同一个地址。 */
+volatile uint32_t g_dbg_tx[3]       = {0};   /* dma_cfg[i].tx_fifo */
+volatile uint32_t g_dbg_tx_dreq[3]  = {0};   /* dma_cfg[i].dreq */
+volatile uint32_t g_dbg_waddr[3][7] = {{0}}; /* 各格的 write_addr */
+volatile uint32_t g_dbg_pio_tx[4]   = {0};   /* &pio->txf[0..3] 作参照 */
+volatile uint32_t g_dbg_pinctrl[4]  = {0};   /* sm[k].pinctrl 作参照 */
+volatile uint32_t g_dbg_sm[3]       = {0};   /* ser_cfg.sm_tmds[i] */
+volatile uint32_t g_dbg_pins[3]     = {0};   /* ser_cfg.pins_tmds[i] */
+volatile uint32_t g_dbg_clkdiv[4]   = {0};   /* sm[k].clkdiv 作参照 */
+/* ★★ 诊断 4（2026-10-04）：补取证空白 ——
+ *   先前只读了 `tmdsbuf`（live 那块）的内容，而有效块 read_addr 指向的是【另一块】。
+ *   这里直接把【有效块指向那块】的内容抓下来，并把各格 c.ctrl 也抓下来
+ *   （看 RING_SIZE 是否把有效块配成了"字重复"）。 */
+volatile uint32_t g_dbg_blkbuf[3][3]  = {{0}};   /* 各 lane 有效块指向缓冲的 [0]/[1]/[last] */
+volatile uint32_t g_dbg_blkctrl2_unused = 0;   /* 各格 c.ctrl 见上方 [3][7] 声明 */
+volatile uint32_t g_dbg_vidblk[3]     = {0};     /* 各 lane 有效块的 read_addr */
+/* ★★ 诊断 5（2026-10-04）：行状态直方图 —— 判"DUT 是不是大部分时间在跑 vblank 列表"。
+ *   若 ACTIVE 只占很小一部分，而实测 D0 一直发控制符号，则两者吻合。 */
+volatile uint32_t g_dbg_state_hist[5] = {0};     /* 下标 = timing_state.v_state (0..4) */
+volatile uint32_t g_dbg_cur_state     = 0;
+volatile uint32_t g_dbg_cur_vctr      = 0;
+volatile uint32_t g_dbg_v_active_lines= 0;
+volatile uint32_t g_dbg_blank_top     = 0;
+volatile uint32_t g_dbg_blank_bottom  = 0;
+volatile uint32_t g_dbg_scanline_en   = 0;
+/* ★★ 诊断 6（2026-10-04）：留给 Core0 做【行中】快照 —— 通道号必须在这里记下来，
+ *   因为 Core0 拿不到 inst。Core0 会用它们直接读 DMA/PIO 寄存器。 */
+volatile uint32_t g_dbg_chan_data[3] = {0};
+volatile uint32_t g_dbg_chan_ctrl[3] = {0};
+volatile uint32_t g_dbg_pio_base     = 0;
+/* ★★ 诊断 7：五张列表的地址 —— 把控制通道的行中 ra 与它们比对，就能点名是【哪一张列表】。 */
+volatile uint32_t g_dbg_list_addr[5] = {0};   /* vblank_sync, vblank_nosync, active, error, active_blank */
+volatile uint32_t g_dbg_list_size    = 0;     /* sizeof(struct dvi_scanline_dma_list) */
+/* ★★ 诊断 9：逐行环形记录 —— 每行选了哪张列表、当时状态是什么。
+ *   用于回答"状态明明说 ACTIVE，为什么装的是 vblank 列表"。 */
+#define DVI_DBG_HIST 64
+volatile uint32_t g_dbg_hist_list [DVI_DBG_HIST] = {0};   /* 0..4 见 g_dbg_list_addr 顺序 */
+volatile uint32_t g_dbg_hist_state[DVI_DBG_HIST] = {0};   /* timing_state.v_state */
+volatile uint32_t g_dbg_hist_vctr [DVI_DBG_HIST] = {0};
+volatile uint32_t g_dbg_hist_idx  = 0;
+
 /* 等待上限：正常情况这个条件在进入循环前就已经成立（链式触发在
  * "后肩段"结束时就把有效像素段装好了），所以这里留的余量非常宽。
  * 目的是"绝不无限等"，而不是"精确计时"。 */
@@ -499,7 +572,28 @@ static void __dvi_func(dvi_dma_irq_handler)(struct dvi_inst *inst) {
     // now have until the end of this region to generate DMA blocklist for next
     // scanline.
     dvi_timing_state_advance(inst->timing, &inst->timing_state);
-
+    /* ★ 诊断 2：IRQ 入口现场 —— 上一行刚跑完、还没重装。看每条 lane 这一行停在哪。
+     *   dbg_tcr 是关键：它数"当前这一次传输的字数"，IRQ 等的就是它 == 320。 */
+    g_dbg2_seq++;
+    /* ★ 诊断 5：行状态直方图 + 相关配置 */
+    {
+        uint32_t _vs = (uint32_t)inst->timing_state.v_state;
+        if (_vs < 5u) g_dbg_state_hist[_vs]++;
+        g_dbg_cur_state      = _vs;
+        g_dbg_cur_vctr       = inst->timing_state.v_ctr;
+        g_dbg_v_active_lines = inst->timing->v_active_lines;
+        g_dbg_blank_top      = (uint32_t)inst->blank_settings.top;
+        g_dbg_blank_bottom   = (uint32_t)inst->blank_settings.bottom;
+        g_dbg_scanline_en    = inst->scanline_is_enabled ? 1u : 0u;
+    }
+    for (int _i = 0; _i < N_TMDS_LANES; ++_i) {
+        g_dbg2_tcr [_i] = dma_debug_hw->ch[inst->dma_cfg[_i].chan_data].dbg_tcr;
+        g_dbg2_tc  [_i] = dma_hw->ch[inst->dma_cfg[_i].chan_data].transfer_count;
+        g_dbg2_ra  [_i] = dma_hw->ch[inst->dma_cfg[_i].chan_data].read_addr;
+        g_dbg2_ctrl[_i] = dma_hw->ch[inst->dma_cfg[_i].chan_data].ctrl_trig;
+        g_dbg2_cra [_i] = dma_hw->ch[inst->dma_cfg[_i].chan_ctrl].read_addr;
+        g_dbg2_ctc [_i] = dma_hw->ch[inst->dma_cfg[_i].chan_ctrl].transfer_count;
+    }
     // Make sure all three channels have definitely loaded their last block
     // (should be within a few cycles of one another)
     //
@@ -598,6 +692,16 @@ static void __dvi_func(dvi_dma_irq_handler)(struct dvi_inst *inst) {
             } else if (tmdsbuf) {
                 uint32_t _u0 = time_us_32();
                 dvi_update_scanline_data_dma(inst->timing, tmdsbuf, &inst->dma_list_active, inst->data_island_is_enabled);
+                g_dbg_tmdsbuf = (uint32_t)(uintptr_t)tmdsbuf;   /* ★ 诊断：判据基准 */
+                {   /* ★ 抓编码器写进缓冲区的实际内容（每条 lane 切片的首/次/末字） */
+                    const uint32_t *_b = (const uint32_t *)tmdsbuf;
+                    const uint32_t _wpc = inst->timing->h_active_pixels / DVI_SYMBOLS_PER_WORD;
+                    for (int _i = 0; _i < N_TMDS_LANES; ++_i) {
+                        g_dbg_buf[_i][0] = _b[_i * _wpc + 0];
+                        g_dbg_buf[_i][1] = _b[_i * _wpc + 1];
+                        g_dbg_buf[_i][2] = _b[_i * _wpc + _wpc - 1];
+                    }
+                }
                 {   /* 诊断：每行重建 active 列表的耗时 */
                     uint32_t _udt = time_us_32() - _u0;
                     g_dvi_upd_us = _udt;
@@ -630,13 +734,85 @@ static void __dvi_func(dvi_dma_irq_handler)(struct dvi_inst *inst) {
     }
     uint32_t _h2t0 = time_us_32();   /* 第 21 轮：处理器后半段计时起点 */
     _dvi_load_dma_op(inst->dma_cfg, dma_list_selected);
+    /* ★ 诊断 9：把"这一行选了哪张表 + 当时状态"记进环形缓冲 */
+    {
+        uint32_t _li = 0;
+        if      (dma_list_selected == &inst->dma_list_vblank_sync)   _li = 0;
+        else if (dma_list_selected == &inst->dma_list_vblank_nosync) _li = 1;
+        else if (dma_list_selected == &inst->dma_list_active)        _li = 2;
+        else if (dma_list_selected == &inst->dma_list_error)         _li = 3;
+        else if (dma_list_selected == &inst->dma_list_active_blank)  _li = 4;
+        else                                                          _li = 5;
+        uint32_t _ix = g_dbg_hist_idx % DVI_DBG_HIST;
+        g_dbg_hist_list [_ix] = _li;
+        g_dbg_hist_state[_ix] = (uint32_t)inst->timing_state.v_state;
+        g_dbg_hist_vctr [_ix] = inst->timing_state.v_ctr;
+        g_dbg_hist_idx++;
+    }
+    /* ★ 2026-10-04 诊断：把刚装载的块表与通道现场抓成快照（只写全局，不打印） */
+    g_dbg_seq++;
+    g_dbg_list_id = (dma_list_selected == &inst->dma_list_active)         ? 0u :
+                    (dma_list_selected == &inst->dma_list_vblank_nosync)  ? 1u :
+                    (dma_list_selected == &inst->dma_list_active_blank)   ? 2u :
+                    (dma_list_selected == &inst->dma_list_error)          ? 3u :
+                    (dma_list_selected == &inst->dma_list_vblank_sync)    ? 4u : 5u;
+    g_dbg_island = inst->data_island_is_enabled ? 1u : 0u;
+    for (int _i = 0; _i < N_TMDS_LANES; ++_i) {
+        dma_cb_t *_bl = dvi_lane_from_list(dma_list_selected, _i);
+        for (int _k = 0; _k < 7; ++_k) {
+            g_dbg_blk_addr [_i][_k] = (uint32_t)(uintptr_t)_bl[_k].read_addr;
+            g_dbg_blk_cnt  [_i][_k] = _bl[_k].transfer_count;
+            g_dbg_waddr    [_i][_k] = (uint32_t)(uintptr_t)_bl[_k].write_addr;   /* ★ 诊断 3 */
+            g_dbg_blkctrl  [_i][_k] = _bl[_k].c.ctrl;                            /* ★ 诊断 4 */
+            g_dbg_blkwrite [_i][_k] = (uint32_t)(uintptr_t)_bl[_k].write_addr;
+        }
+        /* ★ 诊断 4：读【有效块实际指向那块】的内容（这才是 DMA 真正会搬的数据） */
+        {
+            const uint32_t *_vb = (const uint32_t *)_bl[3].read_addr;
+            uint32_t _wpc = inst->timing->h_active_pixels / DVI_SYMBOLS_PER_WORD;
+            g_dbg_vidblk[_i] = (uint32_t)(uintptr_t)_bl[3].read_addr;
+            if (_vb) {
+                g_dbg_blkbuf[_i][0] = _vb[0];
+                g_dbg_blkbuf[_i][1] = (_bl[3].transfer_count > 1) ? _vb[1] : 0;
+                g_dbg_blkbuf[_i][2] = (_bl[3].transfer_count >= _wpc) ? _vb[_wpc - 1] : 0;
+            }
+        }
+        g_dbg_data_ra[_i] = dma_channel_hw_addr(inst->dma_cfg[_i].chan_data)->read_addr;
+        g_dbg_data_tc[_i] = dma_channel_hw_addr(inst->dma_cfg[_i].chan_data)->transfer_count;
+        g_dbg_ctrl_ra[_i] = dma_channel_hw_addr(inst->dma_cfg[_i].chan_ctrl)->read_addr;
+        g_dbg_ctrl_tc[_i] = dma_channel_hw_addr(inst->dma_cfg[_i].chan_ctrl)->transfer_count;
+        /* ★ 诊断 3：DMA→FIFO→SM→引脚 这条链 */
+        g_dbg_tx[_i]      = (uint32_t)(uintptr_t)inst->dma_cfg[_i].tx_fifo;
+        g_dbg_tx_dreq[_i] = inst->dma_cfg[_i].dreq;
+        g_dbg_sm[_i]      = inst->ser_cfg.sm_tmds[_i];
+        g_dbg_pins[_i]    = inst->ser_cfg.pins_tmds[_i];
+        g_dbg_chan_data[_i] = (uint32_t)inst->dma_cfg[_i].chan_data;   /* ★ 诊断 6 */
+        g_dbg_chan_ctrl[_i] = (uint32_t)inst->dma_cfg[_i].chan_ctrl;
+    }
+    g_dbg_pio_base = (uint32_t)(uintptr_t)inst->ser_cfg.pio;
+    g_dbg_list_addr[0] = (uint32_t)(uintptr_t)&inst->dma_list_vblank_sync;
+    g_dbg_list_addr[1] = (uint32_t)(uintptr_t)&inst->dma_list_vblank_nosync;
+    g_dbg_list_addr[2] = (uint32_t)(uintptr_t)&inst->dma_list_active;
+    g_dbg_list_addr[3] = (uint32_t)(uintptr_t)&inst->dma_list_error;
+    g_dbg_list_addr[4] = (uint32_t)(uintptr_t)&inst->dma_list_active_blank;
+    g_dbg_list_size    = (uint32_t)sizeof(struct dvi_scanline_dma_list);
+    for (int _k = 0; _k < 4; ++_k) {
+        g_dbg_pio_tx[_k]  = (uint32_t)(uintptr_t)&inst->ser_cfg.pio->txf[_k];
+        g_dbg_pinctrl[_k] = inst->ser_cfg.pio->sm[_k].pinctrl;
+        g_dbg_clkdiv[_k]  = inst->ser_cfg.pio->sm[_k].clkdiv;
+    }
     /*
      * PATCH（2026-10-01 深夜）：配合 _dvi_load_dma_op() 里的"列表收口"。
      * 收口后链条不再自持（尾条 CHAIN_TO=自己），所以这里必须【显式重新触发】
      * 三个控制通道，否则 _dvi_load_dma_op() 的 dma_channel_configure(..., false)
      * 只装填不触发 ⇒ 数据通道永久停摆 ⇒ 每行中断再也不来（正是库注释警告的情形）。
      */
-#if 1   /* 🔬 第 7 轮实验：与"收口"一起关闭（见 _dvi_load_dma_op 里的说明） */
+#if 0   /* 🔬 2026-10-04 实验（针对 M16 根因）：关掉"每行显式重触发控制通道"。
+         * 理由：实测同步 lane 的视频块占比只有 0.2%（应 ≈80%）——
+         *   每次 IRQ 都重触发三条控制通道 ⇒ 控制通道在 320 字的视频块跑完之前
+         *   就把下一个块装进数据通道、把在跑的传输顶掉 ⇒ 链条只能跑短消隐块。
+         * 预期：关掉后视频块占比应显著上升（回到 ~80%）；若链条因此停摆，
+         *   则说明"收口"补丁与自持链不可兼得，需要改成"只在换表/行边界触发一次"。 */
     dma_start_channel_mask(
         (1u << inst->dma_cfg[0].chan_ctrl) |
         (1u << inst->dma_cfg[1].chan_ctrl) |

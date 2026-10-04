@@ -78,3 +78,11 @@ target_link_libraries(pin_toggle pico_stdlib)
 pico_enable_stdio_usb(pin_toggle 1)
 pico_enable_stdio_uart(pin_toggle 1)
 pico_add_extra_outputs(pin_toggle)
+
+# pair_wave —— 受控实验：四对差分脚输出完全相同的已知方波，
+# 用于验证「探针在每一对脚上的动态读回是否一致」。
+add_executable(pair_wave ${CMAKE_CURRENT_LIST_DIR}/pair_wave.c)
+target_link_libraries(pair_wave pico_stdlib hardware_pwm hardware_clocks hardware_vreg)
+pico_enable_stdio_usb(pair_wave 1)
+pico_enable_stdio_uart(pair_wave 1)
+pico_add_extra_outputs(pair_wave)
