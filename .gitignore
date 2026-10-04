@@ -17,6 +17,10 @@
 # 编译产物
 /build/
 
+# 合成数据自证产物（tools/make_tmds_testdata.py --selftest 每跑一次就重写）
+# 判据：脚本随时能重新生成 ⇒ 不进版本库（与上面"每跑一次就重写"的规矩一致）
+/build_test/
+
 # 构建立即产生的日志（tools\build.cmd 写在根目录）
 build_log.txt
 flash_log.txt

@@ -246,27 +246,6 @@ target_link_libraries(empty pico_stdlib)
 pico_add_extra_outputs(empty)
 
 # ============================================================================
-# TMDS 采样探针（独立固件，用于【测量】PicoPhone 的 DVI 输出波形）
-#   与主固件完全无关，只依赖 pico_stdlib + PIO + DMA。
-#   引脚基址/采样时钟由下方定义控制；接法见 sampler/sampler.c 顶部注释。
-# ============================================================================
-add_executable(sampler sampler/sampler.c)
-pico_generate_pio_header(sampler ${CMAKE_CURRENT_LIST_DIR}/sampler/sampler.pio)
-pico_enable_stdio_usb(sampler 1)
-pico_enable_stdio_uart(sampler 0)
-target_compile_definitions(sampler PRIVATE
-    SAMPLER_PIN_BASE=8       # 8 根线接在 GPIO 32..39（按你的接线改）
-    SAMPLER_CLK_KHZ=252000    # 采样时钟 = 时间分辨率
-)
-target_link_libraries(sampler
-    pico_stdlib
-    hardware_pio
-    hardware_dma
-    hardware_clocks
-    hardware_vreg)
-pico_add_extra_outputs(sampler)
-
-# ============================================================================
 # 引脚连通性测试固件（焊接后查连锡，避免带短路接信号上电）
 #   不需要接任何外部信号：只检查 GPIO 8..15 之间/对 GND/对 3V3 是否相通
 # ============================================================================
