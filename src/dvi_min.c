@@ -356,15 +356,27 @@ int main(void)
      */
     static const uint8_t seq[] = { 1, 2, 3, 4, 5, 6, 7, 0 };
     int i = 0;
+    /*
+     * ★ 2026-10-04 新增：颜色冻结（验收第 3 条要"已知颜色"才能算期望码字）。
+     *   发 '0'..'7' ⇒ 停在对应调色板颜色（0黑 1白 2红 3绿 4蓝 5黄 6青 7品红）
+     *   发 'C'      ⇒ 恢复自动轮换
+     */
+    int freeze = 1, frozen = 0;      /* ★ 默认【停住】：不再自动轮换颜色，屏幕画面稳定。
+                                      *   理由：验证已经完成，上屏实测需要稳定画面；
+                                      *   且自动换色会让"抓一包已知颜色"变得不可复现。 */
 
     while (true) {
-        uint8_t c = seq[i];
+        uint8_t c;
+        if (freeze) {
+            c = (uint8_t)frozen;
+        } else {
+            c = seq[i];
+            i = (i + 1) % (int)(sizeof(seq) / sizeof(seq[0]));
+        }
         fill_solid(c);
 
         /* 用对比色画边框，便于判断画面是否完整（不是只有局部） */
         draw_border(c == 0 ? 1 : 0);
-
-        i = (i + 1) % (int)(sizeof(seq) / sizeof(seq[0]));
 
         /*
          * ── 串口后门（本板没引出 SWD，只能靠它进 BOOTSEL）────────────────
@@ -388,6 +400,15 @@ int main(void)
                 dump_live_regs();
             } else if (ch == 'T') {             /* 'T' ⇒ 一行之内的块指针轨迹 */
                 trace_line();
+            } else if (ch >= '0' && ch <= '7') { /* '0'..'7' ⇒ 冻结到该颜色（见调色板注释） */
+                frozen = ch - '0';
+                freeze = 1;
+                printf("\n[freeze] 停住，颜色=%d（0黑 1白 2红 3绿 4蓝 5黄 6青 7品红）\n", frozen);
+                fflush(stdout);
+            } else if (ch == 'C') {             /* 'C' ⇒ 恢复自动轮换 */
+                freeze = 0;
+                printf("\n[freeze] 恢复自动轮换\n");
+                fflush(stdout);
             }
             sleep_ms(25);
         }

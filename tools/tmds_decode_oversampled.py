@@ -360,6 +360,35 @@ def choose_rotation(bits, msb_first=False):
     return best_j, hits_table[best_j], second, hits_table
 
 
+def choose_rotation_per_lane(bits, msb_first=False):
+    """
+    逐 lane 选符号相位 j：每条 lane 各自取【本 lane 控制符号命中最多】的 j。
+
+    为什么必须逐 lane（2026-10-04 实测，见 陷阱本.md M16 第 12 轮）：
+      三条 lane 的 PIO SM 不是从同一位偏移起步的，符号边界相对公共 CLK 锚点
+      可以相差整数个位 ⇒ 用【全局一个 j】会把某些 lane 切错，
+      消隐段就被合并/看错（例：把 前肩16+同步96+后肩48 合并成一个 160 的 run）。
+      实测同一包数据：同步 lane(gpio4/5) 的 j=0，两条数据 lane 的 j=1。
+
+    判据用"本 lane 控制符号命中数"，对两条 lane 都有效：
+      同步 lane 消隐段含 96 个 CTL2；数据 lane 消隐段是 160 个 sym_no_sync(CTL0)。
+    返回 {lane: (best_j, best_hits, second_hits, hits_table)}
+    """
+    out = {}
+    for key in LANE_KEYS:
+        tab = []
+        for j in range(10):
+            h = 0
+            for v in symbols_from_bits(bits[key], j, msb_first):
+                if v in CTRL:
+                    h += 1
+            tab.append(h)
+        order = sorted(range(10), key=lambda j: (-tab[j], j))
+        out[key] = (order[0], tab[order[0]],
+                    tab[order[1]] if len(order) > 1 else 0, tab)
+    return out
+
+
 # ---------------------------------------------------------------- 真值比对
 
 def parse_truth(path):
@@ -652,18 +681,30 @@ def decode_one(path, args, out):
     # ---- 符号相位
     W("")
     W("[3] SYMBOL PHASE (which 10 bits form a symbol) -- searched, not assumed")
-    best_j, best_hits, second_hits, hits_table = choose_rotation(
-        grid["bits"], args.symbol_bitorder == "msb-first")
-    W("  hits(j) = control-symbol count over all 3 lanes, for j=0..9:")
-    W("    " + " ".join("j%d=%d" % (j, h) for j, h in enumerate(hits_table)))
-    W("  chosen j=%d hits=%d ; runner-up hits=%d" % (best_j, best_hits, second_hits))
+    if getattr(args, "global_rotation", False):
+        best_j, best_hits, second_hits, hits_table = choose_rotation(
+            grid["bits"], args.symbol_bitorder == "msb-first")
+        per_lane = dict((k, (best_j, best_hits, second_hits, hits_table)) for k in LANE_KEYS)
+        W("  --global-rotation 指定：三条 lane 共用 j=%d hits=%d runner-up=%d"
+          % (best_j, best_hits, second_hits))
+    else:
+        per_lane = choose_rotation_per_lane(grid["bits"],
+                                            args.symbol_bitorder == "msb-first")
+        for key in LANE_KEYS:
+            j, h, sec, tab = per_lane[key]
+            W("  %-4s: chosen j=%d hits=%d runner-up=%d   hits(j)=%s"
+              % (key, j, h, sec, " ".join(str(x) for x in tab)))
+            margin_l = "strong" if (sec == 0 and h > 0) or (h >= 4 * max(1, sec)) else "weak"
+            if margin_l == "weak":
+                W("        WARNING: %s 的符号相位未被证据确立（runner-up 太接近）" % key)
+        best_j = per_lane[LANE_KEYS[0]][0]      # 仅用于下游兼容字段
+        best_hits = per_lane[LANE_KEYS[0]][1]
+        second_hits = per_lane[LANE_KEYS[0]][2]
+        hits_table = per_lane[LANE_KEYS[0]][3]
     margin = "strong" if (second_hits == 0 and best_hits > 0) or \
                          (best_hits >= 4 * max(1, second_hits)) else "weak"
-    W("  ROTATION-MARGIN: %s" % margin)
-    if margin == "weak":
-        W("  WARNING: the best rotation is not clearly better than the runner-up -> the")
-        W("  symbol phase is NOT established by this evidence. Treat section 3+ as UNVERIFIED.")
-    syms = dict((k, symbols_from_bits(grid["bits"][k], best_j,
+    W("  ROTATION-MARGIN(按 %s 记): %s" % (LANE_KEYS[0], margin))
+    syms = dict((k, symbols_from_bits(grid["bits"][k], per_lane[k][0],
                                       args.symbol_bitorder == "msb-first"))
                 for k in LANE_KEYS)
     W("  bit order used: %s  (LSB-first is proven by frank_serialiser.pio:64"
@@ -762,7 +803,7 @@ def decode_one(path, args, out):
             if d == 0:
                 row.append("0:%d" % all3)
                 continue
-            arr = symbols_from_bits(grid["bits"][key], best_j + d,
+            arr = symbols_from_bits(grid["bits"][key], per_lane[key][0] + d,
                                     args.symbol_bitorder == "msb-first")
             m = min(n, len(arr))
             c = sum(1 for i in range(m) if arr[i] in CTRL and
@@ -848,8 +889,11 @@ def main():
                     help="probe PIO sampling divider (default 1 -> 252 MSa/s)")
     ap.add_argument("--dut-sm-clkdiv", type=float, default=8.0,
                     help="DUT serialiser SM divider (default 8 -> slow-scan 31.5 Mbit/s)")
-    ap.add_argument("--symbol-bitorder", choices=["lsb-first", "msb-first"],
-                    default="lsb-first",
+    ap.add_argument("--global-rotation", action="store_true",
+                    help="三条 lane 共用一个符号相位 j（旧行为）。默认逐 lane 各自搜 j —— "
+                         "因为三条 lane 的符号边界相对公共 CLK 锚点可差整数个位，"
+                         "共用 j 会把消隐段（前肩16/同步96/后肩48）合并看错。见 陷阱本.md M16。")
+    ap.add_argument("--symbol-bitorder", choices=["lsb-first", "msb-first"],                    default="lsb-first",
                     help="bit order inside a 10-bit symbol (default lsb-first, proven "
                          "by frank_serialiser.pio:64)")
     ap.add_argument("--expect", help="ground-truth file from make_tmds_testdata.py")
