@@ -40,7 +40,22 @@ set(CMAKE_C_STANDARD 11)
 pico_sdk_init()
 
 # DVI 库（与主工程同一个，已含本项目的驱动强度等修复）
-set(FRANK_HDMI_SM_CLKDIV "1" CACHE STRING "" FORCE)
+#
+# ── TMDS 位时钟分频：新增可调档（2026-10-04）─────────────────────────────
+# 为什么需要：探针（RP2040）采样上限 252 MSa/s，而 DVI 位率也是 252 Mbit/s
+#   ⇒ 只有【1 采样/位】，切不出 10 位符号（可靠切符号需 ≥2 采样/位）。
+# 依据（查过源码，不是推测）：DVI_SM_CLKDIV 在库里【只】作用于两处 ——
+#   ① frank_serialiser.pio:71  sm_config_set_clkdiv()      —— 串行器 SM
+#   ② frank_serialiser.c:124   pwm_config_set_clkdiv_int()  —— 像素时钟 PWM
+#   时序表 / DMA / TMDS 编码【完全不依赖它】。
+#   ⇒ 调大它 = 把【同一串符号按比例放慢】送出去，符号内容逐位不变。
+# 用法：-DWBOARD_DVI_SM_CLKDIV=8 ⇒ 位率 252/8 = 31.5 MHz
+#       ⇒ 探针 clkdiv=1 时 8 采样/位、clkdiv=2 时 4 采样/位，均可完整解符号。
+# 注意：库里要求 sys_clock = 位时钟 × DVI_SM_CLKDIV，而 sys_clock 仍由
+#       dvi_min.c 设为 252 MHz ⇒ 慢档下这个等式【故意】不成立，
+#       输出只是一份"实时性放慢 8 倍"的合法 DVI 符号流（本来也不接显示器）。
+set(WBOARD_DVI_SM_CLKDIV "1" CACHE STRING "TMDS 位时钟分频（1=全速 252Mbit/s；8=慢扫描，供探针解符号）")
+set(FRANK_HDMI_SM_CLKDIV "${WBOARD_DVI_SM_CLKDIV}" CACHE STRING "" FORCE)
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../third_party/frank-hdmi-sound
                  ${CMAKE_CURRENT_BINARY_DIR}/frank-hdmi-sound)
 
