@@ -47,6 +47,25 @@ cmd /c tools\flash.cmd
 pwsh -NoProfile -File tools\flash_bootsel.ps1
 ```
 
+### 串口后门（推荐：不用碰 BOOTSEL 按键）
+
+**两块板都植入了串口后门** —— 发一个字符就能进 BOOTSEL 或重启，有现成脚本，不用手打：
+
+```powershell
+.\tools\flash_backdoor.ps1                                    # 列出当前能看到的板子与引导盘
+.\tools\flash_backdoor.ps1 -Board probe                       # 刷探针（probe_rp2040.uf2）
+.\tools\flash_backdoor.ps1 -Board dut -Firmware wboard_dvi\build\pin_toggle.uf2
+```
+
+| 板 | 角色 | 进 BOOT 后按 `INFO_UF2.TXT` 的 Board-ID 认 | 后门命令 | 固件在哪 |
+|---|---|---|---|---|
+| **RP2350B-Plus-W** | 待测板（`dut`） | `RP2350` | `B` = 进 BOOTSEL，`R` = 重启 | `wboard_dvi/*`、`src/dvi_min.c` |
+| **RP2040**（13 元板，**超频到 252 MHz**） | 探针（`probe`） | `RPI-RP2` | 上面两个 + `h s d b r 0 1`（**`d`/`b` = dump 那 64 KB 采样缓冲**） | `probe_rp2040/probe.c` |
+
+- **绝不靠盘符认板**（插拔后会变号）—— 脚本按 `INFO_UF2.TXT` 的 `Board-ID` 判。
+- 命令出处：`probe_rp2040/probe.c:21-22,337-339`、`src/dvi_min.c:126-144`、`wboard_dvi/pin_toggle.c:45-50`。
+- ⚠️ **后门收不到的情形**：固件已挂死 ⇒ 只能人手按 BOOTSEL（脚本会明确报 `✗` 并提示）。
+
 > **用什么手段看结果** —— 这一条决定了整个工作方式：
 > - **SWD（推荐）**：2026-10-01 晚实测全链路可用 —— `SWD DPIDR 0x4c013477`、
 >   两个 M33 核 `Examination succeed`、读/写内存都通、`program` 烧写+校验通过。
