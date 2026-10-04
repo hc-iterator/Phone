@@ -37,7 +37,9 @@ Write-Host "已打开 $Port" -ForegroundColor Green
 Start-Sleep -Milliseconds 300
 while ($sp.BytesToRead -gt 0) { $null = $sp.ReadExisting() }
 
-$cmd = if ($Status) { "s" } else { "d" }
+# ⚠️ 2026-10-04 修：core1_monitor 固件【命令必须以 CR 结尾才执行】（裸字符只回显、不动作，
+#    见 core1_monitor/README.md 第 28-29 行）。**此改动尚未上机复验，标待验证。**
+$cmd = if ($Status) { "s`r" } else { "d`r" }
 $sp.Write($cmd)
 Write-Host "已发送命令 '$cmd'，等待数据（最多 $TimeoutSec 秒）..."
 
@@ -49,7 +51,7 @@ while ((Get-Date) -lt $deadline -and -not $done) {
         $chunk = $sp.ReadExisting()
         if ($chunk) {
             [void]$sb.Append($chunk)
-            if ($sb.ToString() -match '(?m)^END\s*$' -or ($Status -and $sb.ToString() -match 'STAT ')) { $done = $true }
+            if ($sb.ToString() -match '(?m)^END\s*$' -or ($Status -and ($sb.ToString() -match 'STAT ' -or $sb.ToString() -match '(?m)^mon>\s*$'))) { $done = $true }
         } else { Start-Sleep -Milliseconds 50 }
     } catch { Start-Sleep -Milliseconds 50 }
 }

@@ -60,7 +60,14 @@ pwsh -NoProfile -File tools\flash_bootsel.ps1
 | 板 | 角色 | 进 BOOT 后按 `INFO_UF2.TXT` 的 Board-ID 认 | 后门命令 | 固件在哪 |
 |---|---|---|---|---|
 | **RP2350B-Plus-W** | 待测板（`dut`） | `RP2350` | `B` = 进 BOOTSEL，`R` = 重启 | `wboard_dvi/*`、`src/dvi_min.c` |
-| **RP2040**（13 元板，**超频到 252 MHz**） | 探针（`probe`） | `RPI-RP2` | 上面两个 + `h s d b r 0 1`（**`d`/`b` = dump 那 64 KB 采样缓冲**） | `probe_rp2040/probe.c` |
+| **RP2040**（13 元板，**超频到 252 MHz**） | 探针（`probe`） | `RPI-RP2` | `?` `S` `s` `g` `c<div>` `m` `d` `r/w` `P/C` `R` `B` `E/F` `X`（**必须 CR 结尾**） | **`core1_monitor`**（v1.1 = 监视器 + 采样器合并），见 `core1_monitor/README.md` |
+
+> 🔴 **两条会白费半小时的坑（2026-10-04 亲踩，别重犯）**：
+> 1. **命令必须以 CR（`\r` 或 `\n`）结尾才会被执行** —— 只发裸字符时固件**只回显、不动作**。
+>    我据此误判成"探针固件不对"，其实只是协议没对上。串口工具请**关掉本地回显**（固件自己会回显）。
+> 2. **探针跑的是 `core1_monitor`，不是 `probe_rp2040`** —— 它的**串口服务在 Core1**，
+>    所以 **Core0 挂死它照样应答**（`S` 秒回缓存；`B` 任何状态下都能进 BOOTSEL，**不必人手按按键**）。
+>    ⚠️ `probe_rp2040/probe.c` 是**上一代**的独立采样器固件，命令集不同、且**没有自救能力**。
 
 - **绝不靠盘符认板**（插拔后会变号）—— 脚本按 `INFO_UF2.TXT` 的 `Board-ID` 判。
 - 命令出处：`probe_rp2040/probe.c:21-22,337-339`、`src/dvi_min.c:126-144`、`wboard_dvi/pin_toggle.c:45-50`。
@@ -82,7 +89,29 @@ python tools\read_serial.py COM7 15
 固件里的 `printf`（**包括 `panic()` 的消息**）都从这个口出来，排查崩溃比 SWD 翻调用栈快。
 ⚠️ **前提是 USB stdio 真的起来了** —— 不枚举时这个口不存在（见上）。
 
-**设备识别**：`2E8A:0009` = 目标板（串口 COM7）；`2E8A:000C` = 调试探针（CMSIS-DAP + COM8）。`2E8A` 是树莓派官方 VID。
+**设备识别**（⚠️ **COM 号每次插拔都会变 —— 只认 VID:PID + 序列号**；下表 2026-10-04 实测）：
+
+| 设备 | VID:PID | **序列号（唯一）** | 当天 CDC | 备注 |
+|---|---|---|---|---|
+| **待测板 RP2350B-Plus-W** | `2E8A:0009`（MI_00=CDC，MI_02=Reset） | `C7771D72049EEF63` | COM18 | 跑 DVI 固件时，`s` 命令会吐 frank-hdmi 速率遥测（`[dvi] t=… eng=… vcnt=…`） |
+| **探针 RP2040** | `2E8A:000A`（MI_00=CDC，MI_02=Reset） | **`503558607A848D9F`** | COM19 | ⚠️ **2026-10-04 该 CDC 打不开**（"设备没有发挥作用"）⇒ 需复位后才能用 `d`/`b` 采集 |
+
+- `2E8A` = 树莓派官方 VID。⚠️ **`2E8A:000C` 是另跑的 `debugprobe`（CMSIS-DAP）**，与本表这两块不是同一套固件。
+- 🔧 **串口打不开（报"连到系统上的设备没有发挥作用"）怎么救**（2026-10-04 实测）—— **次序很重要**：
+  1. ✅ **首选**：`pnputil /restart-device "USB\VID_2E8A&PID_000A\503558607A848D9F"`
+     （**父复合设备**，需管理员）⇒ 让主机重新枚举，**实测立刻可用**。
+  2. 🔴 **不要用 `pnputil /remove-device`**（父设备或 `&MI_00` 子节点都不行）——
+     **实测会把整块板从 USB 总线上打下去，而且不会自己回来**：`/scan-devices` 无效、
+     `picotool` 也看不见它，**只能物理拔插 USB**（2026-10-04 亲踩）。
+     ⚠️ 项目自带的 `tools/reset_usb_port.cmd` 走的正是 remove + scan 这条路 ⇒ **对它留个心眼**。
+  3. ❌ `picotool reboot -f --bus/--address` 对这个症状**无效**（命令 exit=0 成功，口照样打不开）。
+- ⚠️ **根因与预防**（`tools/reset_usb_port.cmd` 头部原话）：**进程在读取挂起时退出/被杀，
+  Windows 会一直持有那个内核文件对象**，口就被独占。
+  ⇒ **采集必须【在同一个进程里一气呵成】**（打开 → 发命令 → 收完 → 关），
+  **不要"开一次、关一次、再开"** —— 反复开关正是把 CDC 弄卡的常见触发方式。
+- **`picotool info`（不带参数）**可列出所有在线 RP2xxx：
+  `RP2350 device at bus 1, address 5` / `RP2040 device at bus 1, address 4`；
+  ⚠️ 要读固件身份得加 `-f`，而 **`-f` 会强制重启进 BOOTSEL（属状态变更，会中断正在跑的固件）**。
 
 ## 主机侧自检（不需要板子）
 

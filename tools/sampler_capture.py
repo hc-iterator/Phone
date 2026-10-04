@@ -104,7 +104,9 @@ def main() -> int:
         print(f"打开 {port} 失败：{e}")
         return 1
 
-    cmd = b"s" if mode == "status" else b"d"
+    # ⚠️ 2026-10-04 修：core1_monitor 固件【命令必须以 CR 结尾才执行】——
+    #    发裸字符只会被回显、不动作（见 core1_monitor/README.md 第 28-29 行的警告）。
+    cmd = b"s\r" if mode == "status" else b"d\r"
     print(f"已打开 {port}，发送命令 {cmd.decode()} ...")
     time.sleep(0.2)
     ser.reset_input_buffer()
@@ -126,7 +128,9 @@ def main() -> int:
         t = s.strip()
         if mode == "dump" and t == "END":
             done = True
-        if mode == "status" and t.startswith("STAT"):
+        # ⚠️ 2026-10-04：core1_monitor 的 s 输出不是 "STAT" 开头，而是 "sampler   : ..."，
+        #    结束于 "mon>" 提示符 ⇒ 一并接受（**此改动尚未上机复验，标待验证**）
+        if mode == "status" and (t.startswith("STAT") or t == "mon>"):
             done = True
     ser.close()
 
