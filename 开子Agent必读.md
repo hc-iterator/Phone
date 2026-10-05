@@ -30,6 +30,11 @@ pwsh -NoProfile -File tools\who_can_i_reuse.ps1 -ShowMain
 
 ---
 
+> ⚠️ **历史被重写之后**（例：2026-10-05 的 **148 → 33** 精简 ✓）：
+> `_agents\` 下的旧空间分支会变成"**分叉**" ✗ —— `tools\sync_agent_spaces.ps1` 会**跳过**它们
+> （报"有独有提交"，**这是保护，不是故障** ✓）。
+> ⇒ 此时**不要强行同步** ✗，改用 **`tools\agent_space.ps1 -Name <名字> -Recreate` 重建**该空间 ✓。
+
 ## 二、新建/复用都要守的四条
 
 1. **工作区**：空间必须是**独立克隆**，且 **`remote` 为空**（物理上推不回主仓库 ✓ ——
