@@ -3,7 +3,7 @@
     ① 若有 RP2350 BOOTSEL 盘 ⇒ 直接拷 uf2（最可靠）
     ② 否则走 SWD，带重试；【每次结束都 resume】（否则会把核心留在停止状态，害死下一次测量！）
   用法：
-      .\tools\flash2.ps1                       # 烧 build\SPI_PICO_TEST.elf/uf2
+      .\tools\flash2.ps1                       # 烧 build\PicoPhone.elf/uf2
       .\tools\flash2.ps1 build\perms2\xxx.uf2  # 烧指定文件
       .\tools\flash2.ps1 -NoBootsel            # 强制走 SWD
 #>
@@ -22,7 +22,7 @@ function Say($m, $c='Gray') { Write-Host $m -ForegroundColor $c }
 
 $uf2 = $null; $elf = $null
 if ([string]::IsNullOrWhiteSpace($Image)) {
-    $uf2 = Join-Path $root 'build\SPI_PICO_TEST.uf2'; $elf = Join-Path $root 'build\SPI_PICO_TEST.elf'
+    $uf2 = Join-Path $root 'build\PicoPhone.uf2'; $elf = Join-Path $root 'build\PicoPhone.elf'
 } elseif (Test-Path $Image) {
     $p = (Resolve-Path $Image).Path
     if ($p -like '*.uf2') { $uf2 = $p } else { $elf = $p }

@@ -13,7 +13,7 @@
 
 param(
     [int]$RunSec = 90,
-    [string]$Elf = "build/SPI_PICO_TEST.elf",
+    [string]$Elf = "build/PicoPhone.elf",
     [string]$GdbScript = "tools/gdb_wt.txt",
     [int]$GdbTimeoutMs = 60000,
     [switch]$SkipFlash
@@ -36,12 +36,16 @@ function Stop-Ocd {
 Stop-Ocd
 
 if (-not $SkipFlash) {
-    $elfAbs = (Resolve-Path $Elf).Path -replace '\\','/'
+    # cfg 里用【仓库根相对路径】（本脚本已 Set-Location 到 $root，openocd 的工作目录即仓库根），
+    # 不写机器相关的绝对根；$root 只用来确认产物确实存在。
+    $elfPath = Join-Path $root $Elf
+    if (-not (Test-Path $elfPath)) { Write-Host "  找不到 $elfPath，停止。"; exit 1 }
+    $elfCfg  = $Elf -replace '\\','/'
     @"
 adapter speed 1000
 init
 halt
-program "$elfAbs" verify
+program "$elfCfg" verify
 reset run
 shutdown
 "@ | Set-Content -Encoding ascii tools\ocd_wt_flash.cfg

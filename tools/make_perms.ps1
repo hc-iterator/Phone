@@ -35,7 +35,7 @@ foreach ($p in $perms) {
     & cmd /c "tools\build.cmd" 2>&1 | Out-Null
     $log = Join-Path $root 'debug_logs\build_log.txt'
     if ((Get-Content $log -Tail 1) -match 'BUILD_EXIT=0') {
-        Copy-Item (Join-Path $root 'build\SPI_PICO_TEST.uf2') (Join-Path $out "perm_$($p.n).uf2") -Force
+        Copy-Item (Join-Path $root 'build\PicoPhone.uf2') (Join-Path $out "perm_$($p.n).uf2") -Force
         Write-Host "  perm_$($p.n): D0=$($p.a) D1=$($p.b) D2=$($p.c)  => 已生成" -ForegroundColor Green
     } else {
         Write-Host "  perm_$($p.n): 编译失败" -ForegroundColor Red

@@ -32,10 +32,10 @@
 #
 # 用法：
 #   pwsh -NoProfile -File tools\flash_bootsel.ps1
-#   pwsh -NoProfile -File tools\flash_bootsel.ps1 -Uf2 build\SPI_PICO_TEST.uf2
+#   pwsh -NoProfile -File tools\flash_bootsel.ps1 -Uf2 build\PicoPhone.uf2
 
 param(
-    [string]$Uf2 = "build\SPI_PICO_TEST.uf2",
+    [string]$Uf2 = "build\PicoPhone.uf2",
     [string]$LabelPattern = "RP2350|RPI-RP2",
     [int]$WaitSeconds = 20
 )

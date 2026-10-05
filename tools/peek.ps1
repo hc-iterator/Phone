@@ -15,7 +15,7 @@ param(
 )
 $ErrorActionPreference = 'Continue'
 $root = Split-Path -Parent $PSScriptRoot
-if (-not $Elf) { $Elf = Join-Path $root 'build\SPI_PICO_TEST.elf' }
+if (-not $Elf) { $Elf = Join-Path $root 'build\PicoPhone.elf' }
 $tl  = Join-Path $env:USERPROFILE '.pico-sdk\toolchain\14_2_Rel1\bin'
 $ocd = Join-Path $env:USERPROFILE '.pico-sdk\openocd\0.12.0+dev\openocd.exe'
 $scr = Join-Path $env:USERPROFILE '.pico-sdk\openocd\0.12.0+dev\scripts'

@@ -1,6 +1,6 @@
 @echo off
 REM ============================================================================
-REM  tools\build.cmd - configure + build the SPI_PICO_TEST firmware
+REM  tools\build.cmd - configure + build the PicoPhone firmware
 REM
 REM  Why this exists: the shell sandbox blocks capturing a child process's
 REM  output through a pipe, so cmake/ninja cannot be run directly from the
@@ -69,8 +69,8 @@ set BLD=%ERRORLEVEL%
 
 echo. >> "%LOG%"
 echo ---- artifacts ---- >> "%LOG%"
-if exist "build\SPI_PICO_TEST.uf2" (
-    for %%F in ("build\SPI_PICO_TEST.uf2") do echo uf2: %%~zF bytes  %%~tF >> "%LOG%"
+if exist "build\PicoPhone.uf2" (
+    for %%F in ("build\PicoPhone.uf2") do echo uf2: %%~zF bytes  %%~tF >> "%LOG%"
 ) else (
     echo uf2: MISSING >> "%LOG%"
 )

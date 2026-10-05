@@ -39,7 +39,7 @@ include(pico_sdk_import.cmake)
 
 set(PICO_PSRAM_SIZE_BYTES 8*1024*1024)
 
-project(SPI_PICO_TEST C CXX ASM)
+project(PicoPhone C CXX ASM)
 
 set(PICO_CXX_ENABLE_EXCEPTIONS 1)
 
@@ -50,7 +50,7 @@ pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
 
-add_executable(SPI_PICO_TEST 
+add_executable(PicoPhone 
         src/main.cpp
         src/hw_config.cpp
         src/psram_probe.c
@@ -64,11 +64,11 @@ add_executable(SPI_PICO_TEST
         #psram_test.c
         )
 
-target_compile_definitions(SPI_PICO_TEST PRIVATE
+target_compile_definitions(PicoPhone PRIVATE
     PICO_AUTO_DETECT_PSRAM=0          # 自动检测 PSRAM
     PICO_PSRAM_CS_PIN=47               # 你的板子的 CS 引脚（根据实际调整）
 )
-target_compile_definitions(SPI_PICO_TEST PRIVATE
+target_compile_definitions(PicoPhone PRIVATE
     PICO_SDIO_GPIO_BASE_16=1   # 启用基址 16
     # 追踪 SDIO 卡死点：USE_DBG_PRINTF 让库调用调试输出，
     # USE_PRINTF 才提供真正 printf 到串口（并 flush）的实现。
@@ -77,23 +77,23 @@ target_compile_definitions(SPI_PICO_TEST PRIVATE
     USE_PRINTF=1
 )
 
-pico_set_program_name(SPI_PICO_TEST "SPI_PICO_TEST")
-pico_set_program_version(SPI_PICO_TEST "0.1")
+pico_set_program_name(PicoPhone "PicoPhone")
+pico_set_program_version(PicoPhone "0.1")
 
 # Generate PIO header
-pico_generate_pio_header(SPI_PICO_TEST ${CMAKE_CURRENT_LIST_DIR}/src/blink.pio)
+pico_generate_pio_header(PicoPhone ${CMAKE_CURRENT_LIST_DIR}/src/blink.pio)
 
 # Modify the below lines to enable/disable output over UART/USB
-pico_enable_stdio_uart(SPI_PICO_TEST 1)
-pico_enable_stdio_usb(SPI_PICO_TEST 1)
+pico_enable_stdio_uart(PicoPhone 1)
+pico_enable_stdio_usb(PicoPhone 1)
 
 # Add the standard library to the build
-target_link_libraries(SPI_PICO_TEST
+target_link_libraries(PicoPhone
         pico_stdlib
         hardware_psram)
 
 # Add the standard include files to the build
-target_include_directories(SPI_PICO_TEST PRIVATE
+target_include_directories(PicoPhone PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
 )
 
@@ -150,7 +150,7 @@ set(FRANK_HDMI_SM_CLKDIV "1" CACHE STRING "" FORCE)
 #     GPIO36/37 = D0 P/N, 38/39 = CLK P/N
 add_subdirectory(third_party/frank-hdmi-sound)
 
-target_compile_definitions(SPI_PICO_TEST PRIVATE
+target_compile_definitions(PicoPhone PRIVATE
     FRANK_HDMI_PIN_CLK=38
     FRANK_HDMI_PIN_D0=36
     FRANK_HDMI_PIN_D1=34
@@ -173,7 +173,7 @@ add_subdirectory(third_party/ILI9488_Pico)
 add_subdirectory(third_party/pico_hdmi-0.0.7)
 
 # Add any user requested libraries
-target_link_libraries(SPI_PICO_TEST 
+target_link_libraries(PicoPhone 
         pico_rand
         hardware_spi
         hardware_i2c
@@ -192,7 +192,7 @@ target_link_libraries(SPI_PICO_TEST
         hardware_irq
         )
 
-pico_add_extra_outputs(SPI_PICO_TEST)
+pico_add_extra_outputs(PicoPhone)
 
 # ============================================================================
 # 最小 DVI 验证固件（调试用，独立目标）
@@ -231,7 +231,7 @@ pico_add_extra_outputs(dvi_min)
 # 源码已整理进 src/，把它加进包含路径，
 # 这样 src 里的 #include "kernel.h" 之类仍然有效。
 # ============================================================================
-target_include_directories(SPI_PICO_TEST PRIVATE "${CMAKE_CURRENT_LIST_DIR}/src")
+target_include_directories(PicoPhone PRIVATE "${CMAKE_CURRENT_LIST_DIR}/src")
 
 
 # ============================================================================

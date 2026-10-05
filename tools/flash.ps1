@@ -1,7 +1,7 @@
 <#
   一键烧写：优先找 CMSIS-DAP(SWD) 用 openocd 烧；SWD 不通就找 RP2350 的 BOOTSEL 盘拷 uf2。
   用法：
-      .\tools\flash.ps1                          # 烧 build\SPI_PICO_TEST.uf2/elf（当前构建）
+      .\tools\flash.ps1                          # 烧 build\PicoPhone.uf2/elf（当前构建）
       .\tools\flash.ps1 invonly_lane2_pin32      # 烧 build\perms\invonly_lane2_pin32.uf2
       .\tools\flash.ps1 perm3_lane012_34_36_32   # 烧某个排列
       .\tools\flash.ps1 D:\path\to\foo.uf2       # 直接给路径
@@ -31,8 +31,8 @@ function Say($m, $c = 'Gray') { Write-Host $m -ForegroundColor $c }
 # ---------------------------------------------------------------- 1) 找目标文件
 $uf2 = $null; $elf = $null; $bin = $null
 if ([string]::IsNullOrWhiteSpace($Image)) {
-    $uf2 = Join-Path $build 'SPI_PICO_TEST.uf2'
-    $elf = Join-Path $build 'SPI_PICO_TEST.elf'
+    $uf2 = Join-Path $build 'PicoPhone.uf2'
+    $elf = Join-Path $build 'PicoPhone.elf'
 } elseif (Test-Path $Image) {
     $uf2 = (Resolve-Path $Image).Path
 } else {

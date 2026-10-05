@@ -14,7 +14,7 @@
 param(
     [int]$WarmupSec = 15,
     [int]$GapSec = 8,
-    [string]$Elf = "build/SPI_PICO_TEST.elf",
+    [string]$Elf = "build/PicoPhone.elf",
     [switch]$SkipFlash
 )
 
@@ -39,12 +39,16 @@ function Stop-Ocd {
 #    （实测读到了 0x09090909 这种规律值），非常容易误判。
 Stop-Ocd
 if (-not $SkipFlash) {
-    $elfAbs = (Resolve-Path $Elf).Path -replace '\\','/'
+    # cfg 里用【仓库根相对路径】（本脚本已 Set-Location 到 $root，openocd 的工作目录即仓库根），
+    # 不写机器相关的绝对根；$root 只用来确认产物确实存在。
+    $elfPath = Join-Path $root $Elf
+    if (-not (Test-Path $elfPath)) { Write-Host "  找不到 $elfPath，停止。"; exit 1 }
+    $elfCfg  = $Elf -replace '\\','/'
     @"
 adapter speed 1000
 init
 halt
-program "$elfAbs" verify
+program "$elfCfg" verify
 reset run
 shutdown
 "@ | Set-Content -Encoding ascii tools\ocd_flash_free.cfg

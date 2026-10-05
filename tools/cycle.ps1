@@ -18,7 +18,7 @@
 param(
     [switch]$SkipBuild,
     [string]$GdbScript = "tools/gdb_diag.txt",
-    [string]$Elf = "build/SPI_PICO_TEST.elf",
+    [string]$Elf = "build/PicoPhone.elf",
     [int]$GdbTimeoutMs = 60000
 )
 
@@ -53,16 +53,21 @@ if (-not $SkipBuild) {
 
 # ---------- 2. 烧写 ----------
 Stop-Ocd
-@'
+# cfg 里一律用【仓库根相对路径】：本脚本已 Set-Location 到 $root，openocd 的工作目录
+# 就是仓库根 ⇒ 不再写死 C:\...\Pico\... 这类机器相关的绝对根（换目录/换机器都不失效）。
+$elfPath = Join-Path $root $Elf
+if (-not (Test-Path $elfPath)) { Write-Host "  找不到 $elfPath（先构建，或去掉 -SkipBuild），停止。"; exit 1 }
+$elfCfg = $Elf -replace '\\','/'
+@"
 adapter speed 1000
 init
 halt
-program "C:/Users/Chen/Desktop/Pico/SPI_PICO_TEST/build/SPI_PICO_TEST.elf" verify
+program "$elfCfg" verify
 reset run
 sleep 8000
 halt
 shutdown
-'@ | Set-Content -Encoding ascii tools\ocd_flash_run.cfg
+"@ | Set-Content -Encoding ascii tools\ocd_flash_run.cfg
 
 & $OCD -s $OCD_S -f interface/cmsis-dap.cfg -f target/rp2350.cfg -f tools/ocd_flash_run.cfg *> debug_logs\flash_log.txt
 $fl = Get-Content debug_logs\flash_log.txt -ErrorAction SilentlyContinue

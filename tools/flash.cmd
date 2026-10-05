@@ -1,6 +1,6 @@
 @echo off
 REM ============================================================================
-REM  tools\flash.cmd - write build\SPI_PICO_TEST.uf2 to the board
+REM  tools\flash.cmd - write build\PicoPhone.uf2 to the board
 REM
 REM  Requires the board to be in BOOTSEL mode (hold BOOTSEL while plugging in
 REM  USB). picotool's -f auto-reboot does NOT work while the firmware is parked
@@ -13,7 +13,7 @@ REM ============================================================================
 cd /d "%~dp0.."
 
 set "PICOTOOL=%USERPROFILE%\.pico-sdk\picotool\2.3.0\picotool\picotool.exe"
-set "UF2=build\SPI_PICO_TEST.uf2"
+set "UF2=build\PicoPhone.uf2"
 if not exist debug_logs mkdir debug_logs
 set "LOG=debug_logs\flash_log.txt"
 

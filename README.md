@@ -1,4 +1,4 @@
-# SPI_PICO_TEST
+# PicoPhone
 
 > 🔴 **要开子 Agent / 派活之前必读**：[`开子Agent必读.md`](开子Agent必读.md)
 > （第一件事就是跑 `tools\who_can_i_reuse.ps1` —— **先看有什么能复用的，再决定新建**；
@@ -33,10 +33,10 @@
 cmd /c tools\build.cmd
 ```
 
-结果看 `debug_logs\build_log.txt` 里的 `BUILD_EXIT=`（0 = 成功）。产物 `build\SPI_PICO_TEST.uf2`。
+结果看 `debug_logs\build_log.txt` 里的 `BUILD_EXIT=`（0 = 成功）。产物 `build\PicoPhone.uf2`。
 
 > ⚠️ **"退出码说成功"不算数** —— 本项目出过 `echo %ERRORLEVEL%` 把退出码冲成 0 的假成功。
-> **必须同时看产物时间戳**（`build\SPI_PICO_TEST.uf2` / `.elf` 的 `LastWriteTime` 要是"刚刚"）。
+> **必须同时看产物时间戳**（`build\PicoPhone.uf2` / `.elf` 的 `LastWriteTime` 要是"刚刚"）。
 
 ## 怎么烧写
 
