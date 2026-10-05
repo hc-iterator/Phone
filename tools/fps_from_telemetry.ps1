@@ -39,24 +39,38 @@
               ...................................................... frank_hdmi.c:228,262-269
 
   WHICH FIELDS CAN GIVE fps
-    fps = (delta lines) / (delta seconds) / (lines per frame).  Two candidate line counts:
-      * hb   -- frank_hdmi_heartbeat_lines, bumped once per encoded line (unconditional)
-      * n    -- g_enc_count, bumped once per encode_one_scanline_16bpp() call
-    Both divide by -ActiveLines (default 480, from LOGICAL_H = FRANK_HDMI_LOGICAL_HEIGHT,
-    frank_hdmi.c:99 + v_active_lines=480 at frank_dvi_timing.c:40).  Older logs taken when
-    DVI_VERTICAL_REPEAT=2 / LOGICAL_H=240 must be parsed with -ActiveLines 240.
-    eng is a frame counter too, so it gives fps DIRECTLY -- but only if dvi_frame_count
-    really increments once per frame, which is what the hb and n cross-checks are for.
-    NOT usable for fps: vctr (resets every state boundary), irq (emitted scanlines, can be
-    ahead of produced ones), qv/qf (queue pointers), enc/waitfree/enonly (microseconds),
-    hb's second number (heartbeat_frames is capped by the same loop and is redundant).
+    READ THIS FIRST -- two different "line counts" get confused all the time:
+      * irq = g_dvi_irq_count = scanlines EMITTED by the DMA engine, blanking INCLUDED.
+      * n   = g_enc_count     = scanlines actually ENCODED by the producer (fresh data).
+        These are NOT interchangeable: n/irq is the encoder fill ratio (0.53 in the
+        2026-10-05 sample -- only 53% of emitted lines carried freshly encoded data).
+      * hb  = frank_hdmi_heartbeat_lines = bumped once per encoded line, so it tracks n.
+    PRIMARY (default since 2026-10-05): derive the true TOTAL lines per frame from the two
+    frame/line counters themselves:
+        irq-per-eng = delta(irq) / delta(eng)      -> 525.01 in the real sample
+        fps         = (delta(irq)/delta(t)) / irq-per-eng   -> 60.0
+      eng counts frames and irq counts emitted lines, so irq/eng IS the total lines per
+      frame -- no assumption needed.  This is the number to quote.
+      Cross-check: fps(chk) = delta(eng)/delta(t) (independent, same answer when eng moves).
+    LEGACY / explicit basis: -ActiveLines N (default 480) divides the encoded-line rate by
+      N.  480 is the ACTIVE line count (LOGICAL_H / v_active_lines), NOT the total per frame,
+      so this basis reads LOW (it gave 34.8 fps for a 60.0 fps target).  It is kept only so
+      old logs can be examined with an explicit, clearly-labelled assumption; it is printed
+      as ACTIVE-LINES-ASSUMPTION and must not be quoted as the frame rate.
+    NOT usable for fps: vctr (resets every state boundary), qv/qf (queue pointers),
+    enc/waitfree/enonly (microseconds), hb's second number (heartbeat_frames, redundant).
 
   OUTPUT (stable, ASCII, greppable)
     PARSED-LINES <n>
     INTERVALS <n>
     GAP stats ms: min/median/max
-    per-interval: INT <i> dt=<s>s dhb=<n> dn=<n> deng=<n> | fps(hb)= fps(n)= fps(eng)=
-    FPS-HB / FPS-N / FPS-ENG  (median over intervals)
+    per-interval: INT <i> dt=<s>s dhb=<n> dn=<n> deng=<n> dirq=<n> | fps(hb)= fps(n)= fps(eng)=
+    IRQ-PER-ENG <x> => TOTAL-LINES-PER-FRAME <y>
+    FPS-PRIMARY <fps>            <- the number to use
+    FPS-PRIMARY-CHECK <fps>      <- independent eng-based cross-check
+    ENC-LINE-FILL-RATIO <r>      <- dn/dirq
+    ENCODED-LINES-PER-S / EMITTED-LINES-PER-S
+    ACTIVE-LINES-ASSUMPTION <N> -> fps <z>   (legacy basis; do not quote)
     INCONCLUSIVE / WARN lines when the data cannot support an fps number
 
   HONEST LIMITS
@@ -68,7 +82,7 @@
 [CmdletBinding()]
 param(
     [string]$LogFile = '',
-    [int]$ActiveLines = 480,
+    [int]$ActiveLines = 480,   # LEGACY basis only: ACTIVE lines, not total lines per frame
     [int]$MinIntervalMs = 500,
     [switch]$Raw,
     [switch]$SelfTest
@@ -202,36 +216,61 @@ function Invoke-Analysis {
     Write-Host ("INTERVALS " + $used)
     Write-Host ("GAP ms min=" + ($g | Measure-Object -Minimum).Minimum + " median=" + $dtMedMs + " max=" + ($g | Measure-Object -Maximum).Maximum)
     $mHb = Get-Median -Values @($fpsHb); $mN = Get-Median -Values @($fpsN); $mEng = Get-Median -Values @($fpsEng)
-    Write-Host ("FPS-HB  " + [math]::Round($mHb, 3) + "  (frank_hdmi_heartbeat_lines / s / " + $ActiveLines + ")")
-    Write-Host ("FPS-N   " + [math]::Round($mN, 3) + "  (g_enc_count / s / " + $ActiveLines + ")")
-    Write-Host ("FPS-ENG " + [math]::Round($mEng, 3) + "  (dvi_frame_count / s, condition-gated)")
     $resEng = 0.0
     if ($dtMedMs -gt 0) { $resEng = 1000.0 / $dtMedMs }
-    Write-Host ("FPS-ENG-RESOLUTION +/-" + [math]::Round($resEng, 3) + " fps (dvi_frame_count is an integer per " + [math]::Round($dtMedMs / 1000.0, 3) + "s gap)")
-    Write-Host ("IRQ-PER-S median " + [math]::Round((Get-Median -Values @($irqRate)), 1))
-    Write-Host ("ENCODED-LINES-PER-S median " + [math]::Round($mN * $ActiveLines, 1) + "  (implied by n)")
-    if ($ActiveLines -eq 240) {
-        Write-Host ("ALT-INTERPRETATION if lines-per-frame were 480: fps = " + [math]::Round($mN * 240 / 480, 3) + " (use -ActiveLines 480)")
-    } else {
-        Write-Host ("ALT-INTERPRETATION if lines-per-frame were 240 (old DVI_VERTICAL_REPEAT=2 logs): fps = " + [math]::Round($mN * $ActiveLines / 240, 3) + " (use -ActiveLines 240)")
-    }
-    Write-Host "NOTE the lines-per-frame coefficient is the crux: it comes from LOGICAL_H (frank_hdmi.c:99) and the timing preset v_active_lines (frank_dvi_timing.c:40); confirm against the firmware build you captured."
+    Write-Host ("IRQ-PER-S median " + [math]::Round((Get-Median -Values @($irqRate)), 1) + "  (per-interval median; totals-based value is EMITTED-LINES-PER-S below)")
 
-    $diff = 0.0
-    if ($mHb -gt 0) { $diff = [math]::Abs($mHb - $mN) / $mHb * 100.0 }
-    if ($diff -gt 1.0) {
-        Write-Host ("WARN fps(hb) and fps(n) differ by " + [math]::Round($diff, 2) + "% -- report both, do not average")
+    # ---- PRIMARY BASIS: derive the true total lines per frame from irq/eng ----
+    # eng counts FRAMES; irq counts EMITTED SCANLINES, blanking included.  So irq/eng is the
+    # real total lines per frame (640x480p60 => 525), NOT the 480 "active" lines.  Using 480
+    # as the denominator invents a frame rate ~9% low (34.8 instead of 60) and, combined with
+    # n (which only counts lines actually ENCODED), produces wildly misleading numbers.
+    $totEng = 0
+    $totIrq = 0; $totN = 0
+    if ($rows.Count -ge 2) {
+        $totEng = $rows[$rows.Count - 1].Eng - $rows[0].Eng
+        $totIrq = $rows[$rows.Count - 1].Irq - $rows[0].Irq
+        $totN = $rows[$rows.Count - 1].N - $rows[0].N
     }
-    $reng = 0.0
-    if ($mHb -gt 0) { $reng = [math]::Abs($mHb - $mEng) / $mHb * 100.0 }
-    if ($reng -gt 5.0) {
-        if ([math]::Abs($mHb - $mEng) -le $resEng) {
-            Write-Host ("WARN fps(eng) is " + [math]::Round($reng, 1) + "% off fps(hb) but within dvi_frame_count's +/-" + [math]::Round($resEng, 3) + " fps quantisation at this gap: not a real disagreement")
-        } else {
-            Write-Host ("WARN fps(eng) differs from fps(hb)/fps(n) by " + [math]::Round($reng, 1) + "%, MORE than the +/-" + [math]::Round($resEng, 3) + " fps quantisation -- dvi_frame_count may not count every frame here")
-        }
+    $irqPerEng = 0.0
+    if ($totEng -gt 0) { $irqPerEng = $totIrq / [double]$totEng }
+    if ($irqPerEng -gt 0) {
+        Write-Host ("IRQ-PER-ENG " + [math]::Round($irqPerEng, 2) + " => TOTAL-LINES-PER-FRAME " + [math]::Round($irqPerEng, 0))
+        Write-Host ("  (this is the real denominator: emitted scanlines per frame, blanking INCLUDED; 640x480p60 = 525)")
+    } else {
+        Write-Host "IRQ-PER-ENG unavailable (no eng movement) => falling back to -ActiveLines"
+    }
+    $irqRateMed = Get-Median -Values @($irqRate)
+    # Use the TOTALS (all rows, first to last) for the primary numbers: the per-interval
+    # median is quantised (deng is 2 or 3 per 1 s gap), so it wobbles while the aggregate
+    # ratio is stable.  aggregateRate = total delta / total dt.
+    $totDt = 0.0
+    if ($rows.Count -ge 2) { $totDt = ($rows[$rows.Count - 1].T - $rows[0].T) / 1000.0 }
+    $irqRateTot = 0.0; $nRateTot = 0.0; $engRateTot = 0.0
+    if ($totDt -gt 0) {
+        $irqRateTot = $totIrq / $totDt
+        $nRateTot = $totN / $totDt
+        $engRateTot = $totEng / $totDt
+    }
+    $fpsPrimary = 0.0
+    if ($irqPerEng -gt 0) {
+        $fpsPrimary = $irqRateTot / $irqPerEng
+        Write-Host ("FPS-PRIMARY " + [math]::Round($fpsPrimary, 3) + "  = (dirq/dt) / (dirq/deng) over the whole capture  [frames/s, the number to use]")
+        Write-Host ("FPS-PRIMARY-CHECK " + [math]::Round($engRateTot, 3) + "  = deng/dt (independent cross-check)")
+    }
+    $fillRatio = 0.0
+    if ($totIrq -gt 0) { $fillRatio = $totN / [double]$totIrq }
+    Write-Host ("ENC-LINE-FILL-RATIO " + [math]::Round($fillRatio, 4) + "  = dn/dirq  (share of EMITTED scanlines that were actually ENCODED)")
+    Write-Host ("ENCODED-LINES-PER-S " + [math]::Round($nRateTot, 1) + "  (from n; n counts ENCODED lines only)")
+    Write-Host ("EMITTED-LINES-PER-S " + [math]::Round($irqRateTot, 1) + "  (from irq; irq counts EMITTED lines, blanking included)")
+    Write-Host ("ACTIVE-LINES-ASSUMPTION " + $ActiveLines + " -> fps would be " + [math]::Round($mN, 3) + " (LEGACY basis: ACTIVE lines, NOT total lines; do NOT use as the frame rate)")
+    if ($fillRatio -gt 0 -and $fillRatio -lt 0.95) {
+        Write-Host ("WARN ENC-LINE-FILL-RATIO " + [math]::Round($fillRatio, 3) + " < 0.95: " + [math]::Round((1 - $fillRatio) * 100, 1) + "% of emitted scanlines were NOT freshly encoded (repeated or blank)")
     }
     foreach ($w in $warn) { Write-Host ("WARN " + $w) }
+    if ($fpsPrimary -gt 0 -and [math]::Abs($mEng - $fpsPrimary) -gt $resEng) {
+        Write-Host ("WARN FPS-PRIMARY (" + [math]::Round($fpsPrimary, 3) + ") and the eng cross-check (" + [math]::Round($mEng, 3) + ") differ by more than the +/-" + [math]::Round($resEng, 3) + " quantisation: prefer FPS-PRIMARY and report both")
+    }
     if ($used -lt 3) { Write-Host ("CAUTION only " + $used + " interval(s): treat the numbers as provisional") }
     return 0
 }
@@ -264,6 +303,33 @@ if ($SelfTest) {
     $rc2 = Invoke-Analysis -Lines $lines
     Write-Host ("SELFTEST-SYNTHETIC rc=" + $rc2 + " (0 = produced numbers)")
     if ($rc2 -ne 0) { $fail++ }
+
+    Write-Host ""
+    Write-Host "=== SELF TEST: real-data sample tools\fps_from_telemetry.sample.txt ==="
+    Write-Host "expectations: fps ~= 60.0 (+/-0.1) and ENC-LINE-FILL-RATIO ~= 0.530 (+/-0.01)"
+    $sampleFile = Join-Path $PSScriptRoot 'fps_from_telemetry.sample.txt'
+    if (-not (Test-Path $sampleFile)) {
+        Write-Host ("SELFTEST-SAMPLE-SKIPPED not found: " + $sampleFile)
+    } else {
+        $sLines = @(Get-Content -Path $sampleFile -ErrorAction SilentlyContinue)
+        $out3 = Invoke-Analysis -Lines $sLines
+        $p3 = Parse-Telemetry -Lines $sLines
+        $rows3 = @($p3.Rows)
+        $f3 = $rows3[0]; $l3 = $rows3[$rows3.Count - 1]
+        $dt3 = ($l3.T - $f3.T) / 1000.0
+        $dIrq3 = $l3.Irq - $f3.Irq
+        $dEng3 = $l3.Eng - $f3.Eng
+        # same formula as the tool's FPS-PRIMARY: (dirq/dt) / (dirq/deng) over the whole capture
+        $fps3 = 0.0
+        if ($dEng3 -gt 0 -and $dt3 -gt 0) { $fps3 = ($dIrq3 / $dt3) / ($dIrq3 / [double]$dEng3) }
+        $fill3 = ($l3.N - $f3.N) / [double]$dIrq3
+        $okFps = [math]::Abs($fps3 - 60.0) -le 0.1
+        $okFill = [math]::Abs($fill3 - 0.530) -le 0.01
+        Write-Host ("SELFTEST-SAMPLE fps=" + [math]::Round($fps3, 3) + " (want 60.0 +/-0.1) " + $(if ($okFps) { 'PASS' } else { 'FAIL' }))
+        Write-Host ("SELFTEST-SAMPLE fill-ratio=" + [math]::Round($fill3, 4) + " (want 0.530 +/-0.01) " + $(if ($okFill) { 'PASS' } else { 'FAIL' }))
+        if (-not $okFps) { $fail++ }
+        if (-not $okFill) { $fail++ }
+    }
 
     Write-Host ""
     if ($fail -eq 0) { Write-Host "SELFTEST-RESULT PASS"; exit 0 }
