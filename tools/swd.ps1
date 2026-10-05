@@ -62,9 +62,15 @@
     On this target a BARE "halt" DOES NOT WORK: the cores never enter halted state and a
     later "resume" reports "not halted".  The only command that stops them is
     "reset halt" -- and it RESETS the target (the running firmware is destroyed).
-    Therefore this tool NEVER halts by default: probe/dump/flashprobe do not touch the
-    target's execution state.  If you really need a halt, pass -ResetHalt to probe/dump;
-    it runs "reset halt" and the output says explicitly that the target was RESET.
+    ⚠️ CORRECTED 2026-10-05 (main AI follow-up): the old text claimed "probe/dump/flashprobe
+    do not touch the target's execution state".  That is WRONG.  The "targets" command that
+    openocd needs in order to address a core HALTS both cores on this chip -- so a bare
+    "probe" used to leave the DUT stopped, i.e. exactly the state that looks like
+    "something is holding the port" (USB still enumerates, but every handshake times out).
+    Now probe/flashprobe count as halt paths too, and their undo is "resume" (continue in
+    place, NO reset) -- NOT "reset run", which would reboot the DUT and destroy its state.
+    If you really need a halt, pass -ResetHalt to probe/dump; it runs "reset halt" and the
+    output says explicitly that the target was RESET.
     Note also: memory reads while the target RUNS return garbage, so a dump is only
     meaningful after reset halt -- which is exactly why -ResetHalt exists.
 
@@ -288,10 +294,14 @@ $cfgBody = ''
 $patterns = @()
 $exitCode = 0
 $wantHalt = $false
+$haltedByTargets = $false   # set by probe/flashprobe: 'targets' halts the cores as a side effect
 
 switch ($Command.ToLower()) {
     'probe' {
         $wantHalt = [bool]$ResetHalt
+        # 'targets' itself HALTS both cores on this chip, so a bare probe is a halt path too.
+        # Its undo is 'resume' (continue in place), NOT 'reset run' (that reboots the DUT).
+        if (-not $ResetHalt) { $haltedByTargets = $true }
         $cfgBody = "init`r`ntargets $Target`r`n"
         if ($wantHalt) { $cfgBody += "reset halt`r`n" }
         $cfgBody += "shutdown`r`n"
@@ -324,6 +334,8 @@ switch ($Command.ToLower()) {
         $patterns = @('Verified', 'verified', 'Programming', 'Error', 'error', 'Flash', 'DPIDR')
     }
     'flashprobe' {
+        # same reason as 'probe': 'targets' halts the cores, so undo it with 'resume'.
+        $haltedByTargets = $true
         $cfgBody = "init`r`ntargets $Target`r`nflash probe 0`r`nshutdown`r`n"
         $patterns = @('Flash Probe', 'flash', 'Error', 'error', 'DPIDR')
     }
@@ -363,6 +375,21 @@ if ($wantHalt) { $script:DidHaltThisRun = $true }
 if ($wantHalt -and $KeepHalted) {
     Write-Host "WARN target left HALTED (-KeepHalted): USB/CDC will enumerate but not answer;"
     Write-Host "WARN   a later open of the port will time out (ERROR_SEM_TIMEOUT / signpost timeout)."
+    Write-Host "WARN   to recover: pwsh -File tools\swd.ps1 reset"
+}
+
+# ---- TARGETS GUARD: 'targets' halts the cores even when no halt was requested ----
+# 2026-10-05 follow-up (main AI, found by the evidence subagent): a bare "probe" or
+# "flashprobe" used to leave the DUT halted, because openocd's "targets" command halts both
+# cores just to address them.  That produced the same "port enumerates but never answers"
+# confusion as the reset-halt incident.  Undo it with "resume" (continue in place) and
+# deliberately NOT with "reset run" (that resets the DUT and destroys its running state).
+if ($haltedByTargets -and -not $KeepHalted) {
+    $cfgBody = $cfgBody -replace "shutdown`r`n$", "resume`r`nshutdown`r`n"
+    Write-Host "TARGETS-GUARD 'targets' halts the cores: appended 'resume' (no reset) so the target keeps running"
+}
+if ($haltedByTargets -and $KeepHalted) {
+    Write-Host "WARN target left HALTED (-KeepHalted): USB/CDC will enumerate but not answer;"
     Write-Host "WARN   to recover: pwsh -File tools\swd.ps1 reset"
 }
 
