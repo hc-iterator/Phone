@@ -43,9 +43,27 @@ def write_text(path, text):
         f.write(text)
 
 
+def first_meaningful_line(text):
+    """幂等判定用的『有意义的第一行』。
+
+    2026-10-05 踩坑：原来直接拿 payload 的第一行去查重，而文档里到处是
+    `---` / 空行 ⇒ payload 以 `---` 开头时必然误判"已存在"⇒ **静默 SKIP、正文没写进去** ✗
+    （当时计数已经 +1，造成不一致）。
+    ⇒ 跳过空行与纯分隔线，取第一行真正有内容的文本。
+    """
+    for line in text.split("\n"):
+        s = line.strip()
+        if not s:
+            continue
+        if set(s) <= set("-*_= \t") and len(s) >= 3:
+            continue
+        return s
+    return ""
+
+
 def apply_patch(target, mode, anchor, payload):
     text = read_text(target)
-    first_payload_line = payload.strip().split("\n")[0].strip()
+    first_payload_line = first_meaningful_line(payload)
     if first_payload_line and first_payload_line in text:
         print("SKIP already-present")
         return EXIT_OK
