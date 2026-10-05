@@ -607,4 +607,7 @@ MemManage_Handler:
 
 **不用现成 RTOS。** 理由：本设计的核心（MemManage 里改 PC 实现系统调用）需要在**任务切换的那一刻**配置 MPU；
 用现成 RTOS 就得改它的移植层才能挂进去，而 RP2350 的官方 FreeRTOS 移植**强制关闭 MPU**（`configENABLE_MPU 0`），改起来比自己写还费劲。
+> 〔**2026-10-05 核验并补出处**：拉 `raspberrypi/FreeRTOS-Kernel` 实测 —— `portable/ThirdParty/GCC/RP2350_ARM_NTZ/README.md:42` 写 `#define configENABLE_MPU 0`，`:67` 原文 **There is no support for enabling MPU for user/handler mode within FreeRTOS** ⇒ **该结论截至今日仍成立** ✓（复验：`git clone --depth 1 --filter=blob:none --no-checkout https://github.com/raspberrypi/FreeRTOS-Kernel`，再读该 README）〕
+> 〔**但更本质的理由**：`configENABLE_MPU 0` 的 FreeRTOS 里**任务默认是特权态** ✗ ⇒ 应用可以直接关掉 MPU ⇒ **无法安全承载不可信应用** ✗ —— 这才是「主核必须自研」的根本原因 ✓，比「官方 config 被强制为 0」更硬。〕
+> 〔**另**：同一移植的 `port.c` 里有 **58 处 `#if ( configENABLE_MPU == 1 )`** 门控（继承自上游 ARMv8-M 的 CM33 移植）⇒ 障碍是「**该移植不维护这条路**」，而非「FreeRTOS 做不到」。〕
 **代价**：调度器要自己写（任务切换约 200-300 行）。**收益**：隔离层天然在手里，每一行都可控。

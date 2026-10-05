@@ -4,7 +4,8 @@
 /*
  * 内存越权系统调用的内核接口。
  *
- * 实现见 kernel.c，设计说明见 docs/系统调用设计.md。
+ * 实现见 kernel.c；设计说明见 docs/应用ABI.md
+ * （~~原 docs/系统调用设计.md~~ 已于文档化期间删除，全文已并入 应用ABI.md —— 2026-10-05 订正指针）
  *
  * 注意 extern "C"：kernel.c 是 C，调用方 main.cpp 是 C++，
  * 少了这层包装会因名称修饰（name mangling）链接失败 —— 这个坑本项目踩过两次。
