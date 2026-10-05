@@ -116,7 +116,10 @@ extern "C" {
 #define FRANK_HDMI_FRAME_WIDTH    640
 #define FRANK_HDMI_FRAME_HEIGHT   480
 #define FRANK_HDMI_LOGICAL_WIDTH  320
-#define FRANK_HDMI_LOGICAL_HEIGHT 480
+/* ★ 2026-10-05 A/B 实验（主 AI）：480 → 240（回到库 README 写明的 "max 320x240" ✓）
+ *   配合 frank_dvi_config.h 的 DVI_VERTICAL_REPEAT 改回 2。
+ *   理由与代价见 docs/DVI攻坚流水.md〈2026-10-05 晚 实测：画面恒定的根因〉✓ */
+#define FRANK_HDMI_LOGICAL_HEIGHT 240
 
 /*
  * Audio sample rate declared on the wire (CEA-861 standard rate).

@@ -31,8 +31,17 @@
 
 // How many times to output the same TMDS buffer before recyling it onto the
 // free queue. Pixels are repeated vertically if this is >1.
+// ★ 2026-10-05 【用户拍板】用 2 —— 理由见 docs/DVI攻坚流水.md〈2026-10-05 晚 实测〉与对话：
+//   画布 240 行显示在 480 行时序上，只有两种可能：① 1:1（下半屏黑 ✗ 用户不要）
+//   ② 每行发两遍（= 2 倍放大 ✓ 正好填满 ✓）。用户要"不留黑"，那就必须用 ②。
+//   "不要 2 倍复制"的顾虑 = 怕出现"两份影像/重影" ✗ —— 那不是本功能的错，
+//   而是配对错位（frank_dvi.c:673,680 的 v_ctr % REP 与 :716 的 v_ctr / REP 相位不一致，
+//   或 TMDS 缓冲环被复用成上一帧的行）⇒ 看起来就像隔行交错的两幅画 ✓✓
+//   ⇒ 本次实验要同时拿到两个证据：
+//     ① n/irq 是否接近 1.0（CPU 是否追上 ✓ 判据）
+//     ② 用户描述的观感（"每行重复、整体正常" ✓ 还是"交错重影" ✗）
 #ifndef DVI_VERTICAL_REPEAT
-#define DVI_VERTICAL_REPEAT 1
+#define DVI_VERTICAL_REPEAT 2
 #endif
 
 // Number of TMDS buffers to allocate (malloc()) in DVI init. You can set this
