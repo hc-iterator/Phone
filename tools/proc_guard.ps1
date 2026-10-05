@@ -14,6 +14,7 @@
     pwsh -File tools\proc_guard.ps1                 # same as -List
     pwsh -File tools\proc_guard.ps1 -List           # list OUR risky processes only
     pwsh -File tools\proc_guard.ps1 -Kill           # terminate them, report PID+cmd+result
+    pwsh -File tools\proc_guard.ps1 -SweepOurWorkers  # only our serial helpers, by exact name
     pwsh -File tools\proc_guard.ps1 -WaitFree COM7  # poll until COM7 can be opened
     pwsh -File tools\proc_guard.ps1 -WaitFree COM7 -Kill   # clean first, then wait
 
@@ -46,6 +47,7 @@ param(
     [switch]$Kill,
     [string]$WaitFree = '',
     [int]$WaitFreeSec = 10,
+    [switch]$SweepOurWorkers,
     [switch]$SelfTestOrphanControl
 )
 
@@ -280,6 +282,40 @@ function Test-PortFree {
     }
 }
 
+# ---------------------------------------------------------------------------
+# -SweepOurWorkers: kill only OUR serial helpers, by exact script file name.
+# This exists because a naive "command line contains X" sweep is dangerous: any
+# grep-like wrapper (including the agent harness) has the searched text in its own
+# command line and therefore matches itself.  We hit that live: such a sweep matched
+# the harness wrapper and killed the very shell that was running the sweep.
+# Rules here: match the -File script path exactly, never touch our own PID or our
+# parent, and skip -NonInteractive wrappers.
+# ---------------------------------------------------------------------------
+function Stop-OurSerialWorkers {
+    $names = 'serial_worker\.ps1|occupy_port\.ps1|serial\.ps1|swd\.ps1|probe_flash\.ps1|test_serial_antihang\.ps1'
+    $me = $PID
+    $parentPid = 0
+    try { $parentPid = (Get-CimInstance Win32_Process -Filter "ProcessId=$me" -ErrorAction SilentlyContinue).ParentProcessId } catch { }
+    $found = 0
+    $swept = 0
+    foreach ($p in (Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)) {
+        if ($p.ProcessId -eq $me) { continue }
+        if ($parentPid -gt 0 -and $p.ProcessId -eq $parentPid) { continue }
+        $cl = ''
+        if ($null -ne $p.CommandLine) { $cl = $p.CommandLine }
+        if ($cl -eq '') { continue }
+        if ($cl -match '-NonInteractive') { continue }
+        if ($cl -notmatch ('-File\s+"?[^"]*(' + $names + ')')) { continue }
+        $found++
+        $ok = $false
+        try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop; $ok = $true } catch { }
+        if ($ok) { $swept++ }
+        Write-Host ("SWEEP " + $p.ProcessId + " " + $p.Name + " result=" + $(if ($ok) { 'TERMINATED' } else { 'FAILED' }))
+    }
+    Write-Host ("SWEEP-FOUND " + $found + " SWEPT " + $swept)
+    return $swept
+}
+
 function Wait-PortFree {
     param([string]$Port, [int]$Seconds)
     $t0 = Get-Date
@@ -325,6 +361,12 @@ Write-Host ("proc_guard repo=" + $script:RepoRoot + " pid=" + $PID + " time=" + 
 
 if ($SelfTestOrphanControl) {
     Invoke-SelfTestOrphanControl
+    exit 0
+}
+
+if ($SweepOurWorkers) {
+    Write-Host "SWEEP-OUR-WORKERS (exact -File match; never kills our own PID/parent, never -NonInteractive wrappers)"
+    [void](Stop-OurSerialWorkers)
     exit 0
 }
 
