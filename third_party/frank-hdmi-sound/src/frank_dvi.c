@@ -226,6 +226,7 @@ void dvi_init(struct dvi_inst *inst, uint spinlock_tmds_queue, uint spinlock_col
     inst->late_scanline_ctr = 0;
     inst->tmds_buf_release[0] = NULL;
     inst->tmds_buf_release[1] = NULL;
+    inst->tmds_buf_held = NULL;   /* ★ 2026-10-05 重复行复用的那条（见 frank_dvi.h 的说明）*/
     queue_init_with_spinlock(&inst->q_tmds_valid,   sizeof(void*),  8, spinlock_tmds_queue);
     queue_init_with_spinlock(&inst->q_tmds_free,    sizeof(void*),  8, spinlock_tmds_queue);
     queue_init_with_spinlock(&inst->q_colour_valid, sizeof(void*),  8, spinlock_colour_queue);
@@ -669,17 +670,38 @@ static void __dvi_func(dvi_dma_irq_handler)(struct dvi_inst *inst) {
                 // Is a Blank Line
                 is_blank_line = true;
             } else {
-                if (queue_try_peek_u32(&inst->q_tmds_valid, &tmdsbuf)) {
-                    if (inst->timing_state.v_ctr % DVI_VERTICAL_REPEAT == DVI_VERTICAL_REPEAT - 1) {
+                /*
+                 * ★ 2026-10-05 主 AI 修 DVI_VERTICAL_REPEAT>1 的真 bug（原实现见 git 历史）：
+                 * 原代码只在 `v_ctr % REPEAT == REPEAT-1` 的行取缓冲，其余"重复行"因为
+                 * tmdsbuf 是局部变量而仍是 NULL ⇒ 掉进 dma_list_error（隔行错误图案 =
+                 * 文档记的"竖条纹/隔行"✗），并且缓冲的取/还与 late_scanline_ctr 错位
+                 * ⇒ 队列漂移 ⇒ 引擎最终停摆 ✗。
+                 * 修法：边界行取新缓冲、并把【上一条 held】归还（它已显示 REPEAT 行 ✓）；
+                 * 重复行直接复用 held ✓。REPEAT==1 时走的是原语义（取到即挂 release[0] ✓），
+                 * 编译期常量 ⇒ 默认配置行为一字不变 ✓，零回归风险 ✓。
+                 */
+                const bool repeat_boundary =
+                    (inst->timing_state.v_ctr % DVI_VERTICAL_REPEAT) == (DVI_VERTICAL_REPEAT - 1);
+                if (repeat_boundary) {
+                    if (queue_try_peek_u32(&inst->q_tmds_valid, &tmdsbuf)) {
                         queue_remove_blocking_u32(&inst->q_tmds_valid, &tmdsbuf);
-                        inst->tmds_buf_release[0] = tmdsbuf;
-                    }
-                } else {
-                    // No valid scanline was ready (generates solid red scanline)
-                    tmdsbuf = NULL;
-                    if (inst->timing_state.v_ctr % DVI_VERTICAL_REPEAT == DVI_VERTICAL_REPEAT - 1) {
+                        if (DVI_VERTICAL_REPEAT > 1) {
+                            uint32_t *prev = inst->tmds_buf_held;
+                            inst->tmds_buf_held = tmdsbuf;
+                            if (prev) {
+                                inst->tmds_buf_release[0] = prev;
+                            }
+                        } else {
+                            inst->tmds_buf_release[0] = tmdsbuf;
+                        }
+                    } else {
+                        // No valid scanline was ready (generates solid red scanline)
+                        tmdsbuf = NULL;
                         ++inst->late_scanline_ctr;
                     }
+                } else {
+                    // ★ 重复行：复用上一条（原实现在这里恒为 NULL ✗）
+                    tmdsbuf = inst->tmds_buf_held;
                 }
 
                 if (inst->scanline_is_enabled && (inst->timing_state.v_ctr & 1)) {

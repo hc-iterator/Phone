@@ -351,17 +351,155 @@ static void dump_dma_dbg(void)
     fflush(stdout);
 }
 
+/*
+ * ── 2026-10-05 超频扫描的【Flash 记录】（用户指示：改用 SWD 或写进 Flash 作报告 ✓）──
+ * 为什么必须落盘：若某一档直接把芯片挂住 ✗，任何"靠自己打印"的证据都拿不到 ✗。
+ * 记录写在【最后一个 4KB 扇区】✓，只用一个结构体 ⇒ 每次覆盖写 ✓。
+ * 读法（两种都行 ✓）：
+ *   ① 复位/重启后本程序开机第一句就把它打印出来 ✓
+ *   ② SWD: reset halt + dump_image 最后一个扇区 ✓（今晚已验证该手法可行 ✓）
+ * 判据：看到 tag="attempt" 的 want=F，但其后没有 tag="ok/fail" ⇒ F 就是挂点 ✓✓
+ */
+#include "hardware/flash.h"
+#include "hardware/sync.h"
+
+#define OC_MAGIC   0x4F435231u                      /* "OCR1" */
+#define OC_OFFSET  (PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE)
+
+typedef struct {
+    uint32_t magic;
+    uint32_t seq;
+    char     tag[8];        /* "attempt" / "ok" / "fail" */
+    uint32_t want_khz;
+    uint32_t actual_khz;
+    uint32_t vsel;
+    uint32_t reset_reason;
+} oc_rec_t;
+
+static const oc_rec_t *oc_peek(void)
+{
+    const oc_rec_t *r = (const oc_rec_t *)(XIP_BASE + OC_OFFSET);
+    return (r->magic == OC_MAGIC) ? r : NULL;
+}
+
+static void oc_write(const char *tag, uint32_t want, uint32_t actual, uint32_t vsel)
+{
+    const oc_rec_t *old = oc_peek();
+    oc_rec_t rec;
+    memset(&rec, 0, sizeof rec);
+    rec.magic        = OC_MAGIC;
+    rec.seq          = (old ? old->seq : 0u) + 1u;
+    strncpy(rec.tag, tag, sizeof rec.tag - 1);
+    rec.want_khz     = want;
+    rec.actual_khz   = actual;
+    rec.vsel         = vsel;
+    rec.reset_reason = watchdog_hw->scratch[1];      /* 1 = 从超频命令重启来的 ✓ */
+
+    uint8_t page[FLASH_PAGE_SIZE];
+    memset(page, 0xFF, sizeof page);
+    memcpy(page, &rec, sizeof rec);
+
+    uint32_t ints = save_and_disable_interrupts();
+    flash_range_erase(OC_OFFSET, FLASH_SECTOR_SIZE);
+    flash_range_program(OC_OFFSET, page, FLASH_PAGE_SIZE);
+    restore_interrupts(ints);
+}
+
+static void oc_print_prev(void)
+{
+    const oc_rec_t *prev = oc_peek();
+    if (prev) {
+        printf("[ocp] prev seq=%lu tag=%.8s want=%lu actual=%lu vsel=%lu rr=%lu\n",
+               (unsigned long)prev->seq, prev->tag,
+               (unsigned long)prev->want_khz, (unsigned long)prev->actual_khz,
+               (unsigned long)prev->vsel, (unsigned long)prev->reset_reason);
+    } else {
+        printf("[ocp] no previous overclock record in flash\n");
+    }
+    fflush(stdout);
+}
+
 int main(void)
 {
-    /*
-     * 时钟与电压。252MHz 是微雪官方 demo 的值；
-     * 不要用库 README 推荐的 504MHz —— 实测在本板上会把 Core1 打到 HardFault。
-     */
-    vreg_set_voltage(VREG_VOLTAGE_1_25);
-    sleep_ms(10);
-    set_sys_clock_khz(252000, true);
 
-    stdio_init_all();
+    uint32_t want_khz = watchdog_hw->scratch[0];
+    uint32_t from_reboot = watchdog_hw->scratch[1];
+    if (want_khz < 100000u || want_khz > 600000u) {
+        want_khz = 252000u;
+        from_reboot = 0;
+    }
+
+    if (!from_reboot) {
+        /* ---- 阶段 0：默认 252MHz 下收命令，写 scratch，软复位 ---- */
+        stdio_init_all();
+        oc_print_prev();   /* 先打印上一轮的超频记录（防挂证据 ✓）*/
+        oc_print_prev();   /* 先打印上一轮留下的超频记录（防挂证据 ✓）*/
+        sleep_ms(300);
+        printf("\n[oc] stage0 @252MHz: send  F<kHz>  within 12 s (e.g. F276). Then it reboots to apply.\n");
+        fflush(stdout);
+        uint32_t acc = 0;
+        bool have = false;
+        absolute_time_t until = make_timeout_time_ms(12000);
+        while (!time_reached(until)) {
+            int ch = getchar_timeout_us(2000);
+            if (ch == PICO_ERROR_TIMEOUT) {
+                continue;
+            }
+            if (ch == 'F' || ch == 'f') {
+                acc = 0; have = false;
+            } else if (ch >= '0' && ch <= '9') {
+                acc = acc * 10u + (uint32_t)(ch - '0');
+                have = true;
+            } else if (ch == '\r' || ch == '\n') {
+                if (have && acc >= 100000u && acc <= 600000u) {
+                    printf("[oc] got %lu kHz => reboot to apply (stdio will be re-inited at the new clock)\n",
+                           (unsigned long)acc);
+                    fflush(stdout);
+                    watchdog_hw->scratch[0] = acc;
+                    watchdog_hw->scratch[1] = 1u;
+                    sleep_ms(100);
+                    watchdog_reboot(0, 0, 0);          /* 不返回 ✓ */
+                }
+                acc = 0; have = false;
+            }
+        }
+        printf("[oc] no command in 12 s => staying at 252 MHz\n");
+        fflush(stdout);
+        want_khz = 252000u;
+    }
+
+    /* ---- 阶段 1：先落盘"要试哪一档"⇒ 再提压、提频 ⇒ 再起 stdio ✓ ---- */
+    /* ★ 用户 2026-10-05 警告：核心电压不能超过耐压 ✓
+     *   RP2350 核心 DVDD 绝对最大 = 1.30 V ⇒ 【本扫描永不设 >1.30V】✗（原 1.35V 档已删 ✗）
+     *   阶梯：≤276MHz ⇒ 1.25V；更高 ⇒ 1.30V（到此为止）✓   先提压、再提频 ✓ */
+    int vsel = 0;                                      /* 0=1.25V 1=1.30V（无 1.35V ✗）*/
+    if (want_khz > 276000u) vsel = 1;
+
+    if (from_reboot) {
+        oc_write("attempt", want_khz, 0u, (uint32_t)vsel);   /* ★ 防挂：先落盘 ✓ */
+    }
+
+    vreg_set_voltage(vsel == 0 ? VREG_VOLTAGE_1_25 : VREG_VOLTAGE_1_30);   /* 上限 1.30V ✓ 不超规 */
+    sleep_ms(10);
+
+    bool clk_ok = set_sys_clock_khz(want_khz, false);
+    uint32_t actual_khz = (uint32_t)(clock_get_hz(clk_sys) / 1000);
+
+    if (from_reboot) {
+        stdio_init_all();
+        oc_print_prev();   /* 先打印上一轮的超频记录（防挂证据 ✓）*/
+        oc_print_prev();   /* 先打印上一轮留下的超频记录（防挂证据 ✓）*/                              /* ★ 关键：改频之后才起 stdio ✓ */
+        sleep_ms(200);
+        oc_write(clk_ok ? "ok" : "fail", want_khz, actual_khz, (uint32_t)vsel);
+        watchdog_hw->scratch[0] = 0u;                  /* 清掉，避免下次误判 ✓ */
+        watchdog_hw->scratch[1] = 0u;
+    }
+
+    printf("\n[oc] want=%lu kHz  set_sys_clock_khz=%s  actual clk_sys=%lu kHz  vreg=%s\n",
+           (unsigned long)want_khz, clk_ok ? "OK" : "FAILED",
+           (unsigned long)actual_khz,
+           vsel == 0 ? "1.25V" : "1.30V");
+    fflush(stdout);
 
     printf("\n[min] 最小 DVI 验证\n");
     printf("[min] 引脚 CLK=%d D0=%d D1=%d D2=%d  invert=%d\n",

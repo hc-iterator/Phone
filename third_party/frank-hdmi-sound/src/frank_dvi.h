@@ -58,6 +58,14 @@ struct dvi_inst {
 	// the actual data DMA transfer has completed.
 	uint32_t *tmds_buf_release[2];
 
+	// ★ 2026-10-05 主 AI 修 DVI_VERTICAL_REPEAT>1 的真 bug：
+	//   原实现里每次进 ACTIVE 分支都用【局部】tmdsbuf=NULL，只在
+	//   `v_ctr % REPEAT == REPEAT-1` 的那一行才取新缓冲 ⇒ 其余"重复行"拿到 NULL
+	//   ⇒ 走 dma_list_error（隔行错误图案 ⇒ 就是文档记的"竖条纹/隔行"✗），
+	//   且缓冲的取/还与 late_scanline_ctr 计数错位 ⇒ 队列漂移 ⇒ 引擎最终停摆 ✗。
+	//   修法：把"当前正在重复的那一条"存到这里，重复行直接复用它 ✓。
+	uint32_t *tmds_buf_held;
+
 	// Remember how far behind the source is on TMDS scanlines, so we can output
 	// solid colour until they catch up (rather than dying spectacularly)
 	uint late_scanline_ctr;

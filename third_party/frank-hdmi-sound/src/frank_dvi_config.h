@@ -29,17 +29,13 @@
 // ----------------------------------------------------------------------------
 // General DVI defines
 
-// How many times to output the same TMDS buffer before recyling it onto the
-// free queue. Pixels are repeated vertically if this is >1.
-// ★ 2026-10-05 【用户拍板】用 2 —— 理由见 docs/DVI攻坚流水.md〈2026-10-05 晚 实测〉与对话：
-//   画布 240 行显示在 480 行时序上，只有两种可能：① 1:1（下半屏黑 ✗ 用户不要）
-//   ② 每行发两遍（= 2 倍放大 ✓ 正好填满 ✓）。用户要"不留黑"，那就必须用 ②。
-//   "不要 2 倍复制"的顾虑 = 怕出现"两份影像/重影" ✗ —— 那不是本功能的错，
-//   而是配对错位（frank_dvi.c:673,680 的 v_ctr % REP 与 :716 的 v_ctr / REP 相位不一致，
-//   或 TMDS 缓冲环被复用成上一帧的行）⇒ 看起来就像隔行交错的两幅画 ✓✓
-//   ⇒ 本次实验要同时拿到两个证据：
-//     ① n/irq 是否接近 1.0（CPU 是否追上 ✓ 判据）
-//     ② 用户描述的观感（"每行重复、整体正常" ✓ 还是"交错重影" ✗）
+// ★ 2026-10-05 【主 AI 修完重复路径的 bug 后，用 2】
+//   之前 2 会停摆是【真 bug】✗：重复行拿到的 tmdsbuf 恒为 NULL（局部变量）⇒ 隔行错误图案 + 队列漂移。
+//   已在 frank_dvi.c 的 ACTIVE 分支修好（新增 inst->tmds_buf_held ✓），
+//   且 DVI_VERTICAL_REPEAT==1 时走原语义 ⇒ 默认配置零回归 ✓。
+//   为什么必须 2：LOGICAL_H=240 + REPEAT=1 会发出【非标准时序】⇒ 面板直接"无信号"✗（实测 ✓）；
+//   只有 240 行画布 × 每行两遍 = 合法 640x480p60 ✓，且 CPU 每帧只需编码 240 行 = 14400 行/秒 ✓
+//   （产能实测 23809 圈/秒 ✓ 余量 65% ✓）。
 #ifndef DVI_VERTICAL_REPEAT
 #define DVI_VERTICAL_REPEAT 2
 #endif
