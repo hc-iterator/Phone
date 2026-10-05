@@ -145,3 +145,28 @@ sysclk = 200000 kHz (this probe)
 
 **产物与备份**：`build_pico_backdoor_oc200\debugprobe_on_pico.uf2`（121.5 KB ✓）；
 上一版已验证后门版备份 `debugprobe_backdoor_VERIFIED_1770C4D4.uf2` ✓。
+
+---
+
+## 追加（2026-10-05 傍晚）：SWD 打通后的实测结论与操作要点
+
+**结论：SWD 完全可用 ✓**（探针 200 MHz 后实测）
+
+| 能力 | 实测证据 |
+|---|---|
+| DP 链路 | `SWD DPIDR 0x4c013477` ✓ —— **100 kHz / 500 / 1000 / 2000 / 4000 kHz 全部成功** ✓ |
+| 双核 | `core0`/`core1` `Cortex-M33 r1p0` + **Examination succeed** ✓ |
+| 复位/停机 | `reset halt` ⇒ 两核都 halted ✓（`pc = 0x000000a0` 即 bootrom 复位点 ✓）|
+| **Flash 访问** | `flash probe 0` ⇒ **`RP2040 Flash Probe: 33554432 bytes @0x10000000, in 8192 sectors`** ✓ |
+| **内存读** | `dump_image <文件> 0x10000000 0x400` ⇒ 成功 ✓；读到的向量表 `0x20082000 / 0x1000015b / 0x1000011b…` **合法** ✓（与 `docs\当前状态.md` §一 记的那组字节一致 ✓）|
+
+**两个必须记住的坑（都是当场复现的）**
+
+1. **裸 `halt` 不生效** ✗ —— 目标在跑时发 `halt`，两核根本不进 halted（`resume` 还会报 `not halted` ✗）。
+   ⇒ **一律用 `reset halt`** ✓（这与 `docs\当前状态.md` §一 2026-10-01 记的完全一致 ✓）。
+2. **`reg` / `mdw` 的"打印"在我这套调用下不出结果** ✗（不报错、也没输出 ⇒ 极易误判成"SWD 不通" ✗）。
+   ⇒ **改用不依赖打印的命令**：`flash probe 0` ✓、`dump_image …` ✓（落文件再离线看 ✓）；
+   寄存器要看就用 `reset halt` 自带的 `pc:` 报告 ✓。
+
+**当时的 DUT 固件**：CDC（`COM7`，`2E8A:0009`）开机打印 **`Hello, world!`** ⇒ **不是** DVI 那套 ✓
+（说明 flash 里的固件被换过 ✓；前 1 KB 里没有任何已知固件名字符串 ⇒ 要确认身份得多抓几 KB 再找字符串 ✓）
