@@ -65,9 +65,46 @@ extern volatile uint32_t g_sys_last_arg;
 extern volatile uint32_t g_sys_result;
 }
 
+// ── 把 5 行自测结果【一次性】重打一遍 ──────────────────────────────────────
+//
+// 为什么需要它：用户往往是【接上串口之后】才看的，而开机那 1 秒内的 5 行必然
+// 抓不到（USB CDC 没主机时字节直接丢）。所以要在两个"用户能触发的时刻"重打：
+//   ① 进 dvi_screen_test()（永不返回）之前 —— 此时串口若已接上就能看到；
+//   ② 后门收到任意非 B/R 的键（含 '?'）时 —— 用户任何时候按一下键就能拿到全套。
+//
+// ⚠️ 下面 5 行的格式必须与 main() 里"紧跟各自测调用"的那 5 行【逐字节一致】；
+//    改一处就得改两处（那 5 行在自测刚跑完时打印，这里是把已有结果重打）。
+// 只读变量、只打印，不做任何别的动作。
+static void ktest_print_all(void) {
+    printf("[ktest] kmin   status=%lu faults=%lu addr=0x%08lx\n",
+           (unsigned long)pico_kernel_selftest_status,
+           (unsigned long)pico_kernel_selftest_faults,
+           (unsigned long)pico_kernel_selftest_addr);
+    printf("[ktest] kmem   status=%lu steps=%lu fail_at=%lu\n",
+           (unsigned long)g_kmem_selftest_status,
+           (unsigned long)g_kmem_selftest_steps,
+           (unsigned long)g_kmem_selftest_fail_at);
+    printf("[ktest] kres   status=%lu steps=%lu fail_at=%lu\n",
+           (unsigned long)g_kres_selftest_status,
+           (unsigned long)g_kres_selftest_steps,
+           (unsigned long)g_kres_selftest_fail_at);
+    printf("[ktest] kresb  status=%lu steps=%lu fail_at=%lu\n",
+           (unsigned long)g_kresb_selftest_status,
+           (unsigned long)g_kresb_selftest_steps,
+           (unsigned long)g_kresb_selftest_fail_at);
+    printf("[ktest] sys    calls=%lu denied=%lu last_no=%lu last_arg=%lu result=%lu\n",
+           (unsigned long)g_sys_calls,
+           (unsigned long)g_sys_denied,
+           (unsigned long)g_sys_last_no,
+           (unsigned long)g_sys_last_arg,
+           (unsigned long)g_sys_result);
+    fflush(stdout);
+}
+
 // 串口后门：非阻塞轮询，写法照抄 src/dvi_min.c:382-390 与 wboard_dvi/pin_toggle.c:15-48。
 //   收 'B' ⇒ 进 BOOTSEL（拔掉重插都不用按按键）
 //   收 'R' ⇒ 普通重启
+//   收 '?' 或【任何非 B/R 的键】⇒ 只把 5 行自测结果重打一遍（不做任何别的动作）
 // timeout=0，绝不阻塞。调用点在 dvi_screen.c 的显示主循环里：main() 最后就停在
 // dvi_screen_test() 里、不会返回，那边才是本固件真正的"主循环"。
 // 用 extern "C" 是因为调用方 dvi_screen.c 是 C 文件。
@@ -83,6 +120,13 @@ extern "C" void backdoor_poll(void) {
         fflush(stdout);
         sleep_ms(50);
         watchdog_reboot(0, 0, 0);   // 不再返回
+    } else if (c >= 0) {
+        /* 任何真实按键（getchar 无键时返回 PICO_ERROR_TIMEOUT = 负数）
+         * ⇒ 只重打自测结果，B/R 之外【不做任何别的动作】。 */
+        printf("\n[ktest] ==== kernel selftest results begin ====\n");
+        ktest_print_all();
+        printf("[ktest] ==== kernel selftest results end ====\n");
+        fflush(stdout);
     }
 }
 
@@ -506,6 +550,20 @@ int main(void) {
     printf("\n=== tests done; starting HDMI screen test ===\n");
     fflush(stdout);
     kernel_mark(140);
+
+    /*
+     * ▼ 进显示循环之前【再原样打一遍】这 5 行自测结果。
+     *
+     * 理由：用户通常是在启动之后才接上串口的，开机那 1 秒内的 5 行必然抓不到
+     * （USB CDC 没有主机时字节直接丢）。这一步之后就是 dvi_screen_test()，
+     * 它永不返回，所以这里是"用户能看到"的最后一次自动重打。
+     * 夹在 begin/end banner 之间，抓串口时一眼就能认出这一块。
+     * 只是重打已有结果 —— 不重跑自测、不改任何数字。
+     */
+    printf("[ktest] ==== kernel selftest results begin ====\n");
+    ktest_print_all();
+    printf("[ktest] ==== kernel selftest results end ====\n");
+    fflush(stdout);
 
     /*
      * 用 frank-hdmi-sound 的 PIO DVI + HDMI 音频。
