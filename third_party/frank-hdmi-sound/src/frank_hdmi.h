@@ -184,6 +184,16 @@ void frank_hdmi_run_core1(void);
  */
 void frank_hdmi_set_buffer(const uint8_t *fb, int w, int h);
 
+/*
+ * ★ 2026-10-05 只读 getter（主 AI 加，用于定位"画面恒为纯白"）
+ *   实测 app 的帧缓冲内容完全正确（纯白=01、条纹=00/01 交替 ✓），但 TMDS 符号三模式相同 ✗
+ *   ⇒ 需要验证引擎里的 fb_buf 是否真的指向调用方那块内存。fb_buf 原本是 static，
+ *     外部 extern 链不上（undefined reference ✗），故提供只读访问口。不改变任何行为 ✓。
+ */
+const uint8_t *frank_hdmi_get_buffer(void);
+int frank_hdmi_get_buffer_w(void);
+int frank_hdmi_get_buffer_h(void);
+
 /* Set palette entry i to the 24-bit RGB colour (0xRRGGBB). */
 void frank_hdmi_set_palette(uint8_t i, uint32_t color888);
 

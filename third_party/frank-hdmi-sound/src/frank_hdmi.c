@@ -157,6 +157,17 @@ void frank_hdmi_set_buffer(const uint8_t *fb, int w, int h) {
     fb_y_offset = (LOGICAL_H - h) / 2;
 }
 
+/*
+ * ★ 2026-10-05 只读 getter（主 AI 加，用于定位"画面恒为纯白"）
+ *   背景：实测 app 的帧缓冲 g_fb 内容完全正确（纯白=01、条纹=00/01 交替 ✓），
+ *   但 TMDS 符号三模式完全相同 ✗ ⇒ 必须验证引擎里的 fb_buf 是否真的指向调用方那块内存。
+ *   fb_buf/fb_w/fb_h 原本是 static ⇒ 外部无法 extern（实测 undefined reference ✗），
+ *   所以这里提供只读访问口。不改变任何行为 ✓。
+ */
+const uint8_t *frank_hdmi_get_buffer(void) { return fb_buf; }
+int frank_hdmi_get_buffer_w(void) { return fb_w; }
+int frank_hdmi_get_buffer_h(void) { return fb_h; }
+
 void frank_hdmi_set_palette(uint8_t i, uint32_t color888) {
     color888 &= 0x00ffffffu;
     palette_rgb888[i] = color888;

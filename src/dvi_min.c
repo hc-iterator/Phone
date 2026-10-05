@@ -422,6 +422,82 @@ int main(void)
             c = seq[i];
             i = (i + 1) % (int)(sizeof(seq) / sizeof(seq[0]));
         }
+        /*
+         * ── 2026-10-05 【抓引擎之死】Core1 心跳看门狗 ──────────────────────────
+         * 背景（本会话实测）：屏幕出现过两种状态 ——
+         *   · 纯白    ⇒ 时序/DMA 还在跑，但像素数据恒定 ✗（irq 在涨、TMDS 符号不变）
+         *   · 无信号  ⇒ 整个 DVI 输出停了 ✗（遥测直接归零）
+         * Core1 上跑着【编码器 + DVI 的 DMA IRQ】，所以先要判定"心跳何时停、停时计数器是什么"。
+         * `frank_hdmi_heartbeat_lines` 由 Core1 每编码一行 ++（库里的 volatile 全局 ✓）。
+         * 外层循环一轮约 500ms ⇒ 每轮加 500ms 计一次停顿时长。
+         */
+        {
+            extern volatile uint32_t frank_hdmi_heartbeat_lines;
+            extern volatile uint32_t frank_hdmi_heartbeat_frames;
+            extern volatile uint32_t g_enc_count, g_enc_us, g_enc_us_max, g_loop_us;
+            extern volatile uint32_t g_wait_free_us, g_wait_valid_us, g_wait_colour_us;
+            static uint32_t last_hb = 0, stall_ms = 0, loops = 0;
+            static int warned = 0;
+            uint32_t hb = frank_hdmi_heartbeat_lines;
+            loops++;
+            if (hb != last_hb) {
+                last_hb = hb; stall_ms = 0; warned = 0;
+            } else {
+                stall_ms += 500;
+                if (!warned && stall_ms >= 1500) {
+                    warned = 1;
+                    printf("\n[STALL] Core1 heartbeat stuck >=%lums  (Core0 loops=%lu)\n",
+                           (unsigned long)stall_ms, (unsigned long)loops);
+                    printf("[STALL] hb lines=%lu frames=%lu\n",
+                           (unsigned long)hb, (unsigned long)frank_hdmi_heartbeat_frames);
+                    printf("[STALL] enc_count=%lu enc_us=%lu enc_us_max=%lu loop_us=%lu\n",
+                           (unsigned long)g_enc_count, (unsigned long)g_enc_us,
+                           (unsigned long)g_enc_us_max, (unsigned long)g_loop_us);
+                    printf("[STALL] waits us: free=%lu valid=%lu colour=%lu\n",
+                           (unsigned long)g_wait_free_us, (unsigned long)g_wait_valid_us,
+                           (unsigned long)g_wait_colour_us);
+                    printf("[STALL] mode=%d freeze=%d c=%d\n", mode, freeze, (int)c);
+                    fflush(stdout);
+                }
+            }
+        }
+
+        /*
+         * ── 2026-10-05 【查 Core1 到底卡在哪条队列】────────────────────────────
+         * 动机（本会话实测）：irq=31499 行/秒、n=16696 行/秒、enc≈40µs/行。
+         * 若 31499 行都要编码，需要 31499×40µs = 1.26 秒/秒 ⇒ 物理不可能 ✗
+         * ⇒ 只有 16696 行真被编码（占用约 67%）⇒ **编码器有 1/3 时间是闲的** ✗
+         * ⇒ 它不是算力不够，是【被某条队列卡住】✓（与 docs/DVI攻坚流水.md 14.20
+         *   「Core1 是受害者不是元凶」一致 ✓）。
+         * 引擎里早已埋好这些计数器（frank_hdmi.c:220-233），只是遥测只印了 waitfree ✗
+         * ⇒ 这里把三条等待 + 循环耗时都打出来（cur/max 成对 ✓），每约 2 秒一次。
+         */
+        {
+            extern volatile uint32_t g_wait_colour_us, g_wait_colour_us_max;
+            extern volatile uint32_t g_wait_valid_us, g_wait_valid_us_max;
+            extern volatile uint32_t g_wait_free_us, g_wait_free_us_max;
+            extern volatile uint32_t g_loop_us, g_loop_us_max;
+            extern volatile uint32_t g_enc_us, g_enc_us_max;
+            static uint32_t tick = 0;
+            if ((++tick % 4) == 0) {
+                /* ★ 2026-10-05 加主频：docs/DVI攻坚流水.md:64 留了"唯一没排除"的线索
+                 *   —— sys_clk 实际不是 252MHz。Core1 整圈 42µs ⇒ 只有 23.8k 圈/秒 < 31500 行/秒 ✗
+                 *   若主频低于 252，一切都解释得通（编码吞吐随主频线性）。
+                 * 注：g_dbg_sys_clk_hz 只存在于根工程 PicoPhone，dvi_min 里没有 ⇒ 不引它 ✗ */
+                uint32_t hz = (uint32_t)clock_get_hz(clk_sys);
+                printf("[wait] colour=%lu/%lu valid=%lu/%lu free=%lu/%lu loop=%lu/%lu enc=%lu/%lu\n",
+                       (unsigned long)g_wait_colour_us, (unsigned long)g_wait_colour_us_max,
+                       (unsigned long)g_wait_valid_us, (unsigned long)g_wait_valid_us_max,
+                       (unsigned long)g_wait_free_us, (unsigned long)g_wait_free_us_max,
+                       (unsigned long)g_loop_us, (unsigned long)g_loop_us_max,
+                       (unsigned long)g_enc_us, (unsigned long)g_enc_us_max);
+                printf("[clk] clk_sys=%lu Hz (%lu kHz)   loop_rate=%lu/s\n",
+                       (unsigned long)hz, (unsigned long)(hz / 1000),
+                       (unsigned long)(g_loop_us ? (1000000u / g_loop_us) : 0));
+                fflush(stdout);
+            }
+        }
+
         if (mode == 1) {
             /* 第 3 层：静态图形 —— 1 像素竖条纹（最容易暴露水平方向/缺行问题） */
             draw_vstripes(1, 0);
@@ -486,6 +562,35 @@ int main(void)
                 mode = 3;
                 phase = 0;
                 printf("\n[mode] moving bar (animated)\n");
+                fflush(stdout);
+            } else if (ch == 'G') {
+                /*
+                 * 'G' ⇒ 2026-10-05 新增诊断：把【我们写的帧缓冲】打出来。
+                 * 起因：屏幕恒为纯白，切颜色/图案/TMDS 符号全不变 ✗ ⇒ 必须分清两种可能：
+                 *   ① Core0 写 g_fb 没生效 ✗  ② 下游（PIO/引脚/面板）把它压成了恒定 ✗
+                 * 竖条纹模式下 g_fb 应当是 01 00 01 00 ...（1=白 0=黑）。
+                 * 注意：不能 extern 引擎里的 fb_buf/fb_w/fb_h/palette_rgb565 —— 它们是
+                 * frank_hdmi.c 的 static，链不上（2026-10-05 实测 undefined reference ✗）。
+                 */
+                printf("\n[g] g_fb=%p  engine_fb=%p  engine_w=%d engine_h=%d  mode=%d freeze=%d c=%d\n",
+                       (const void *)g_fb, (const void *)frank_hdmi_get_buffer(),
+                       frank_hdmi_get_buffer_w(), frank_hdmi_get_buffer_h(),
+                       mode, freeze, (int)c);
+                printf("[g] MATCH (engine_fb == g_fb) : %s\n",
+                       (frank_hdmi_get_buffer() == g_fb) ? "YES" : "NO");
+                printf("[g] g_fb row120[0..15]=");
+                for (int k = 0; k < 16; k++) printf(" %02x", g_fb[120 * FB_W + k]);
+                printf("\n[g] g_fb row120[160..175]=");
+                for (int k = 0; k < 16; k++) printf(" %02x", g_fb[120 * FB_W + 160 + k]);
+                printf("\n[g] g_fb row240[0..15]=");
+                for (int k = 0; k < 16; k++) printf(" %02x", g_fb[239 * FB_W + k]);
+                int uniq = 0;
+                for (int v = 0; v < 256; v++) {
+                    for (int k = 0; k < 256; k++) {
+                        if (g_fb[120 * FB_W + k] == v) { uniq++; break; }
+                    }
+                }
+                printf("\n[g] distinct values in MIDDLE row's first 256 px=%d\n", uniq);
                 fflush(stdout);
             }
             sleep_ms(25);
