@@ -551,6 +551,12 @@ int main(void)
     /* 2026-10-05 图案模式：0=纯色(原行为) 1=竖条纹 2=棋盘格 3=变化图形(扫动条) */
     int mode = 0;
     int phase = 0;
+    /* ★ 只在内容真的变了才重画 ✓（见下面那段注释：静态内容每 500ms 整屏重写会顶穿 FIFO ✗）*/
+    /* ★ verbose 默认【关】✓ —— 周期打印会制造 Core0 突发 ⇒ 顶穿 TMDS FIFO ⇒ 闪/滑 ✗
+     *   想看诊断时按 'V' 打开 ✓（用户观测时请保持关 ✓）*/
+    bool verbose = false;
+    int last_mode = -1;
+    uint8_t last_c = 0xFF;
 
     while (true) {
         uint8_t c;
@@ -617,7 +623,7 @@ int main(void)
             extern volatile uint32_t g_loop_us, g_loop_us_max;
             extern volatile uint32_t g_enc_us, g_enc_us_max;
             static uint32_t tick = 0;
-            if ((++tick % 4) == 0) {
+            if (verbose && (++tick % 4) == 0) {
                 /* ★ 2026-10-05 加主频：docs/DVI攻坚流水.md:64 留了"唯一没排除"的线索
                  *   —— sys_clk 实际不是 252MHz。Core1 整圈 42µs ⇒ 只有 23.8k 圈/秒 < 31500 行/秒 ✗
                  *   若主频低于 252，一切都解释得通（编码吞吐随主频线性）。
@@ -636,20 +642,28 @@ int main(void)
             }
         }
 
-        if (mode == 1) {
+        /* ★ 2026-10-05 静态内容不重画 ✓ —— 每 500ms 整屏重写 76KB 会让 Core0 突发顶穿
+         * TMDS FIFO ⇒ 引擎发"迟到扫描线"（dma_list_error = 红 ✓，用户实测"黑格变红" ✓）
+         * 并伴随画面纵向滑移与闪白 ⇒ 只在内容变化时重画 ✓（mode 3 动画仍逐帧画 ✓）*/
+        if (mode == last_mode && !(mode == 0 && c != last_c) && mode != 3) {
+            /* nothing to redraw ✓ */
+        } else if (mode == 1) {
             /* 第 3 层：静态图形 —— 1 像素竖条纹（最容易暴露水平方向/缺行问题） */
             draw_vstripes(1, 0);
             draw_border(2);
+            last_mode = mode; last_c = c;   /* 记录已画内容 ⇒ 下一轮可跳过 ✓ */
         } else if (mode == 2) {
             /* 第 3 层：静态图形 —— 8x8 棋盘格（暴露块级错位） */
             draw_checker(1, 0, 8);
             draw_border(2);
+            last_mode = mode; last_c = c;   /* 记录已画内容 ⇒ 下一轮可跳过 ✓ */
         } else if (mode == 3) {
             /* 第 4 层：变化图形 —— 扫动条在下面的内层循环里逐帧重绘（见 mode==3 处） */
         } else {
             /* 原行为：满屏纯色 + 对比色边框，便于判断画面是否完整（不是只有局部） */
             fill_solid(c);
             draw_border(c == 0 ? 1 : 0);
+            last_mode = mode; last_c = c;   /* 记录已画内容 ⇒ 下一轮可跳过 ✓ */
         }
 
         /*
@@ -701,6 +715,10 @@ int main(void)
                 phase = 0;
                 printf("\n[mode] moving bar (animated)\n");
                 fflush(stdout);
+            } else if (ch == 'V') {             /* 'V' ⇒ 切换周期性诊断打印 ✓ */
+                verbose = !verbose;
+                printf("\n[verbose] %s\n", verbose ? "ON" : "OFF");
+                fflush(stdout);
             } else if (ch == 'G') {
                 /*
                  * 'G' ⇒ 2026-10-05 新增诊断：把【我们写的帧缓冲】打出来。
@@ -710,7 +728,16 @@ int main(void)
                  * 注意：不能 extern 引擎里的 fb_buf/fb_w/fb_h/palette_rgb565 —— 它们是
                  * frank_hdmi.c 的 static，链不上（2026-10-05 实测 undefined reference ✗）。
                  */
-                printf("\n[g] g_fb=%p  engine_fb=%p  engine_w=%d engine_h=%d  mode=%d freeze=%d c=%d\n",
+                {   /* 探针读数：最近 16 次取行 ✓ 若 logical_y 不推进 ⇒ 就是「竖条」的根因 ✓ */
+                    extern volatile int32_t g_filllog[16][3];
+                    extern volatile uint32_t g_filllog_n;
+                    printf("[fill] n=%lu :", (unsigned long)g_filllog_n);
+                    for (int _i = 0; _i < 16; _i++) {
+                        printf(" %ld/%ld/%ld", (long)g_filllog[_i][0], (long)g_filllog[_i][1], (long)g_filllog[_i][2]);
+                    }
+                    printf("\n");
+                    fflush(stdout);
+                }                printf("\n[g] g_fb=%p  engine_fb=%p  engine_w=%d engine_h=%d  mode=%d freeze=%d c=%d\n",
                        (const void *)g_fb, (const void *)frank_hdmi_get_buffer(),
                        frank_hdmi_get_buffer_w(), frank_hdmi_get_buffer_h(),
                        mode, freeze, (int)c);

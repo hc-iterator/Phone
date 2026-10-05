@@ -199,6 +199,11 @@ static void encode_one_scanline_16bpp(struct dvi_inst *inst);
  * 1's local SRAM bank and competes minimally with Core 0 traffic on
  * the main banks.
  */
+/* ★ 2026-10-05 主 AI 探针：记录最近 16 次取行用的 (logical_y, src_y, 首像素索引)
+ * 目的：用户看到「棋盘格变成竖条」⇒ 怀疑取行没随扫描线推进 ⇒ 直接读这个量判定 ✓
+ * 读法：app 的 'G' 键打印（见 dvi_min.c）*/
+volatile int32_t g_filllog[16][3];
+volatile uint32_t g_filllog_n = 0;
 static void __scratch_y("fill_scanline") fill_scanline(uint16_t *dst, int logical_y) {
     int src_y = logical_y - fb_y_offset;
     uint16_t *out = dst + fb_x_offset;
@@ -209,6 +214,12 @@ static void __scratch_y("fill_scanline") fill_scanline(uint16_t *dst, int logica
     }
 
     const uint8_t *src = fb_buf + (size_t)src_y * (size_t)fb_w;
+    {   /* 探针：记下这一行取的是哪条逻辑行、第一个像素是什么 ✓ */
+        uint32_t _k = g_filllog_n++ & 15u;
+        g_filllog[_k][0] = logical_y;
+        g_filllog[_k][1] = src_y;
+        g_filllog[_k][2] = (int32_t)src[0];
+    }
     int w = fb_w;
     if (w > LOGICAL_W - fb_x_offset) w = LOGICAL_W - fb_x_offset;
     for (int x = 0; x < w; ++x) {

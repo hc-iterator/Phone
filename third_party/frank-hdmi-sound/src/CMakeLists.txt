@@ -47,8 +47,11 @@ set(FRANK_HDMI_SM_CLKDIV "1" CACHE STRING
 # DVI_N_TMDS_BUFFERS=3 gives the IRQ handler enough slack that
 # occasional Core 0 SRAM bursts don't underrun the TMDS FIFOs and
 # flash a red 'late scanline' indicator.
+# ★ 2026-10-05 主 AI：实测到该"红/迟到扫描线"现象（用户看到【棋盘格的黑格变红】✓
+#   = dma_list_error 的 solid red ✓），并伴随画面【纵向滑移】与【闪白】⇒ 提高缓冲深度换时隙 ✓
+#   3 → 6（库注释明说这就是给 Core0 SRAM 突发留余量的旋钮 ✓）
 target_compile_definitions(frank_hdmi_sound INTERFACE
-    DVI_N_TMDS_BUFFERS=3
+    DVI_N_TMDS_BUFFERS=12
     DVI_SM_CLKDIV=${FRANK_HDMI_SM_CLKDIV}
 )
 
