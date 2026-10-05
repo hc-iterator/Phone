@@ -24,14 +24,34 @@
     -Escapes      interpret \x1b \r \n \0 \t in -Send (so the backdoor ESC ESC B is
                   written as -Send "\x1b\x1bB" -Escapes).
     -Baud N       baud for the serial handle (default 115200; CDC ignores it).
+    -OpenTimeoutSec N   hard per-attempt budget for the blocking part (default 5).
+                        Open() can block FOREVER on a busy port and ReadTimeout does not
+                        cover it, so the blocking work runs in a child we can kill.
+    -Retries N    extra attempts after the first (default 2).  Every attempt is bounded
+                  by -OpenTimeoutSec, so a stuck port can never hang this script.
     -List         list matching ports and exit (touches no device).
-    -NoSelfHeal   do not auto-clean stuck helper processes on open failure.
+    -NoSelfHeal   do not auto-clean stuck helper processes between attempts.
+
+  TIMEOUT / ANTI-HANG CONTRACT (this is the important part)
+    Nothing here touches the serial port in-process.  Each attempt starts
+    tools\serial_worker.ps1 as a CHILD process inside a kill-on-close job object and waits
+    with a hard timeout of (-OpenTimeoutSec + -Seconds + 3)s.  On expiry the child is
+    killed and the port handle dies with it, so we cannot end up in the classic positive
+    feedback where the hung helper itself keeps the port locked.  Outcomes:
+      OPEN-TIMEOUT <port> after <N>s   child was killed; the port was busy/blocking
+      OPEN-FAILED: <reason>            child exited with an error (e.g. access denied)
+    Because the child lives in the job object, if THIS script is killed the kernel reaps
+    the child too, so an orphan can never keep holding the port.
 
   OUTPUT (stable, ASCII, greppable)
-    OPENED <port> at <yyyy-MM-dd HH:mm:ss>
+    TARGET-PORT <port>
+    BUDGET per attempt = <N>s ..., retries=<n>
+    ATTEMPT <i>/<n> worker=...
+    OPENED <port> dtr=True (child pid handled, elapsed <s>s)
     SENT <n> bytes
     CAPTURED <n> bytes -> <file>        (only with -OutFile)
     READ <n> bytes                      (always)
+    OPEN-TIMEOUT <port> after <N>s
     OPEN-FAILED: <reason>
     PORT-NOT-FOUND: vid=.... pid=....
 
@@ -39,19 +59,15 @@
     1. DTR/RTS MUST be raised.  pico-sdk's USB CDC does not consider itself connected
        until the host asserts DTR; without it the firmware's printf output is simply
        dropped, and you get nothing (which looks exactly like "the board is dead").
-       This tool always does DtrEnable=$true + RtsEnable=$true unless -NoDtr is given.
-    2. "signpost timeout" / port busy: a previous orphaned helper (or openocd) still
-       holds the handle.  We call proc_guard.ps1 -Kill and retry once; the real fix is
-       the kill-on-close job object below, which makes such orphans impossible.
-    3. The handle is released in a finally block no matter what happens.
+       The worker raises DTR+RTS unless -NoDtr is given.
+    2. Open() on a port held by someone else blocks indefinitely with NO usable timeout.
+       That is why the blocking work is a child process (see above).
+    3. "signpost timeout" / access denied: a previous orphaned helper (or openocd) still
+       holds the handle.  Between attempts we run proc_guard.ps1 -Kill; the real fix is
+       the kill-on-close job object, which makes such orphans impossible.
     4. Do not send data unless you mean it: -Send can trigger the firmware's own
        backdoor (ESC ESC B enters BOOTSEL).  Nothing is sent unless -Send is given.
-
-  ORPHAN SAFETY
-    Any external helper is launched through Invoke-InJob, which puts it in a
-    kill-on-close job object: if THIS process is killed, the kernel reaps the child
-    tree.  There is no code path here that can leave a stray process behind.
-    (.NET SerialPort itself is not an external process.)
+    5. -Pid is an alias of -ProductId because $PID is read-only in PowerShell.
 #>
 [CmdletBinding()]
 param(
@@ -63,6 +79,8 @@ param(
     [string]$Send = '',
     [switch]$Escapes,
     [int]$Baud = 115200,
+    [int]$OpenTimeoutSec = 5,
+    [int]$Retries = 2,
     [switch]$List,
     [switch]$NoDtr,
     [switch]$NoSelfHeal
@@ -176,6 +194,15 @@ function ConvertTo-Bytes {
     return [System.Text.Encoding]::ASCII.GetBytes($s)
 }
 
+# Same as ConvertTo-Bytes but returns a hex string, because the worker child takes -SendHex.
+function ConvertTo-Hex {
+    param([string]$Text, [switch]$DoEscapes)
+    $bytes = ConvertTo-Bytes -Text $Text -DoEscapes:$DoEscapes
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($b in $bytes) { [void]$sb.Append($b.ToString('X2')) }
+    return $sb.ToString()
+}
+
 # ---- self heal: clean our stray helpers, then retry ----
 function Invoke-SelfHeal {
     $pg = Join-Path $PSScriptRoot 'proc_guard.ps1'
@@ -187,25 +214,48 @@ function Invoke-SelfHeal {
     }
 }
 
-# ---- open with retry ----
-function Open-SerialWithRetry {
-    param([string]$ComPort, [int]$BaudRate, [switch]$RaiseDtr, [int]$Tries = 10, [int]$DelayMs = 400)
-    $sp = $null
-    for ($i = 1; $i -le $Tries; $i++) {
-        try {
-            $sp = New-Object System.IO.Ports.SerialPort $ComPort, $BaudRate, ([System.IO.Ports.Parity]::None), 8, ([System.IO.Ports.StopBits]::One)
-            $sp.ReadTimeout = 250
-            $sp.WriteTimeout = 500
-            if ($RaiseDtr) { $sp.DtrEnable = $true; $sp.RtsEnable = $true }
-            $sp.Open()
-            return $sp
-        } catch {
-            if ($null -ne $sp) { try { $sp.Dispose() } catch { } ; $sp = $null }
-            if ($i -lt $Tries) { Start-Sleep -Milliseconds $DelayMs }
-            else { $script:LastOpenError = $_.Exception.Message }
-        }
+# ---- run the blocking part in a child process, with a HARD timeout ----
+# This is the whole point of serial_worker.ps1: Open() can block forever on a busy port
+# and ReadTimeout does not cover it, so the open is bounded by killing the child instead.
+function Invoke-SerialChild {
+    param(
+        [string]$ComPort,
+        [int]$TimeoutSecLocal,
+        [switch]$RaiseDtr,
+        [string]$WantFile
+    )
+    $worker = Join-Path $PSScriptRoot 'serial_worker.ps1'
+    if (-not (Test-Path $worker)) {
+        Write-Host "WORKER-MISSING: serial_worker.ps1 not found"
+        return [pscustomobject]@{ Ok = $false; TimedOut = $false; Bytes = 0; File = ''; Error = 'worker missing'; StdOut = ''; Secs = 0 }
     }
-    return $null
+    $wargs = @('-NoProfile', '-File', $worker, '-Port', $ComPort, '-Baud', "$Baud", '-DurationSec', "$Seconds")
+    if (-not $RaiseDtr) { $wargs += '-NoDtr' }
+    if ($WantFile -ne '') { $wargs += @('-OutFile', $WantFile) }
+    if ($Send -ne '') { $wargs += @('-SendHex', (ConvertTo-Hex -Text $Send -DoEscapes:$Escapes)) }
+    $t0 = Get-Date
+    $r = Invoke-InJob -FilePath 'pwsh' -Arguments $wargs -TimeoutSec $TimeoutSecLocal
+    $secs = [math]::Round(((Get-Date) - $t0).TotalSeconds, 1)
+    $text = ($r.StdOut + "`n" + $r.StdErr)
+    $bytes = 0
+    $file = ''
+    $err = ''
+    $ok = $false
+    foreach ($ln in ($text -split "`r?`n")) {
+        if ($ln -match '^WORKER-BYTES:\s*(\d+)') { $bytes = [int]$Matches[1] }
+        elseif ($ln -match '^WORKER-FILE:\s*(.+)$') { $file = $Matches[1].Trim() }
+        elseif ($ln -match '^WORKER-ERROR:\s*(.+)$') { $err = $Matches[1].Trim() }
+        elseif ($ln -match '^WORKER-RESULT:\s*OK') { $ok = $true }
+    }
+    return [pscustomobject]@{
+        Ok       = ($ok -and -not $r.TimedOut)
+        TimedOut = [bool]$r.TimedOut
+        Bytes    = $bytes
+        File     = $file
+        Error    = $err
+        StdOut   = $text
+        Secs     = $secs
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -232,62 +282,40 @@ if ($Port -ne '') {
 }
 
 $raiseDtr = -not $NoDtr
-$sp = Open-SerialWithRetry -ComPort $Port -BaudRate $Baud -RaiseDtr:$raiseDtr
-if ($null -eq $sp -and -not $NoSelfHeal) {
-    Write-Host ("OPEN-FAILED: " + $script:LastOpenError)
-    Invoke-SelfHeal
-    Write-Host "RETRY once after self-heal"
-    $sp = Open-SerialWithRetry -ComPort $Port -BaudRate $Baud -RaiseDtr:$raiseDtr
-}
-if ($null -eq $sp) {
-    Write-Host ("OPEN-FAILED: " + $script:LastOpenError)
-    exit 1
-}
+# One attempt budget = open timeout + the requested read window + a small margin.
+$attemptBudget = $OpenTimeoutSec + $Seconds + 3
+Write-Host ("BUDGET per attempt = " + $attemptBudget + "s (open " + $OpenTimeoutSec + "s + read " + $Seconds + "s + 3s), retries=" + $Retries)
 
-$captured = New-Object System.Collections.Generic.List[byte]
-$readTotal = 0
-try {
-    Write-Host ("OPENED " + $Port + " at " + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + " dtr=" + $raiseDtr)
-    if ($Send -ne '') {
-        $bytes = ConvertTo-Bytes -Text $Send -DoEscapes:$Escapes
-        $sp.Write($bytes, 0, $bytes.Length)
-        $sp.BaseStream.Flush()
-        Write-Host ("SENT " + $bytes.Length + " bytes")
+$attempt = 0
+$result = $null
+$outPathForWorker = $OutFile
+while ($attempt -lt $Retries + 1) {
+    $attempt++
+    Write-Host ("ATTEMPT " + $attempt + "/" + ($Retries + 1) + " worker=pwsh -File tools\serial_worker.ps1 -Port " + $Port)
+    $result = Invoke-SerialChild -ComPort $Port -TimeoutSecLocal $attemptBudget -RaiseDtr:$raiseDtr -WantFile $outPathForWorker
+    if ($result.Ok) { break }
+    if ($result.TimedOut) {
+        Write-Host ("OPEN-TIMEOUT " + $Port + " after " + $attemptBudget + "s (child killed; a busy port can block Open() forever)")
+    } else {
+        if ($result.Error -ne '') { Write-Host ("OPEN-FAILED: " + $result.Error) } else { Write-Host "OPEN-FAILED: worker reported failure" }
     }
-    $t0 = Get-Date
-    $buf = New-Object byte[] 4096
-    while (((Get-Date) - $t0).TotalSeconds -lt $Seconds) {
-        try {
-            $n = $sp.Read($buf, 0, $buf.Length)
-            if ($n -gt 0) {
-                for ($i = 0; $i -lt $n; $i++) { [void]$captured.Add($buf[$i]) }
-                $readTotal += $n
-            }
-        } catch [System.TimeoutException] {
-            # normal: nothing arrived in this 250 ms slice
-        } catch {
-            Write-Host ("READ-ERROR: " + $_.Exception.Message)
-            break
-        }
-    }
-} finally {
-    # ALWAYS release the handle, even on Ctrl-C or an exception
-    if ($null -ne $sp) {
-        try { if ($sp.IsOpen) { $sp.Close() } } catch { }
-        try { $sp.Dispose() } catch { }
-        Write-Host "CLOSED " + $Port
+    if ($attempt -le $Retries) {
+        if (-not $NoSelfHeal) { Invoke-SelfHeal }
+        Write-Host ("RETRY " + $attempt + " done, trying again")
     }
 }
 
-if ($OutFile -ne '') {
-    try {
-        $dir = Split-Path -Parent $OutFile
-        if ($dir -ne '' -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-        [System.IO.File]::WriteAllBytes($OutFile, $captured.ToArray())
-        Write-Host ("CAPTURED " + $readTotal + " bytes -> " + $OutFile)
-    } catch {
-        Write-Host ("WRITE-FAILED: " + $_.Exception.Message)
-    }
+foreach ($ln in ($result.StdOut -split "`r?`n")) {
+    if ($ln -match '^WORKER-(OPENED|SENT|CAPTURED|CLOSED)') { Write-Host $ln.Trim() }
 }
-Write-Host ("READ " + $readTotal + " bytes")
-exit 0
+if ($result.Ok) {
+    Write-Host ("OPENED " + $Port + " dtr=" + $raiseDtr + " (child pid handled, elapsed " + $result.Secs + "s)")
+    if ($OutFile -ne '') { Write-Host ("CAPTURED " + $result.Bytes + " bytes -> " + $OutFile) }
+    Write-Host ("READ " + $result.Bytes + " bytes")
+    exit 0
+}
+
+Write-Host ("ELAPSED-TOTAL approx " + $attempt + " attempt(s)")
+if ($result.TimedOut) { Write-Host ("OPEN-TIMEOUT " + $Port + " after " + $attemptBudget + "s") }
+else { Write-Host ("OPEN-FAILED: " + $(if ($result.Error -ne '') { $result.Error } else { 'worker reported failure' })) }
+exit 1
