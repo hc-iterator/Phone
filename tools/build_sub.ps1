@@ -43,7 +43,10 @@ Set-Location (Split-Path -Parent $PSScriptRoot)
 $cmake = "$env:USERPROFILE\.pico-sdk\cmake\v3.31.5\bin\cmake.exe"
 $ninja = "$env:USERPROFILE\.pico-sdk\ninja\v1.12.1\ninja.exe"
 $sdk   = "$env:USERPROFILE\.pico-sdk\sdk\2.3.0"
-$tc    = "$env:USERPROFILE\.pico-sdk\toolchain\13_3_Rel1"
+# 注意：此处设的环境变量只是兜底 —— 子工程 CMakeLists.txt 里的 toolchainVersion
+# 会经 pico-vscode.cmake 设成 CMake 变量，并由 SDK 覆盖本环境变量（2026-10-05 对照实验证实）。
+# 改工具链请优先改 CMakeLists.txt 的 toolchainVersion。
+$tc    = "$env:USERPROFILE\.pico-sdk\toolchain\15_2_Rel1"
 $pt    = "$env:USERPROFILE\.pico-sdk\picotool\2.3.0\picotool\picotool.exe"
 foreach ($f in @($cmake, $ninja, $sdk, $pt)) {
     if (-not (Test-Path $f)) { Write-Host "缺少工具: $f" -ForegroundColor Red; exit 1 }

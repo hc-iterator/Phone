@@ -34,8 +34,14 @@ REM  end of a line breaks parsing.
 REM  KEEP THIS FILE PURE ASCII.  cmd.exe reads .cmd with the OEM code page, so
 REM  UTF-8 non-ASCII comments get mangled and can split the command line apart
 REM  (this file had 210 non-ASCII bytes and worked only by luck - see cuotiben 14).
-set "TOOLCHAIN=%USERPROFILE%\.pico-sdk\toolchain\13_3_Rel1\bin"
-"%CMAKE%" -G Ninja -S . -B build -DCMAKE_MAKE_PROGRAM="%NINJA%" -DCMAKE_C_COMPILER="%USERPROFILE%\.pico-sdk\toolchain\13_3_Rel1\bin\arm-none-eabi-gcc.exe" -DCMAKE_CXX_COMPILER="%USERPROFILE%\.pico-sdk\toolchain\13_3_Rel1\bin\arm-none-eabi-g++.exe" -DCMAKE_ASM_COMPILER="%USERPROFILE%\.pico-sdk\toolchain\13_3_Rel1\bin\arm-none-eabi-gcc.exe" >> "%LOG%" 2>&1
+REM  Toolchain declaration. Must match toolchainVersion in CMakeLists.txt (15_2_Rel1).
+REM  NOTE: the -DCMAKE_*_COMPILER paths below are only a fallback. CMakeLists.txt
+REM  includes pico-vscode.cmake, which sets PICO_TOOLCHAIN_PATH from its
+REM  toolchainVersion variable, and the SDK's find_compiler.cmake overwrites the
+REM  environment/cache value with it (proved by a controlled test on 2026-10-05).
+REM  To change the toolchain, change toolchainVersion in CMakeLists.txt first.
+set "TOOLCHAIN=%USERPROFILE%\.pico-sdk\toolchain\15_2_Rel1\bin"
+"%CMAKE%" -G Ninja -S . -B build -DCMAKE_MAKE_PROGRAM="%NINJA%" -DCMAKE_C_COMPILER="%USERPROFILE%\.pico-sdk\toolchain\15_2_Rel1\bin\arm-none-eabi-gcc.exe" -DCMAKE_CXX_COMPILER="%USERPROFILE%\.pico-sdk\toolchain\15_2_Rel1\bin\arm-none-eabi-g++.exe" -DCMAKE_ASM_COMPILER="%USERPROFILE%\.pico-sdk\toolchain\15_2_Rel1\bin\arm-none-eabi-gcc.exe" >> "%LOG%" 2>&1
 set CFG=%ERRORLEVEL%
 
 echo. >> "%LOG%"

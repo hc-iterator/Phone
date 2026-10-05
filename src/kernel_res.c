@@ -58,9 +58,9 @@ static const char *k_kind_name[KRES_KIND_COUNT] = {
 
 /* 三块 PIO（RP2350 有 pio0/pio1/pio2） */
 #if PICO_RP2350
-static PIO *const k_pio[NUM_PIOS] = { pio0, pio1, pio2 };
+static PIO const k_pio[NUM_PIOS] = { pio0, pio1, pio2 };
 #else
-static PIO *const k_pio[NUM_PIOS] = { pio0, pio1 };
+static PIO const k_pio[NUM_PIOS] = { pio0, pio1 };
 #endif
 
 volatile uint32_t g_kres_selftest_status  = 0;
