@@ -25,6 +25,24 @@ if not exist "%CMAKE%" ( echo ERROR: cmake not found at %CMAKE% > "%LOG%" & echo
 if not exist "%NINJA%" ( echo ERROR: ninja not found at %NINJA% > "%LOG%" & echo BUILD_EXIT=1 >> "%LOG%" & exit /b 1 )
 
 echo ==== cmake configure ==== > "%LOG%"
+
+REM  2026-10-05: stale-cache guard (ASCII only).
+REM  Symptom hit for real: with an EXISTING build\CMakeCache.txt that records a
+REM  different toolchain, cmake prints
+REM    "You have changed variables that require your cache to be deleted"
+REM  then re-runs configure FROM THE CACHE ONLY (command-line -D values are dropped),
+REM  where CMAKE_MAKE_PROGRAM may point at an old/nonexistent ninja => configure fails with
+REM    "CMake was unable to find a build program corresponding to Ninja".
+REM  build_sub.ps1 already wipes stale caches; this file did not. Do the same here:
+REM  if the cached toolchain is not the one declared below, wipe build and configure clean.
+REM  NOTE: no parentheses and no nested if-blocks in this guard - cmd.exe parses the
+REM  whole block first, so a paren inside an echo text closes the block early.
+set "STALECACHE="
+if exist "build\CMakeCache.txt" findstr /C:"toolchain/15_2_Rel1" "build\CMakeCache.txt" > nul 2>&1
+if exist "build\CMakeCache.txt" if errorlevel 1 set "STALECACHE=1"
+if defined STALECACHE echo ==== stale build cache: toolchain mismatch, wiping build folder ==== >> "%LOG%"
+if defined STALECACHE rmdir /s /q build
+
 REM  Explicitly pass CMAKE_MAKE_PROGRAM and the compilers.
 REM  Trap we already hit: after deleting build\CMakeCache.txt, CMake reports
 REM    "CMake was unable to find a build program corresponding to Ninja"
