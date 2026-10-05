@@ -170,3 +170,24 @@ sysclk = 200000 kHz (this probe)
 
 **当时的 DUT 固件**：CDC（`COM7`，`2E8A:0009`）开机打印 **`Hello, world!`** ⇒ **不是** DVI 那套 ✓
 （说明 flash 里的固件被换过 ✓；前 1 KB 里没有任何已知固件名字符串 ⇒ 要确认身份得多抓几 KB 再找字符串 ✓）
+
+**⇒ 2026-10-05 傍晚补测（同一台目标、探针 200 MHz）——结论比上面更硬 ✗：**
+
+| 尝试 | 结果 |
+|---|---|
+| `targets core0` + 裸 `halt`（1 MHz）| ✗ 不 halted |
+| 只 halt **core0**（不碰 core1）| ✗ 不 halted |
+| `soft_reset_halt` | ✗ 该目标不支持 |
+| 100 kHz 慢速 `halt` | ✗ 仍不 halted |
+| **`reset halt`** | ✅ 两核都 halted（**唯一能停住的办法** ✓，但**它会复位目标** ✗）|
+| 运行态 `dump_image` | ✗ 读回来是垃圾（2 kHz / 0）⇒ **内存访问必须 halt 后**才有效 ✓ |
+
+**⇒ 由此得到一条对后续工作影响很大的约束（务必记住）** ✗：
+> **这台目标上，运行中的固件，SWD 读不到它的变量** ✗ ⇒
+> **凡是要"用 SWD 读结果"的测试，结果必须由【固件自己从串口打印】** ✓✓
+> （根工程已开 USB stdio ✓ ⇒ `printf` 能直接看到 ✓；纯靠变量 + SWD 的方案在这台板上走不通 ✗）
+
+**另：** `CLK_SYS_SELECTED`（CLOCKS+0x44，直接就是 kHz）本来一条命令就能读时钟 ✓，
+但同样受上面约束 ✗ ⇒ **要读运行态时钟，得让固件自己打印** ✓（或先 `reset halt` —— 那时读到的是 bootrom 的时钟 ✗，不是 app 的 ✓）。
+**源码口径（grep 全仓 270000 / 270 MHz）**：本项目超频档位**只有 252 MHz** ✓，
+`core1_monitor/core1_monitor.c:124 SAMP_CLK_KHZ 252000u` ✓、`probe_rp2040/probe.c:38 PROBE_CLK_KHZ 252000` ✓ —— **没有 270** ✗。
