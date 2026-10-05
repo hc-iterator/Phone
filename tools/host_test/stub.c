@@ -63,23 +63,24 @@ void dma_channel_unclaim(unsigned int channel) {
 }
 bool dma_channel_is_claimed(unsigned int channel) { return channel < STUB_DMA_MAX && g_dma_claimed[channel]; }
 
-/* ── PIO ──（契约同上：claim 重复认领断言、unclaim 未认领断言）── */
-PIO pio0_stub = { 0 }, pio1_stub = { 1 }, pio2_stub = { 2 };
+/* ── PIO ──（契约同上：claim 重复认领断言、unclaim 未认领断言）
+ * 形状按真 SDK：PIO 是 pio_hw_t* 指针，函数按值收指针（见 stub/hardware/pio.h）。 */
+pio_hw_t pio0_stub = { 0 }, pio1_stub = { 1 }, pio2_stub = { 2 };
 static bool g_sm[3][4];
 
-void pio_sm_claim(PIO *pio, int sm) {
+void pio_sm_claim(PIO pio, int sm) {
     int i = pio ? pio->id : 0;
     if (!(i >= 0 && i < 3 && sm >= 0 && sm < 4)) return;
     assert(!g_sm[i][sm]);
     g_sm[i][sm] = true;
 }
-void pio_sm_unclaim(PIO *pio, int sm) {
+void pio_sm_unclaim(PIO pio, int sm) {
     int i = pio ? pio->id : 0;
     if (!(i >= 0 && i < 3 && sm >= 0 && sm < 4)) return;
     assert(g_sm[i][sm]);
     g_sm[i][sm] = false;
 }
-bool pio_sm_is_claimed(PIO *pio, int sm) {
+bool pio_sm_is_claimed(PIO pio, int sm) {
     int i = pio ? pio->id : 0;
     return (i >= 0 && i < 3 && sm >= 0 && sm < 4) && g_sm[i][sm];
 }
