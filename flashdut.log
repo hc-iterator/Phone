@@ -1,4 +1,0 @@
-目标板 = dut    固件 = wboard_dvi\build\dvi_min.uf2 (97792 B)
-拷贝到 H: ...
-✓ 已刷入（dut）
-  提示：重启后串口号可能变化，用 .\tools\ports.ps1 或本脚本不带参数再确认

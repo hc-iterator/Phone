@@ -11,7 +11,7 @@
 #   build/      编译产物
 #
 # 规矩：凡是"脚本每跑一次就重写"的文件，一律不进版本库。
-# 真正要留下的结论写进 要求本/错题本/小本本/docs/*.md，或 tools/gdb_*.txt。
+# 真正要留下的结论写进 docs/*.md（2026-10-04 文档化后：原 陷阱本/需求本/小本本 等均已改名为 docs/ 下的文档），或 tools/gdb_*.txt。
 # ============================================================================
 
 # 编译产物
@@ -63,3 +63,17 @@ sampler_capture.txt
 cap_div*.txt
 probe_build.log
 wboard_build.log
+
+# ★ 2026-10-05 补（第三方只读报告 R6 指出、逐条 git ls-files 核实）：这些是"跑一次就重写"的
+#   采集包与日志，按 docs/工作守则.md 的硬规则【不进版本库】；此前 .gitignore 只写了 cap_div*，
+#   漏了 cap_d*/cap_gap_*/cap_merged* 与几个 .log，导致它们【真的被跟踪】。
+cap_d*.txt
+cap_gap_*.txt
+cap_merged_*.txt
+build_test.log
+flash_probe.log
+flash_test.log
+flashdut.log
+state.log
+ports.txt
+UsersChenAppDataLocalTempprobe_*.bin

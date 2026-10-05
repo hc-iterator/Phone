@@ -1,4 +1,0 @@
-目标板 = probe    固件 = probe_rp2040\build\probe_rp2040.uf2 (96256 B)
-拷贝到 G: ...
-✓ 已刷入（probe）
-  提示：重启后串口号可能变化，用 .\tools\ports.ps1 或本脚本不带参数再确认

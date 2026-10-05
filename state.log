@@ -1,9 +1,0 @@
-=== 引导盘（按 BOARD-ID 认，不靠盘符）===
-  H:  => dut  [Board-ID: RP2350]
-
-=== 串口 ===
-  COM1
-  COM29
-  COM19
-
-用法: .\tools\flash_backdoor.ps1 -Board probe|dut [-Firmware <uf2>]
