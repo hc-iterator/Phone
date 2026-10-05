@@ -66,6 +66,51 @@ static void draw_border(uint8_t c)
 }
 
 /*
+ * ── 2026-10-05 图案诊断（用户要求的 4 层实验：纯色 / 纯色幻灯片 / 静态图形 / 变化图形）──
+ *  为什么必须上图案：**纯色会掩盖问题** ✗ —— 缺行、错位、时序偏差在纯白上都看不出来。
+ *  这正是文档里那条"图案诊断法"的道理（`docs\历史.md:434`，用户提议：复杂图案会掩盖问题，
+ *  反过来纯色也一样会掩盖"缺行/重复行"这类几何缺陷 ⇒ 要用简单几何图案把它逼出来）。
+ *  按键：'8' 竖条纹（1 像素，最能暴露水平方向问题）
+ *        '9' 棋盘格（8×8，暴露块级错位）
+ *        'A' 变化图形：一根 16 像素宽的白竖条左右扫动（持续重绘 ⇒ 测【更新通路】）
+ *        按 '1'..'7' 会切回纯色模式。
+ */
+static void draw_vstripes(uint8_t a, uint8_t b)
+{
+    for (int y = 0; y < FB_H; y++) {
+        uint8_t *row = &g_fb[y * FB_W];
+        for (int x = 0; x < FB_W; x++) {
+            row[x] = (x & 1) ? a : b;
+        }
+    }
+}
+
+static void draw_checker(uint8_t a, uint8_t b, int cell)
+{
+    for (int y = 0; y < FB_H; y++) {
+        uint8_t *row = &g_fb[y * FB_W];
+        for (int x = 0; x < FB_W; x++) {
+            row[x] = (((x / cell) + (y / cell)) & 1) ? a : b;
+        }
+    }
+}
+
+/* 变化图形：黑底 + 一根白竖条（宽 bar_w 像素），位置由 phase 控制（扫出屏外再回） */
+static void draw_moving_bar(int phase, int bar_w)
+{
+    memset(g_fb, 0, sizeof(g_fb));
+    int x0 = (phase % (FB_W + bar_w)) - bar_w;
+    for (int y = 0; y < FB_H; y++) {
+        uint8_t *row = &g_fb[y * FB_W];
+        for (int x = 0; x < FB_W; x++) {
+            if (x >= x0 && x < x0 + bar_w) {
+                row[x] = 1;                  /* 1 = 白 */
+            }
+        }
+    }
+}
+
+/*
  * ── 2026-10-04 临时诊断：DMA 块表转储（修 DVI 输出用）──────────────────
  *  库里的全局量是非 static 的（能读），这里直接 extern，打印放在 Core0，
  *  避免在 DVI 的 IRQ 里 printf。
@@ -365,6 +410,10 @@ int main(void)
                                       *   理由：验证已经完成，上屏实测需要稳定画面；
                                       *   且自动换色会让"抓一包已知颜色"变得不可复现。 */
 
+    /* 2026-10-05 图案模式：0=纯色(原行为) 1=竖条纹 2=棋盘格 3=变化图形(扫动条) */
+    int mode = 0;
+    int phase = 0;
+
     while (true) {
         uint8_t c;
         if (freeze) {
@@ -373,10 +422,21 @@ int main(void)
             c = seq[i];
             i = (i + 1) % (int)(sizeof(seq) / sizeof(seq[0]));
         }
-        fill_solid(c);
-
-        /* 用对比色画边框，便于判断画面是否完整（不是只有局部） */
-        draw_border(c == 0 ? 1 : 0);
+        if (mode == 1) {
+            /* 第 3 层：静态图形 —— 1 像素竖条纹（最容易暴露水平方向/缺行问题） */
+            draw_vstripes(1, 0);
+            draw_border(2);
+        } else if (mode == 2) {
+            /* 第 3 层：静态图形 —— 8x8 棋盘格（暴露块级错位） */
+            draw_checker(1, 0, 8);
+            draw_border(2);
+        } else if (mode == 3) {
+            /* 第 4 层：变化图形 —— 扫动条在下面的内层循环里逐帧重绘（见 mode==3 处） */
+        } else {
+            /* 原行为：满屏纯色 + 对比色边框，便于判断画面是否完整（不是只有局部） */
+            fill_solid(c);
+            draw_border(c == 0 ? 1 : 0);
+        }
 
         /*
          * ── 串口后门（本板没引出 SWD，只能靠它进 BOOTSEL）────────────────
@@ -385,6 +445,9 @@ int main(void)
          * 用大写，避免与其它命令冲突；用 timeout=0 非阻塞，绝不拖慢 DVI 主循环。
          */
         for (int k = 0; k < 20; k++) {          /* 500ms 内分 20 次查，响应快 */
+            if (mode == 3) {                    /* 变化图形：约 40 Hz 重绘，测【更新通路】 */
+                draw_moving_bar(phase++, 16);
+            }
             int ch = getchar_timeout_us(0);
             if (ch == 'B') {                    /* 'B' ⇒ BOOTSEL */
                 printf("\n[backdoor] BOOTSEL reboot...\n");
@@ -400,14 +463,29 @@ int main(void)
                 dump_live_regs();
             } else if (ch == 'T') {             /* 'T' ⇒ 一行之内的块指针轨迹 */
                 trace_line();
-            } else if (ch >= '0' && ch <= '7') { /* '0'..'7' ⇒ 冻结到该颜色（见调色板注释） */
+            } else if (ch >= '0' && ch <= '7') { /* '0'..'7' ⇒ 冻结到该颜色（并切回纯色模式） */
                 frozen = ch - '0';
                 freeze = 1;
+                mode = 0;
                 printf("\n[freeze] 停住，颜色=%d（0黑 1白 2红 3绿 4蓝 5黄 6青 7品红）\n", frozen);
                 fflush(stdout);
             } else if (ch == 'C') {             /* 'C' ⇒ 恢复自动轮换 */
                 freeze = 0;
+                mode = 0;
                 printf("\n[freeze] 恢复自动轮换\n");
+                fflush(stdout);
+            } else if (ch == '8') {             /* '8' ⇒ 第 3 层：竖条纹 */
+                mode = 1;
+                printf("\n[mode] vertical stripes\n");
+                fflush(stdout);
+            } else if (ch == '9') {             /* '9' ⇒ 第 3 层：棋盘格 */
+                mode = 2;
+                printf("\n[mode] checkerboard 8x8\n");
+                fflush(stdout);
+            } else if (ch == 'A') {             /* 'A' ⇒ 第 4 层：变化图形（扫动条） */
+                mode = 3;
+                phase = 0;
+                printf("\n[mode] moving bar (animated)\n");
                 fflush(stdout);
             }
             sleep_ms(25);
