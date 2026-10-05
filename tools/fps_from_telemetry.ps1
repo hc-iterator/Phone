@@ -68,7 +68,9 @@
     IRQ-PER-ENG <x> => TOTAL-LINES-PER-FRAME <y>
     FPS-PRIMARY <fps>            <- the number to use
     FPS-PRIMARY-CHECK <fps>      <- independent eng-based cross-check
-    ENC-LINE-FILL-RATIO <r>      <- dn/dirq
+    ENC-LINE-FILL-RATIO <r>      <- dn/dirq, compared against -LogicalHeight/-ActiveHeight
+                                    (this is the LOGICAL->ACTIVE line multiplier, NOT lost data:
+                                     ~0.50 is correct for dvi_min's 320x240 -> 640x480 doubler)
     ENCODED-LINES-PER-S / EMITTED-LINES-PER-S
     ACTIVE-LINES-ASSUMPTION <N> -> fps <z>   (legacy basis; do not quote)
     INCONCLUSIVE / WARN lines when the data cannot support an fps number
@@ -83,6 +85,8 @@
 param(
     [string]$LogFile = '',
     [int]$ActiveLines = 480,   # LEGACY basis only: ACTIVE lines, not total lines per frame
+    [int]$LogicalHeight = 240, # engine renders this many logical lines ...
+    [int]$ActiveHeight = 480,  # ... and the output has this many active lines (2x doubler)
     [int]$MinIntervalMs = 500,
     [switch]$Raw,
     [switch]$SelfTest
@@ -129,6 +133,28 @@ function Get-Median {
     $n = $s.Count
     if ($n % 2 -eq 1) { return [double]$s[[int](($n - 1) / 2)] }
     return ([double]$s[$n / 2 - 1] + [double]$s[$n / 2]) / 2.0
+}
+
+# Shared fill-ratio verdict so the tool and -SelfTest always agree.
+# fill = encoded lines / emitted lines.  It is NOT a loss indicator: the engine renders
+# LogicalHeight logical lines and the output has ActiveHeight active lines, so a correct
+# pipeline only encodes about LogicalHeight/ActiveHeight of the emitted lines (240/480=0.50
+# for the 320x240 -> 640x480 doubler used by dvi_min).  Warn only on real deviation, and
+# ask about the resolution multiplier FIRST, because that is the usual explanation.
+function Get-FillVerdict {
+    param([double]$Fill, [int]$LogH, [int]$ActH)
+    $expected = 0.0
+    if ($ActH -gt 0) { $expected = $LogH / [double]$ActH }
+    $delta = $Fill - $expected
+    $dev = [math]::Abs($delta)
+    $verdict = if ($dev -le 0.10) { 'OK' } else { 'CHECK' }
+    return [pscustomobject]@{
+        Expected   = $expected
+        Delta      = $delta
+        Deviation  = $dev
+        Verdict    = $verdict
+        Warn       = ($verdict -ne 'OK')
+    }
 }
 
 function Show-FieldTable {
@@ -260,12 +286,23 @@ function Invoke-Analysis {
     }
     $fillRatio = 0.0
     if ($totIrq -gt 0) { $fillRatio = $totN / [double]$totIrq }
-    Write-Host ("ENC-LINE-FILL-RATIO " + [math]::Round($fillRatio, 4) + "  = dn/dirq  (share of EMITTED scanlines that were actually ENCODED)")
+    # SEMANTICS: this ratio reflects the LOGICAL -> ACTIVE line multiplier, NOT lost data.
+    # The engine renders -LogicalHeight logical lines and the output has -ActiveHeight active
+    # lines, so the encoder is only supposed to encode about LogicalHeight/ActiveHeight of the
+    # emitted lines (240/480 = 0.50 for dvi_min's 320x240 -> 640x480 doubler).  A low ratio is
+    # therefore NORMAL; only a real deviation from that expectation is worth a warning.
+    $fv = Get-FillVerdict -Fill $fillRatio -LogH $LogicalHeight -ActH $ActiveHeight
+    $script:LastFillRatio = $fillRatio
+    $script:LastFillWarned = $fv.Warn
+    Write-Host ("ENC-LINE-FILL-RATIO " + [math]::Round($fillRatio, 4) + " (expected ~" + [math]::Round($fv.Expected, 3) + " = " + $LogicalHeight + "/" + $ActiveHeight + " logical->active; " + $fv.Verdict + ")")
+    Write-Host ("  means: share of EMITTED scanlines that were freshly ENCODED; ~" + [math]::Round($fv.Expected, 2) + " is by design (each logical line covers " + [math]::Round($ActiveHeight / [double][math]::Max(1, $LogicalHeight), 1) + " active lines), NOT lost data")
     Write-Host ("ENCODED-LINES-PER-S " + [math]::Round($nRateTot, 1) + "  (from n; n counts ENCODED lines only)")
     Write-Host ("EMITTED-LINES-PER-S " + [math]::Round($irqRateTot, 1) + "  (from irq; irq counts EMITTED lines, blanking included)")
     Write-Host ("ACTIVE-LINES-ASSUMPTION " + $ActiveLines + " -> fps would be " + [math]::Round($mN, 3) + " (LEGACY basis: ACTIVE lines, NOT total lines; do NOT use as the frame rate)")
-    if ($fillRatio -gt 0 -and $fillRatio -lt 0.95) {
-        Write-Host ("WARN ENC-LINE-FILL-RATIO " + [math]::Round($fillRatio, 3) + " < 0.95: " + [math]::Round((1 - $fillRatio) * 100, 1) + "% of emitted scanlines were NOT freshly encoded (repeated or blank)")
+    if ($fv.Warn) {
+        Write-Host ("WARN ENC-LINE-FILL-RATIO " + [math]::Round($fillRatio, 4) + " deviates from the expected " + [math]::Round($fv.Expected, 3) + " by " + [math]::Round($fv.Deviation, 3) + " (> 0.10)")
+        Write-Host ("WARN   FIRST CHECK the resolution multiplier: is -LogicalHeight/-ActiveHeight still " + $LogicalHeight + "/" + $ActiveHeight + " for this firmware?")
+        Write-Host ("WARN   a wrong multiplier (e.g. 240/480 vs 480/480) explains this far more often than lost scanlines")
     }
     foreach ($w in $warn) { Write-Host ("WARN " + $w) }
     if ($fpsPrimary -gt 0 -and [math]::Abs($mEng - $fpsPrimary) -gt $resEng) {
@@ -323,12 +360,16 @@ if ($SelfTest) {
         $fps3 = 0.0
         if ($dEng3 -gt 0 -and $dt3 -gt 0) { $fps3 = ($dIrq3 / $dt3) / ($dIrq3 / [double]$dEng3) }
         $fill3 = ($l3.N - $f3.N) / [double]$dIrq3
+        $fv3 = Get-FillVerdict -Fill $fill3 -LogH $LogicalHeight -ActH $ActiveHeight
         $okFps = [math]::Abs($fps3 - 60.0) -le 0.1
         $okFill = [math]::Abs($fill3 - 0.530) -le 0.01
+        $okNoWarn = (-not $fv3.Warn)
         Write-Host ("SELFTEST-SAMPLE fps=" + [math]::Round($fps3, 3) + " (want 60.0 +/-0.1) " + $(if ($okFps) { 'PASS' } else { 'FAIL' }))
         Write-Host ("SELFTEST-SAMPLE fill-ratio=" + [math]::Round($fill3, 4) + " (want 0.530 +/-0.01) " + $(if ($okFill) { 'PASS' } else { 'FAIL' }))
+        Write-Host ("SELFTEST-SAMPLE fill-warning=" + $(if ($fv3.Warn) { 'RAISED' } else { 'none' }) + " (want none at defaults " + $LogicalHeight + "/" + $ActiveHeight + ") " + $(if ($okNoWarn) { 'PASS' } else { 'FAIL' }))
         if (-not $okFps) { $fail++ }
         if (-not $okFill) { $fail++ }
+        if (-not $okNoWarn) { $fail++ }
     }
 
     Write-Host ""
