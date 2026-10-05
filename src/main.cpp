@@ -36,10 +36,99 @@
 #include "kernel_res_borrow.h"
 
 #include "hardware/watchdog.h"
+#include "pico/bootrom.h"       // reset_usb_boot: serial backdoor into BOOTSEL
 
 // Sentinel written to watchdog scratch[4] before arming, purely so a later
 // reader can tell this firmware armed it. See main().
 #define WDG_MAGIC 0x57444731u   // 'WDG1'
+
+// ---------------------------------------------------------------------------
+// 内核自测结果的串口回显 + 串口后门
+// ---------------------------------------------------------------------------
+//
+// 为什么要有这一节：本板 SWD 读不到运行态变量（只有 reset halt 有效，而它会把
+// 目标复位），所以自检结果必须由固件自己从 USB 串口打出来。
+//
+// 三条纪律：
+//   1) 每个内核自测【调用之后就立刻】打一行，格式固定；
+//   2) 全部是纯 ASCII —— 本机控制台是 GBK，中文在抓串口的脚本里会乱码；
+//   3) 每行都 fflush(stdout)，而且全部位于 PSRAM / 显示初始化之前 ——
+//      后面那些步骤有可能把板子顶住，不能挡住这些结果。
+//
+// kernel.h 只导出了 pico_kernel_selftest_*，g_sys_* 定义在 kernel.c（C 链接），
+// 这里补声明。只声明、不定义、不改任何自测逻辑。
+extern "C" {
+extern volatile uint32_t g_sys_calls;
+extern volatile uint32_t g_sys_denied;
+extern volatile uint32_t g_sys_last_no;
+extern volatile uint32_t g_sys_last_arg;
+extern volatile uint32_t g_sys_result;
+}
+
+// ── 把 5 行自测结果【一次性】重打一遍 ──────────────────────────────────────
+//
+// 为什么需要它：用户往往是【接上串口之后】才看的，而开机那 1 秒内的 5 行必然
+// 抓不到（USB CDC 没主机时字节直接丢）。所以要在两个"用户能触发的时刻"重打：
+//   ① 进 dvi_screen_test()（永不返回）之前 —— 此时串口若已接上就能看到；
+//   ② 后门收到任意非 B/R 的键（含 '?'）时 —— 用户任何时候按一下键就能拿到全套。
+//
+// ⚠️ 下面 5 行的格式必须与 main() 里"紧跟各自测调用"的那 5 行【逐字节一致】；
+//    改一处就得改两处（那 5 行在自测刚跑完时打印，这里是把已有结果重打）。
+// 只读变量、只打印，不做任何别的动作。
+static void ktest_print_all(void) {
+    printf("[ktest] kmin   status=%lu faults=%lu addr=0x%08lx\n",
+           (unsigned long)pico_kernel_selftest_status,
+           (unsigned long)pico_kernel_selftest_faults,
+           (unsigned long)pico_kernel_selftest_addr);
+    printf("[ktest] kmem   status=%lu steps=%lu fail_at=%lu\n",
+           (unsigned long)g_kmem_selftest_status,
+           (unsigned long)g_kmem_selftest_steps,
+           (unsigned long)g_kmem_selftest_fail_at);
+    printf("[ktest] kres   status=%lu steps=%lu fail_at=%lu\n",
+           (unsigned long)g_kres_selftest_status,
+           (unsigned long)g_kres_selftest_steps,
+           (unsigned long)g_kres_selftest_fail_at);
+    printf("[ktest] kresb  status=%lu steps=%lu fail_at=%lu\n",
+           (unsigned long)g_kresb_selftest_status,
+           (unsigned long)g_kresb_selftest_steps,
+           (unsigned long)g_kresb_selftest_fail_at);
+    printf("[ktest] sys    calls=%lu denied=%lu last_no=%lu last_arg=%lu result=%lu\n",
+           (unsigned long)g_sys_calls,
+           (unsigned long)g_sys_denied,
+           (unsigned long)g_sys_last_no,
+           (unsigned long)g_sys_last_arg,
+           (unsigned long)g_sys_result);
+    fflush(stdout);
+}
+
+// 串口后门：非阻塞轮询，写法照抄 src/dvi_min.c:382-390 与 wboard_dvi/pin_toggle.c:15-48。
+//   收 'B' ⇒ 进 BOOTSEL（拔掉重插都不用按按键）
+//   收 'R' ⇒ 普通重启
+//   收 '?' 或【任何非 B/R 的键】⇒ 只把 5 行自测结果重打一遍（不做任何别的动作）
+// timeout=0，绝不阻塞。调用点在 dvi_screen.c 的显示主循环里：main() 最后就停在
+// dvi_screen_test() 里、不会返回，那边才是本固件真正的"主循环"。
+// 用 extern "C" 是因为调用方 dvi_screen.c 是 C 文件。
+extern "C" void backdoor_poll(void) {
+    int c = getchar_timeout_us(0);
+    if (c == 'B') {
+        printf("\n[backdoor] BOOTSEL reboot...\n");
+        fflush(stdout);
+        sleep_ms(50);
+        reset_usb_boot(0, 0);       // 不再返回
+    } else if (c == 'R') {
+        printf("\n[backdoor] reboot...\n");
+        fflush(stdout);
+        sleep_ms(50);
+        watchdog_reboot(0, 0, 0);   // 不再返回
+    } else if (c >= 0) {
+        /* 任何真实按键（getchar 无键时返回 PICO_ERROR_TIMEOUT = 负数）
+         * ⇒ 只重打自测结果，B/R 之外【不做任何别的动作】。 */
+        printf("\n[ktest] ==== kernel selftest results begin ====\n");
+        ktest_print_all();
+        printf("[ktest] ==== kernel selftest results end ====\n");
+        fflush(stdout);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Diagnostics
@@ -181,7 +270,19 @@ int main(void) {
     fflush(stdout);
 
     /*
+     * 抓串口用的对齐标记：begin / end 把全部 [ktest] 行夹在中间，
+     * 一眼就能看出内核自测这一段是完整的（没被后面的初始化截断）。
+     * 纯 ASCII，外加一行后门菜单。
+     */
+    printf("[ktest] ==== kernel selftest results begin ====\n");
+    printf("[backdoor] B=BOOTSEL  R=reboot\n");
+    fflush(stdout);
+
+    /*
      * 最小自检放在【最前面】，而且不打印。
+     *
+     * 〔2026-10-05 注：上面这句"不打印"已过时 —— 本板 SWD 读不到运行态变量，
+     *   所以现在紧跟它打一行 [ktest] kmin（见下）。自检逻辑本身一个字没改。〕
      *
      * 它只验证核心链路，结果写在 pico_kernel_selftest_* 变量里，
      * 由调试器（SWD）直接读 —— 不依赖串口，因此不受 USB 状态影响。
@@ -191,6 +292,11 @@ int main(void) {
      */
     kernel_minimal_selftest();
     kernel_mark(110);
+    printf("[ktest] kmin   status=%lu faults=%lu addr=0x%08lx\n",
+           (unsigned long)pico_kernel_selftest_status,
+           (unsigned long)pico_kernel_selftest_faults,
+           (unsigned long)pico_kernel_selftest_addr);
+    fflush(stdout);
 
     /*
      * ==== 内核内存管理器（2026-09-27 新增，地基的第一块砖）====
@@ -205,6 +311,11 @@ int main(void) {
     kernel_mark(115);
     kmem_selftest();
     kernel_mark(116);
+    printf("[ktest] kmem   status=%lu steps=%lu fail_at=%lu\n",
+           (unsigned long)g_kmem_selftest_status,
+           (unsigned long)g_kmem_selftest_steps,
+           (unsigned long)g_kmem_selftest_fail_at);
+    fflush(stdout);
 
     /*
      * ==== 内核资源登记表（2026-09-28 接入）====
@@ -218,6 +329,11 @@ int main(void) {
     kres_init();
     kres_selftest();
     kernel_mark(117);
+    printf("[ktest] kres   status=%lu steps=%lu fail_at=%lu\n",
+           (unsigned long)g_kres_selftest_status,
+           (unsigned long)g_kres_selftest_steps,
+           (unsigned long)g_kres_selftest_fail_at);
+    fflush(stdout);
     printf("内核资源表: 自检=%lu (步数 %lu, 首个失败步 %lu)\n",
            (unsigned long)g_kres_selftest_status,
            (unsigned long)g_kres_selftest_steps,
@@ -235,6 +351,11 @@ int main(void) {
      */
     kres_borrow_selftest();
     kernel_mark(118);
+    printf("[ktest] kresb  status=%lu steps=%lu fail_at=%lu\n",
+           (unsigned long)g_kresb_selftest_status,
+           (unsigned long)g_kresb_selftest_steps,
+           (unsigned long)g_kresb_selftest_fail_at);
+    fflush(stdout);
     printf("资源借用(调度)自检: 通过=%lu (步数 %lu, 首个失败步 %lu)\n",
            (unsigned long)g_kresb_selftest_status,
            (unsigned long)g_kresb_selftest_steps,
@@ -308,10 +429,19 @@ int main(void) {
     kernel_syscall_demo();
     fflush(stdout);
     kernel_mark(130);
+    printf("[ktest] sys    calls=%lu denied=%lu last_no=%lu last_arg=%lu result=%lu\n",
+           (unsigned long)g_sys_calls,
+           (unsigned long)g_sys_denied,
+           (unsigned long)g_sys_last_no,
+           (unsigned long)g_sys_last_arg,
+           (unsigned long)g_sys_result);
+    fflush(stdout);
 #else
     printf("(syscall demo disabled)\n");
     fflush(stdout);
 #endif
+    printf("[ktest] ==== kernel selftest results end ====\n");
+    fflush(stdout);
 
     if (host) {
         printf("SDIO pins: CLK=%u CMD=%u D0=%u D1=%u D2=%u D3=%u (PIO base 16)\n",
@@ -420,6 +550,20 @@ int main(void) {
     printf("\n=== tests done; starting HDMI screen test ===\n");
     fflush(stdout);
     kernel_mark(140);
+
+    /*
+     * ▼ 进显示循环之前【再原样打一遍】这 5 行自测结果。
+     *
+     * 理由：用户通常是在启动之后才接上串口的，开机那 1 秒内的 5 行必然抓不到
+     * （USB CDC 没有主机时字节直接丢）。这一步之后就是 dvi_screen_test()，
+     * 它永不返回，所以这里是"用户能看到"的最后一次自动重打。
+     * 夹在 begin/end banner 之间，抓串口时一眼就能认出这一块。
+     * 只是重打已有结果 —— 不重跑自测、不改任何数字。
+     */
+    printf("[ktest] ==== kernel selftest results begin ====\n");
+    ktest_print_all();
+    printf("[ktest] ==== kernel selftest results end ====\n");
+    fflush(stdout);
 
     /*
      * 用 frank-hdmi-sound 的 PIO DVI + HDMI 音频。

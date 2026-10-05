@@ -376,6 +376,15 @@ void dvi_screen_test(void)
         { extern void rate_tick(void); static uint32_t rc=0; if((++rc % 60u)==0u) rate_tick(); }
         kernel_mark(300);      /* 首帧之后就一直停在这附近 ⇒ 主循环活着 */
 
+        /*
+         * 串口后门轮询（实现在 main.cpp，timeout=0 非阻塞）：
+         *     发 'B' ⇒ 进 BOOTSEL，发 'R' ⇒ 普通重启。
+         *     其它任意键（含 '?'）⇒ 只把 5 行 [ktest] 自测结果重打一遍，不做别的动作。
+         * 放在这里是因为 main() 最后就停在本函数里、不会返回 ——
+         * 这里才是根固件真正一直在跑的"主循环"。
+         */
+        { extern void backdoor_poll(void); backdoor_poll(); }
+
         /* ★ 引擎看门狗（见文件上方变量处的长注释）：
          * 每 30 帧（约 0.5 秒）查一次引擎的 IRQ 计数；连续 4 次没进展（约 2 秒）
          * 就重启引擎（复位 Core1 → 重新初始化 → 重挂缓冲 → 再启动 Core1）。 */
