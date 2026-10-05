@@ -114,3 +114,34 @@ DUT 未受影响: VID_2E8A&PID_0009 + COM18 ✓
 
 ⇒ 它把"几乎每次挂都要按按键"降到"**只有连 USB 都活不了时才要按**"，
 但**不是绝对保险** —— 说"崩了也能救回来"时，这个前提要一起说。
+
+---
+
+## 追加（2026-10-05）：探针超频到 200 MHz + "纯后门"刷写流程
+
+**用户决定**：给探针**加散热器**后，授权超到 **200 MHz** ✓（此前"探针不能超太厉害"的口径**已作废** ✓，已在 `docs\当前状态.md` 装备状态里划掉加注 ✓）。
+
+**实现**（照抄本项目已验证的配方，不自己发明 ✗）：`src/main.c` 的 `main()` 开头加
+```c
+vreg_set_voltage(VREG_VOLTAGE_1_25);
+sleep_ms(10);
+bool ok = set_sys_clock_khz(200000, false);   /* false = 尽力而为：上不去就留默认时钟继续跑，绝不 panic */
+```
+依据（`core1_monitor` 的既有配方 ✓）：**`false` 很关键** —— 启动阶段 panic 等于又要人按 BOOTSEL ✗，
+正好是这套后门要消灭的事 ✓。
+
+**实测（2026-10-05）**：`ESC ESC ?` 回包
+```
+sysclk = 200000 kHz (this probe)
+```
+⇒ 200 MHz 生效 ✓（这条自报是**后门新增**的：`?` 分支里 `snprintf` + `clock_get_hz(clk_sys)` ✓）
+
+**"纯后门"重刷流程（不用按钮、不用 SWD ✓✓）**
+1. 改代码 ⇒ `build_probe.cmd build_pico_backdoor_oc200`（纯 ASCII 包装脚本调用 ✓）
+2. 打开探针 CDC（**必须拉 DTR** ✗ 否则 CDC 不算 connected，回包会被丢 —— 详见 `docs\陷阱.md` 错 26 补充）
+3. 发 `1B 1B 42`（`ESC ESC B`）⇒ **1 秒内**出现 `RPI-RP2` 卷 ✓
+4. 把 uf2 拷进该卷 ⇒ **2 秒后**探针回来 ✓
+5. 验收：`ESC ESC ?` ⇒ 必须回包 ✓ 且报出 `sysclk` ✓（本次 `7F81C846…` ✓）
+
+**产物与备份**：`build_pico_backdoor_oc200\debugprobe_on_pico.uf2`（121.5 KB ✓）；
+上一版已验证后门版备份 `debugprobe_backdoor_VERIFIED_1770C4D4.uf2` ✓。
