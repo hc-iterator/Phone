@@ -125,6 +125,29 @@ static void draw_calib(void)
         g_fb[y * FB_W + (FB_W - 2)] = 5;
     }
 }
+/*
+ * ★ 2026-10-06 大色块（按 'M'）—— 用户反馈"颜色尺细条数不清"✗ ⇒ 改成不可能看错的大块 ✓
+ *   · 最顶 5% 高 = 黄(5)  ⇒ 它若不见了，就说明顶部被裁 ✗
+ *   · 其余均分 4 大块（自上而下）：红(2) / 绿(3) / 蓝(4) / 白(1)
+ *   ⇒ 用户只需报"从上到下 4 大块什么颜色" ✓✓
+ */
+static void draw_ruler(void)
+{
+    const int top = FB_H / 20;              /* 最顶 5% = 黄 */
+    const int rest = FB_H - top;
+    for (int y = 0; y < FB_H; ++y) {
+        uint8_t c;
+        if (y < top) {
+            c = 5;                          /* 黄 */
+        } else {
+            int q = (y - top) * 4 / rest;   /* 0..3 */
+            c = (q == 0) ? 2 : (q == 1) ? 3 : (q == 2) ? 4 : 1;
+        }
+        for (int x = 0; x < FB_W; ++x) {
+            g_fb[y * FB_W + x] = c;
+        }
+    }
+}
 static void draw_moving_bar(int phase, int bar_w)
 {
     memset(g_fb, 0, sizeof(g_fb));
@@ -579,6 +602,12 @@ int main(void)
 
     /* 2026-10-05 图案模式：0=纯色(原行为) 1=竖条纹 2=棋盘格 3=变化图形(扫动条) */
     int mode = 0;
+    /* ★ 2026-10-06 重画守卫（只补这一个变量 ✓）
+     * 实测证据：没有它时，app 每轮都整屏重写 76KB ⇒ Core0 突发 ⇒ TMDS FIFO 被顶穿
+     *   ⇒ 遥测 free=0/1446 ✗（饥饿）+ loop=73~88µs ✗（健康 63~64）⇒ 屏幕【蓝白条纹闪】
+     * 加它之后：静态内容只画一次 ⇒ free 应回到 >=10 ✓、loop 回到 ~63µs ✓ */
+    int last_mode = -1;
+    int last_c = -1;
     int phase = 0;
 
     while (true) {
@@ -665,7 +694,14 @@ int main(void)
             }
         }
 
-        if (mode == 4) {
+        const bool same_as_last = (mode == last_mode) && (mode != 0 || (int)c == last_c);
+        last_mode = mode; last_c = (int)c;
+        if (same_as_last && mode != 3) {
+            /* 内容没变 ⇒ 一个字节都不写 ✓（mode==3 的动画仍逐帧画 ✓）*/
+        } else if (mode == 7) {
+            /* 颜色尺：第 0..7 行各一色 ⇒ 读出纵向偏移几行 ✓ */
+            draw_ruler();
+        } else if (mode == 4) {
             /* 校准图：40 像素大格子 + 四边四色 ✓（用户一眼可报数 ✓）*/
             draw_calib();
         } else if (mode == 1) {
@@ -719,6 +755,10 @@ int main(void)
                 freeze = 0;
                 mode = 0;
                 printf("\n[freeze] 恢复自动轮换\n");
+                fflush(stdout);
+            } else if (ch == 'M') {             /* 'M' ⇒ 颜色尺（读纵向偏移）*/
+                mode = 7;
+                printf("\n[mode] 颜色尺：自上而下 白红绿蓝黄青品红白（每行全宽）\n");
                 fflush(stdout);
             } else if (ch == 'K') {             /* 'K' ⇒ 校准图（大格子 + 四边四色 ✓）*/
                 mode = 4;
