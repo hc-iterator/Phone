@@ -246,6 +246,22 @@ target_link_libraries(empty pico_stdlib)
 pico_add_extra_outputs(empty)
 
 # ============================================================================
+# 纯后门固件：USB CDC 活着 + 后门活着，别的什么都不干（"中转固件"）
+#   ⚠️ 与 empty 的区别（2026-10-06 实测确认）：
+#      empty 的 stdio 是 0/0 ⇒ 烧上去后【没有 COM 口、也没有后门】，
+#      只能手按 BOOTSEL 救回 ✗ —— 它不能当中转固件。
+#      本目标才是"能靠自己的后门走回来"的中间态 ✓。
+#   构建：ninja -C build backdoor_only     产物：build/backdoor_only.uf2
+# ============================================================================
+add_executable(backdoor_only src/backdoor_only.c)
+pico_set_program_name(backdoor_only "backdoor_only")
+pico_set_program_version(backdoor_only "0.1")
+pico_enable_stdio_uart(backdoor_only 1)
+pico_enable_stdio_usb(backdoor_only 1)
+target_link_libraries(backdoor_only pico_stdlib)
+pico_add_extra_outputs(backdoor_only)
+
+# ============================================================================
 # 引脚连通性测试固件（焊接后查连锡，避免带短路接信号上电）
 #   不需要接任何外部信号：只检查 GPIO 8..15 之间/对 GND/对 3V3 是否相通
 # ============================================================================

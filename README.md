@@ -1,3 +1,5 @@
+# 如果你是新对话，请先阅读docs/重要-入门必读.md
+
 # PicoPhone
 
 > 🔴 **要开子 Agent / 派活之前必读**：[`开子Agent必读.md`](开子Agent必读.md)

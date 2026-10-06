@@ -45,6 +45,40 @@ function Get-SerialPorts {
     python -c "import serial.tools.list_ports as L; ps=[p for p in L.comports() if not (chr(66)+'luetooth' in (p.description or '') or chr(34013)+chr(29273) in (p.description or ''))]; print(' '.join(p.device for p in ps))" 2>$null
 }
 
+<#
+  Get-BoardPorts —— 只列出【目标板自己】的串口（按 VID:PID 认）
+  〔2026-10-06 加〕旧版是"对所有串口无差别猛发 6 次 B" ✗ —— 实测它把探针的 COM8 也一起发了。
+  探针那版固件要求 ESC ESC 前缀才认 B，所以这次没出事；换一版固件就可能被推进 BOOTSEL，
+  而探针当前跑的后门版固件【盘上没有备份】⇒ 那个方向一旦烧坏就回不来。
+  ⇒ 按项目一贯的"按 VID:PID 认板"惯例，只对目标板的口发 B。
+     dut   = RP2350 → 2E8A:0009
+     probe = RP2040 → 2E8A:000C（debugprobe）或 2E8A:000A（core1_monitor），两块固件都算
+#>
+function Get-BoardPorts {
+    param([ValidateSet('probe','dut')][string]$Which)
+    $wantVid = '2E8A'
+    $wantPid = if ($Which -eq 'dut') { @('0009') } else { @('000A','000C') }
+    $rows = python -c @"
+import serial.tools.list_ports as L
+for p in L.comports():
+    vid = ('%04X' % p.vid) if p.vid is not None else '----'
+    pid = ('%04X' % p.pid) if p.pid is not None else '----'
+    print(p.device, vid, pid)
+"@ 2>$null
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($ln in ($rows -split "`r?`n")) {
+        $t = $ln.Trim()
+        if ($t -eq '') { continue }
+        $f = $t -split '\s+'
+        if ($f.Count -lt 3) { continue }
+        if ($f[1] -notmatch $wantVid) { continue }
+        $hit = $false
+        foreach ($p in $wantPid) { if ($f[2] -match $p) { $hit = $true } }
+        if ($hit) { [void]$out.Add($f[0]) }
+    }
+    return $out
+}
+
 # ---- 不带参数：只报告现状 ----
 if ([string]::IsNullOrWhiteSpace($Board)) {
     Write-Host "=== 引导盘（按 BOARD-ID 认，不靠盘符）===" -ForegroundColor Cyan
@@ -76,7 +110,13 @@ $already = @(Get-BootDrives) | Where-Object { $_.Board -eq $Board } | Select-Obj
 if (-not $already) {
     Write-Host "板子不在 BOOT，尝试用串口后门 'B' ..." -ForegroundColor Cyan
     $sentOk = $false
-    foreach ($port in (((Get-SerialPorts) -split '\s+') | Where-Object { $_ -match '^COM' })) {
+    # 只对目标板自己的串口发 B（见 Get-BoardPorts 的注释：旧版是"对所有串口无差别发"✗）
+    $boardPorts = @(Get-BoardPorts -Which $Board)
+    if ($boardPorts.Count -eq 0) {
+        Write-Host "  ✗ 没找到 $Board 的串口（按 VID:PID 认：dut=2E8A:0009，probe=2E8A:000A/000C）" -ForegroundColor Yellow
+        Write-Host "    ⇒ 不向其它串口发 B —— 那会把别的板子推进 BOOTSEL" -ForegroundColor DarkGray
+    }
+    foreach ($port in $boardPorts) {
         $r = python -c @"
 import serial, time, sys
 try:
@@ -89,9 +129,9 @@ try:
 except Exception as e:
     print('SKIP:' + str(e)[:40])
 "@
-        if ($r -match 'SENT') { Write-Host "  已向 $port 发送 B" -ForegroundColor Green; $sentOk = $true }
+        if ($r -match 'SENT') { Write-Host "  已向 $port 发送 B（$Board）" -ForegroundColor Green; $sentOk = $true }
     }
-    if (-not $sentOk) { Write-Host "  没有任何串口可用（板子可能没插或已挂死）" -ForegroundColor Yellow }
+    if (-not $sentOk -and $boardPorts.Count -gt 0) { Write-Host "  $Board 的串口打不开（板子没插或已挂死）" -ForegroundColor Yellow }
     Write-Host "  等引导盘出现（最多 $BootWaitSec 秒）..."
     $t0 = Get-Date
     while (((Get-Date) - $t0).TotalSeconds -lt $BootWaitSec) {
