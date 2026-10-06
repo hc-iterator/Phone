@@ -27,6 +27,14 @@ import io
 import os
 import sys
 import tempfile
+# ★ 2026-10-06 修一个会咬人的小 bug：--help 路径走 print(__doc__)，而本文档里含 ✗/✓ 等
+#   非 ASCII 字符 ⇒ 在 GBK 控制台会 UnicodeEncodeError 崩 ✗（正是本文件第 24 行承诺
+#   「输出纯 ASCII」时没想到的那条路径 ✗）⇒ 统一把 stdout/stderr 切成 utf-8 ✓
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 EXIT_OK = 0
 EXIT_MISS = 2
