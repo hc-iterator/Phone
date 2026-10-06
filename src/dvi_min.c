@@ -96,6 +96,35 @@ static void draw_checker(uint8_t a, uint8_t b, int cell)
 }
 
 /* 变化图形：黑底 + 一根白竖条（宽 bar_w 像素），位置由 phase 控制（扫出屏外再回） */
+/*
+ * ★ 2026-10-06 校准图（用户：格子太小没法数 ✗）：
+ *   · 大格子：40 逻辑像素 ⇒ 横 320/40 = 8 格、纵 240/40 = 6 格 ⇒ 一眼数得清 ✓
+ *   · 四边四种颜色（各 2 逻辑像素）⇒ 可分别判断哪条边缺、哪条边偏粗 ✓
+ *       上=红(2)  下=绿(3)  左=蓝(4)  右=黄(5)
+ *   · 判据：若上边看不到 ⇒ 纵向有 ~2 行偏移 ✓；若左右比上下【细一半】⇒ 横向复制没生效 ✓
+ */
+static void draw_calib(void)
+{
+    const int cell = 40;
+    for (int y = 0; y < FB_H; ++y) {
+        for (int x = 0; x < FB_W; ++x) {
+            g_fb[y * FB_W + x] = (((x / cell) + (y / cell)) & 1) ? 1 : 0;
+        }
+    }
+    /* 四边：各 2 逻辑像素，颜色互不相同 ✓ */
+    for (int x = 0; x < FB_W; ++x) {
+        g_fb[0 * FB_W + x] = 2;                 /* 上 = 红 */
+        g_fb[1 * FB_W + x] = 2;
+        g_fb[(FB_H - 1) * FB_W + x] = 3;        /* 下 = 绿 */
+        g_fb[(FB_H - 2) * FB_W + x] = 3;
+    }
+    for (int y = 0; y < FB_H; ++y) {
+        g_fb[y * FB_W + 0] = 4;                 /* 左 = 蓝 */
+        g_fb[y * FB_W + 1] = 4;
+        g_fb[y * FB_W + (FB_W - 1)] = 5;        /* 右 = 黄 */
+        g_fb[y * FB_W + (FB_W - 2)] = 5;
+    }
+}
 static void draw_moving_bar(int phase, int bar_w)
 {
     memset(g_fb, 0, sizeof(g_fb));
@@ -636,7 +665,10 @@ int main(void)
             }
         }
 
-        if (mode == 1) {
+        if (mode == 4) {
+            /* 校准图：40 像素大格子 + 四边四色 ✓（用户一眼可报数 ✓）*/
+            draw_calib();
+        } else if (mode == 1) {
             /* 第 3 层：静态图形 —— 1 像素竖条纹（最容易暴露水平方向/缺行问题） */
             draw_vstripes(1, 0);
             draw_border(2);
@@ -687,6 +719,10 @@ int main(void)
                 freeze = 0;
                 mode = 0;
                 printf("\n[freeze] 恢复自动轮换\n");
+                fflush(stdout);
+            } else if (ch == 'K') {             /* 'K' ⇒ 校准图（大格子 + 四边四色 ✓）*/
+                mode = 4;
+                printf("\n[mode] 校准图：横 8 格 × 纵 6 格；上红 下绿 左蓝 右黄\n");
                 fflush(stdout);
             } else if (ch == '8') {             /* '8' ⇒ 第 3 层：竖条纹 */
                 mode = 1;
