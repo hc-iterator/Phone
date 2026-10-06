@@ -304,6 +304,11 @@ volatile uint32_t frank_hdmi_heartbeat_frames = 0;
 
 #include <stdio.h>   /* printf/fflush：周期性串口诊断要用（2026-10-01 深夜加） */
 
+/* ★ 2026-10-06 探针 v2（插在 core1_main 的安全点 ✓ 非 scratch ✓）
+ * 记录生产者最近 16 次用的 logical_y 与缓冲指针 ⇒ 判定"取行/配对"是否正常 ✓ */
+volatile int32_t  g_plog_y[16];
+volatile uint32_t g_plog_buf[16];
+volatile uint32_t g_plog_n = 0;
 static void __not_in_flash_func(core1_main)(void) {
     dvi_register_irqs_this_core(&dvi0, DMA_IRQ_1);
 
@@ -326,6 +331,11 @@ static void __not_in_flash_func(core1_main)(void) {
         queue_remove_blocking(&dvi0.q_colour_free, &scanbuf);
         { uint32_t d = time_us_32() - _c0; g_wait_colour_us = d; if (d > g_wait_colour_us_max) g_wait_colour_us_max = d; }
         fill_scanline(scanbuf, logical_y);
+        {   /* 探针 v2：记下这一行用的是哪条逻辑行、哪个缓冲 ✓ */
+            uint32_t _k = g_plog_n++ & 15u;
+            g_plog_y[_k]   = logical_y;
+            g_plog_buf[_k] = (uint32_t)(uintptr_t)scanbuf;
+        }
         queue_add_blocking(&dvi0.q_colour_valid, &scanbuf);
 
         encode_one_scanline_16bpp(&dvi0);
@@ -344,7 +354,7 @@ static void __not_in_flash_func(core1_main)(void) {
         {
             extern volatile uint32_t g_dvi_irq_count;
             uint32_t now = time_us_32();
-            if ((uint32_t)(now - last_rep_us) >= 1000000u) {
+            if ((uint32_t)(now - last_rep_us) >= 30000000u) {
                 last_rep_us = now;
                 printf("[dvi] t=%lums eng=%lu vctr=%lu irq=%lu hb=%lu/%lu qv=%u/%u qf=%u/%u "
                        "enc=%lu/%lu waitfree=%lu enonly=%lu n=%lu\n",

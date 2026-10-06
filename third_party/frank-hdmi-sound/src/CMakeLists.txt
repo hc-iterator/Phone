@@ -44,11 +44,11 @@ target_link_libraries(frank_hdmi_sound INTERFACE
 set(FRANK_HDMI_SM_CLKDIV "1" CACHE STRING
     "Divisor between sys_clock and TMDS bit clock (1 or 2)")
 
-# DVI_N_TMDS_BUFFERS=3 gives the IRQ handler enough slack that
+# DVI_N_TMDS_BUFFERS=6 gives the IRQ handler enough slack that
 # occasional Core 0 SRAM bursts don't underrun the TMDS FIFOs and
 # flash a red 'late scanline' indicator.
 target_compile_definitions(frank_hdmi_sound INTERFACE
-    DVI_N_TMDS_BUFFERS=3
+    DVI_N_TMDS_BUFFERS=6
     DVI_SM_CLKDIV=${FRANK_HDMI_SM_CLKDIV}
 )
 

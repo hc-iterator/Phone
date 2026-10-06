@@ -710,7 +710,27 @@ int main(void)
                  * 注意：不能 extern 引擎里的 fb_buf/fb_w/fb_h/palette_rgb565 —— 它们是
                  * frank_hdmi.c 的 static，链不上（2026-10-05 实测 undefined reference ✗）。
                  */
-                printf("\n[g] g_fb=%p  engine_fb=%p  engine_w=%d engine_h=%d  mode=%d freeze=%d c=%d\n",
+                {   /* 探针 v2 读数：生产者最近 16 行（logical_y / 缓冲指针）✓ */
+                    extern volatile int32_t  g_plog_y[16];
+                    extern volatile uint32_t g_plog_buf[16];
+                    extern volatile uint32_t g_plog_n;
+                    printf("[plog] n=%lu y=", (unsigned long)g_plog_n);
+                    for (int _i = 0; _i < 16; _i++) printf(" %ld", (long)g_plog_y[_i]);
+                    printf("\n[plog] buf=");
+                    for (int _i = 0; _i < 16; _i++) printf(" %08lx", (unsigned long)g_plog_buf[_i]);
+                    printf("\n");
+                    fflush(stdout);
+                }                {   /* 探针 v3 读数：最近 16 次的 v_ctr 与取新标记 ✓ */
+                    extern volatile int32_t  g_ctr_log[16];
+                    extern volatile int32_t  g_ctr_took[16];
+                    extern volatile uint32_t g_ctr_n;
+                    printf("[ctr] n=%lu v=", (unsigned long)g_ctr_n);
+                    for (int _i = 0; _i < 16; _i++) printf(" %ld", (long)g_ctr_log[_i]);
+                    printf("\n[ctr] took=");
+                    for (int _i = 0; _i < 16; _i++) printf(" %ld", (long)g_ctr_took[_i]);
+                    printf("\n");
+                    fflush(stdout);
+                }                printf("\n[g] g_fb=%p  engine_fb=%p  engine_w=%d engine_h=%d  mode=%d freeze=%d c=%d\n",
                        (const void *)g_fb, (const void *)frank_hdmi_get_buffer(),
                        frank_hdmi_get_buffer_w(), frank_hdmi_get_buffer_h(),
                        mode, freeze, (int)c);

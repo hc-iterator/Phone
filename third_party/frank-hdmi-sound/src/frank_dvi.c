@@ -333,6 +333,12 @@ void dvi_unregister_irqs_this_core(struct dvi_inst *inst, uint irq_num) {
     inst->tmds_buf_release[0] = NULL;
 }
 
+/* ★ 2026-10-06 探针 v3：记录消费者（frank_dvi.c 的 ACTIVE 分支）看到的 v_ctr ✓
+ * 目的：用户看到"整面蓝白闪"✗ = 整帧只用了一条缓冲 ⇒ 怀疑 v_ctr 不是每行 +1 ✗
+ * ⇒ 直接量：最近 16 次的 v_ctr 与是否取了新缓冲 ✓ */
+volatile int32_t  g_ctr_log[16];
+volatile int32_t  g_ctr_took[16];
+volatile uint32_t g_ctr_n = 0;
 // Set up control channels to make transfers to data channels' control
 // registers (but don't trigger the control channels -- this is done either by
 // data channel CHAIN_TO or an initial write to MULTI_CHAN_TRIGGER)
@@ -680,28 +686,43 @@ static void __dvi_func(dvi_dma_irq_handler)(struct dvi_inst *inst) {
                  * 重复行直接复用 held ✓。REPEAT==1 时走的是原语义（取到即挂 release[0] ✓），
                  * 编译期常量 ⇒ 默认配置行为一字不变 ✓，零回归风险 ✓。
                  */
-                const bool repeat_boundary =
-                    (inst->timing_state.v_ctr % DVI_VERTICAL_REPEAT) == (DVI_VERTICAL_REPEAT - 1);
-                if (repeat_boundary) {
+                /*
+                 * ★ 2026-10-06 配对最终版：用【行奇偶】定相位 + 显式归还 ✓
+                 *   前两版的教训（都有用户观测为证 ✓）：
+                 *     · 奇偶用 == REPEAT-1 ⇒ 竖条（两个不同逻辑行配成一对 ✗，y 错）
+                 *     · 用 held==NULL 当开关 ⇒ 横条（一次迟到就翻转相位 ✗，x 对 y 漂）
+                 *   本版：偶数行取新（帧首 v_ctr==0 必取 ✓）、奇数行复用并归还 ✓
+                 *        每帧恰 240 取 / 240 还 ⇒ 平衡 ✓；迟到不翻转相位 ⇒ 不漂 ✓
+                 */
+                if ((inst->timing_state.v_ctr & 1) == 0) {
                     if (queue_try_peek_u32(&inst->q_tmds_valid, &tmdsbuf)) {
                         queue_remove_blocking_u32(&inst->q_tmds_valid, &tmdsbuf);
-                        if (DVI_VERTICAL_REPEAT > 1) {
-                            uint32_t *prev = inst->tmds_buf_held;
-                            inst->tmds_buf_held = tmdsbuf;
-                            if (prev) {
-                                inst->tmds_buf_release[0] = prev;
-                            }
-                        } else {
-                            inst->tmds_buf_release[0] = tmdsbuf;
-                        }
+                        inst->tmds_buf_held = tmdsbuf;      /* 本对的第一行 ✓ */
+                    {   /* 探针 v3：这一行看到的 v_ctr 与是否取新 ✓ */
+                        uint32_t _k = g_ctr_n++ & 15u;
+                        g_ctr_log[_k]  = (int32_t)inst->timing_state.v_ctr;
+                        g_ctr_took[_k] = 1;   /* 取新分支 */
+                    }
                     } else {
-                        // No valid scanline was ready (generates solid red scanline)
                         tmdsbuf = NULL;
+                        inst->tmds_buf_held = NULL;         /* 不硬留 ⇒ 不漂 ✓ */
                         ++inst->late_scanline_ctr;
                     }
                 } else {
-                    // ★ 重复行：复用上一条（原实现在这里恒为 NULL ✗）
-                    tmdsbuf = inst->tmds_buf_held;
+                    tmdsbuf = inst->tmds_buf_held;          /* 本对的第二行 ✓ */
+                    if (tmdsbuf) {
+                        inst->tmds_buf_held = NULL;
+                        inst->tmds_buf_release[0] = tmdsbuf; /* 显示两次后归还 ✓ 只归一次 ✓ */
+                    if (tmdsbuf) {
+                        inst->tmds_buf_held = NULL;
+                        inst->tmds_buf_release[0] = tmdsbuf; /* 显示两次后归还 ✓ 只归一次 ✓ */
+                    }
+                    {   /* 探针 v3：复用分支 ⇒ took=0 ✓ */
+                        uint32_t _k = g_ctr_n++ & 15u;
+                        g_ctr_log[_k]  = (int32_t)inst->timing_state.v_ctr;
+                        g_ctr_took[_k] = 0;
+                    }
+                    }
                 }
 
                 if (inst->scanline_is_enabled && (inst->timing_state.v_ctr & 1)) {
