@@ -340,6 +340,59 @@ function loadTrust(cfg) {
   }
 }
 
+/** 只登记一个文件的当前指纹（审批通过后调用）。返回是否写成功。 */
+function registerTrust(cfg, file) {
+  const now = sha256Of(file);
+  if (!now) return false;
+  try {
+    mkdirSync(cfg.trustDir, { recursive: true });
+    const manifest = loadTrust(cfg) ?? { version: 1, scripts: {} };
+    manifest.scripts[relToRoot(cfg, file)] = { sha256: now, registeredAt: new Date().toISOString() };
+    writeFileSync(trustFilePath(cfg), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 指纹不符时的【提权申请】：走 DSH 的 approval 服务 —— **AI 发起、人点同意**，人不敲任何命令。
+ * 契约（`Service.listService approval`，2026-10-07 查证）：
+ *   `request({ agent, toolName, callId?, reason?, displayReason?, signal? }) → 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'`
+ *   · 必须在**打开的 turn** 里调用（工具调用过程中满足）；每次 ask/outcome 都写进会话日志；
+ *   · 没有应答者 / 策略为 `never` ⇒ `'unavailable'`（fail-closed）。
+ * ⇒ 这里【只有 `allowed-once` 算放行】，其余一律保持拒绝；异常也当 `unavailable` 处理。
+ */
+async function askTrustApproval(cfg, file, opts = {}) {
+  const service = cfg.approval;
+  const verdict = trustVerdict(cfg, file);
+  const sid = cfg.pluginCtx ? String(currentSessionId(cfg.pluginCtx) ?? '') : '';
+  const agent = cfg.currentAgent ?? (/^[\w.:-]{8,}$/.test(sid) && !sid.startsWith('(') ? { id: sid } : undefined);
+  if (!service || typeof service.request !== 'function') return { outcome: 'unavailable', verdict, detail: '审批服务不可用（ctx.approval 没拿到）' };
+  if (!agent) return { outcome: 'unavailable', verdict, detail: '拿不到发起审批所需的 agent（这条链没接上 ⇒ 保持拒绝）' };
+  const reason = [
+    `【沙箱外脚本】内容与登记指纹不符，需要你认可才继续：${verdict.rel}`,
+    `原因：${verdict.why}`,
+    `旧指纹：${verdict.want ? verdict.want.slice(0, 16) : '(未登记)'}   →   新指纹：${verdict.now ? verdict.now.slice(0, 16) : '(读不到)'}`,
+    `文件：${file}`,
+    `要看改了什么：git -C ${cfg.repo} diff -- ${verdict.rel.split('/').slice(1).join('/')}`,
+    opts.extra ? String(opts.extra) : '',
+  ].filter(Boolean).join('\n');
+  try {
+    const outcome = await service.request({
+      agent,
+      toolName: opts.toolName ?? 'pico_run',
+      reason,
+      displayReason: {
+        en: `An unsandboxed script changed: ${verdict.rel} (${verdict.why}). Approve to re-register its hash and continue.`,
+      },
+    });
+    return { outcome, verdict };
+  } catch (error) {
+    return { outcome: 'unavailable', verdict, detail: `审批调用失败: ${error && error.message ? error.message : error}` };
+  }
+}
+
 /** 返回 { ok, rel, now, want, why }。ok=false 时调用方必须拒绝执行。 */
 function trustVerdict(cfg, file) {
   const rel = relToRoot(cfg, file);
@@ -636,21 +689,32 @@ function shellFor(scriptPath) {
 }
 
 /** 跑仓库内的脚本：.ps1 -> pwsh、.cmd/.bat -> cmd、.py -> python。 */
-function runProjectScript(cfg, scriptPath, args, options = {}) {
+async function runProjectScript(cfg, scriptPath, args, options = {}) {
   if (options.sandbox !== true) {
-    // 【信任门】沙箱之外的脚本，先与工作区外的哈希清单核对；不符即拒绝（fail-closed）。
+    // 【信任门】沙箱之外的脚本先与工作区外的哈希清单核对；不符 ⇒ **发起审批**（AI 问、人答），
+    // 批了就地登记并继续；没批/审批不可用 ⇒ 保持拒绝（fail-closed）。
     // 沙箱化的调用（run/exec/docs/agents）不走这里 —— 它们本来就跑在沙箱里，随便改无所谓。
-    const verdict = trustVerdict(cfg, scriptPath);
+    let verdict = trustVerdict(cfg, scriptPath);
+    let askNote = '';
     if (!verdict.ok) {
-      return Promise.resolve({
+      const ask = await askTrustApproval(cfg, scriptPath, { toolName: options.toolName });
+      if (ask.outcome === 'allowed-once' && registerTrust(cfg, scriptPath)) {
+        verdict = trustVerdict(cfg, scriptPath);
+        askNote = '（已按你的同意重新登记指纹）';
+      } else {
+        askNote = `（审批结果：${ask.outcome}${ask.detail ? ` — ${ask.detail}` : ''}）`;
+      }
+    }
+    if (!verdict.ok) {
+      return {
         ok: false,
         exitCode: null,
         timedOut: false,
         stdout: '',
         stderr: '',
         durationMs: 0,
-        spawnError: trustRefusal(cfg, scriptPath),
-      });
+        spawnError: `${trustRefusal(cfg, scriptPath)}\n\n${askNote}`,
+      };
     }
   }
   if (options.sandbox === true) {
@@ -1122,10 +1186,14 @@ async function sessionOpen(cfg, args, ctx = {}) {
   }
   // 【信任门】worker 是【直接 spawn】的（不经过 runProjectScript）⇒ 必须在 here 手动加同一道门。
   // 2026-10-07：它先前是漏的 —— 往 serial-session.ps1 里塞点东西再 pico_console open 就是沙箱外任意代码。
-  const workerTrust = trustVerdict(cfg, worker);
+  let workerTrust = trustVerdict(cfg, worker);
   if (!workerTrust.ok) {
-    releaseRigLock(lock);
-    return { ok: false, text: trustRefusal(cfg, worker) };
+    const ask = await askTrustApproval(cfg, worker, { toolName: 'pico_console' });
+    if (ask.outcome === 'allowed-once' && registerTrust(cfg, worker)) workerTrust = trustVerdict(cfg, worker);
+    else {
+      releaseRigLock(lock);
+      return { ok: false, text: `${trustRefusal(cfg, worker)}\n\n（审批结果：${ask.outcome}${ask.detail ? ` — ${ask.detail}` : ''}）` };
+    }
   }
   let child;
   try {
@@ -2348,6 +2416,11 @@ export async function apply(ctx, rawConfig) {
   //    （2026-10-07 首跑：全部沙箱 op 报"沙箱执行器不可用"，就是踩了这个）。
   ctx.inject(['shell'], (shellCtx) => {
     sandboxContext = { shell: shellCtx.shell, workspaceRoot: cfg.root };
+  });
+  // 审批服务：指纹不符时由 AI 发起申请、人点同意（不用人记任何命令）
+  cfg.pluginCtx = ctx;
+  ctx.inject(['approval'], (approvalCtx) => {
+    cfg.approval = approvalCtx.approval;
   });
   const definitions = buildToolDefinitions(cfg);
 
