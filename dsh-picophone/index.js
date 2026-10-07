@@ -291,6 +291,9 @@ const TRUSTED_REPO_TOOLS_REL = [
   'tools/flash_backdoor.ps1',
   'tools/swd.ps1',
   'tools/proc_guard.ps1',
+  // 审计缺口①②（2026-10-07）：host_test 的入口与 serial.ps1 的子脚本，原先不在名单里
+  'tools/host_test/run_all.cmd',
+  'tools/serial_worker.ps1',
 ];
 
 // ⚠️ 会话 worker **不在 `tools/` 里** —— 它是插件自己的文件（见下面 `path.join(PACKAGE_DIR, …)`）。
@@ -2667,23 +2670,10 @@ export async function apply(ctx, rawConfig) {
   ctx.inject(['approval'], (approvalCtx) => {
     cfg.approval = approvalCtx.approval;
   });
-  const definitions = [
-    ...buildToolDefinitions(cfg),
-    tool(
-      cfg,
-      'amend',
-      '请求修改【受管脚本】(= 跑在沙箱外的那批)。插件把 diff 交给一次性审判员裁决：合理 ⇒ 登记新指纹并同步进运行本(生效)；否则 ⇒ 用运行本覆盖你的改动(回滚)。',
-      {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          paths: { type: 'array', items: { type: 'string' }, description: '受管脚本路径(相对工作区，如 DeepSeekCode/tools/build.cmd)；缺省 = 自动找出与登记指纹不符的那些' },
-          why: { type: 'string', description: '为什么要改(审判员会看)' },
-        },
-      },
-      'amend',
-    ),
-  ];
+  // 2026-10-07 用户裁定：改受管脚本【不走 pico_amend（审判员）】，改走【通用提权】=
+  // DSH 的 approval 提示（信任门 askTrustApproval 已接好）：指纹不符 ⇒ 弹框 ⇒ 人点同意 ⇒
+  // 登记新指纹 + 同步进运行本。opAmend 的代码保留作参考，但不再注册成工具。
+  const definitions = buildToolDefinitions(cfg);
 
   for (const definition of definitions) {
     // 【审批用】每次工具调用都记下它的 exec 上下文 —— `approval.request` 必须带 agent 才发得出去。
