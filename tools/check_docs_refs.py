@@ -300,8 +300,19 @@ for f in md_files:
         continue
     if c:
         per2[rel(f)] = c
-bad = {k: v for k, v in per2.items() if k not in ALLOWED_KEEP}
-print(f"  允许保留（B 类）: {', '.join(sorted(ALLOWED_KEEP))}")
+# 🗓 2026-10-07：文档拆分产生了【归档册 / 阶段册】（`docs\*-归档.md`、`docs\*-阶段N.md`）——
+#   它们按纪律"原文一字不改"，必然带旧称 ⇒ 与 ALLOWED_KEEP 同等对待（历史归档属 B 类 ✓）。
+#   用【文件名模式】而不是逐个写死：拆分会继续发生，写死必然漏 ✗（今天一漏就是 3 本）。
+def _is_archive(relpath: str) -> bool:
+    base = relpath.replace("\\", "/").rsplit("/", 1)[-1]
+    stem = base[:-3] if base.endswith(".md") else base
+    if stem.endswith("-归档"):
+        return True
+    return ("-阶段" in stem) and stem.rsplit("-阶段", 1)[1].isdigit()
+
+bad = {k: v for k, v in per2.items() if k not in ALLOWED_KEEP and not _is_archive(k)}
+_keep_names = sorted(ALLOWED_KEEP | {k for k in per2 if _is_archive(k)})
+print(f"  允许保留（B 类）: {', '.join(_keep_names)}")
 print(f"  实际含'本子'的文件: {', '.join(f'{k}({v})' for k, v in sorted(per2.items())) or '（无）'}")
 if bad:
     print(f"  ✗ 这些文件不该再有'本子'（A 类应已改掉）: {bad}")
@@ -312,6 +323,8 @@ print(f"  总数 = {tot2}（上限 {CEILING}）{'✓' if tot2 <= CEILING else '�
 for pat, strict in (("本子分工", True), ("本子使用指南", False)):
     hits = []
     for f in md_files:
+        if _is_archive(rel(f)):      # 🗓 2026-10-07：归档/阶段册里的旧称是【历史记录】，不算残留 ✓
+            continue
         try:
             with open(f, encoding="utf-8", errors="replace") as fh:
                 for i, line in enumerate(fh, 1):
