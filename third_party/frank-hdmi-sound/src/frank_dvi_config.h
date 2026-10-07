@@ -33,11 +33,18 @@
 //   之前 2 会停摆是【真 bug】✗：重复行拿到的 tmdsbuf 恒为 NULL（局部变量）⇒ 隔行错误图案 + 队列漂移。
 //   已在 frank_dvi.c 的 ACTIVE 分支修好（新增 inst->tmds_buf_held ✓），
 //   且 DVI_VERTICAL_REPEAT==1 时走原语义 ⇒ 默认配置零回归 ✓。
+//   ★ 2026-10-07：2 → 4（配套 LOGICAL_H 240 → 120 ✓；硬约束 LOGICAL_H × REPEAT = 480 不变 ✓）。
+//   为什么改：实测【真产能】12,219 逻辑行/秒（来自 [dvi] 行 hb÷t 的长时间平均 ✓），
+//     REPEAT=2 需要 240×59.7 = 14,328 行/秒 ⇒ 差 15% ✗ ⇒ 消费端拿不到新行 ⇒ DMA 重复旧行 ⇒ 蓝白闪 ✗。
+//     ⚠️ 上面那句"产能实测 23809 圈/秒 ✓ 余量 65%"是**错的** ✗：那是单圈最好值（1/42µs），
+//       没算 57~88µs 的常见圈、也没算垂直消隐 ⇒ 真正能用的是平均吞吐 ✓（教训：别拿瞬时值当产能 ✗）。
+//   REPEAT=4 ⇒ 只需 120×59.7 = 7,164 行/秒 ✓ < 12,219 ⇒ 余量 70% ✓✓（画面立刻能稳 ✓）。
+//   代价：画布纵向只有 120 行（内容会被纵向拉伸 4× ✓）—— 原型机阶段先要"看得见"✓，全分辨率走"整帧缓存"的治本路 ✓。
 //   为什么必须 2：LOGICAL_H=240 + REPEAT=1 会发出【非标准时序】⇒ 面板直接"无信号"✗（实测 ✓）；
 //   只有 240 行画布 × 每行两遍 = 合法 640x480p60 ✓，且 CPU 每帧只需编码 240 行 = 14400 行/秒 ✓
 //   （产能实测 23809 圈/秒 ✓ 余量 65% ✓）。
 #ifndef DVI_VERTICAL_REPEAT
-#define DVI_VERTICAL_REPEAT 2
+#define DVI_VERTICAL_REPEAT 4
 #endif
 
 // Number of TMDS buffers to allocate (malloc()) in DVI init. You can set this

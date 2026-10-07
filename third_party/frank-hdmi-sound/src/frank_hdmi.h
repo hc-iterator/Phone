@@ -119,7 +119,11 @@ extern "C" {
 /* ★ 2026-10-05 A/B 实验（主 AI）：480 → 240（回到库 README 写明的 "max 320x240" ✓）
  *   配合 frank_dvi_config.h 的 DVI_VERTICAL_REPEAT 改回 2。
  *   理由与代价见 docs/DVI攻坚流水.md〈2026-10-05 晚 实测：画面恒定的根因〉✓ */
-#define FRANK_HDMI_LOGICAL_HEIGHT 240
+/* ★ 2026-10-07：240 → 120（配套 DVI_VERTICAL_REPEAT 2 → 4 ✓；硬约束 120×4 = 480 ✓ 不变）
+ *   动机与代价见 frank_dvi_config.h 顶部的长注释与 docs/DVI攻坚流水.md ✓
+ *   一句话：平均产能 12,219 行/秒 < 需要的 14,328 ⇒ 差 15% ⇒ 画面闪 ✗；
+ *           降到 120 行后只需 7,164 行/秒 ⇒ 余量 70% ✓ ⇒ 画面先稳下来 ✓ */
+#define FRANK_HDMI_LOGICAL_HEIGHT 120
 
 /*
  * Audio sample rate declared on the wire (CEA-861 standard rate).

@@ -101,7 +101,14 @@ static const struct dvi_serialiser_cfg frank_dvi_cfg = {
 /* Two scanline buffers in flight gives one frame of slack between
  * producer and consumer.  This matters when Core 0 is doing heavy SRAM
  * or PSRAM work and stalls Core 1 momentarily. */
-#define N_SCANLINE_BUFS     2
+/* ★ 2026-10-07：【硬上限 = 8】✗✗ 别往大改！
+ *   我自己踩过一次：这里原值 2，我改成 32 ⇒ **板子直接砖住**（USB 照常枚举、串口一个字不吐、SWD 连 DP 都读不到）。
+ *   原因（读代码核实 ✓）：`frank_dvi.c:232-233` 把 q_colour_valid / q_colour_free 的深度**硬编码成 8**
+ *   ⇒ 初始化往只有 8 格的队列里塞 32 个缓冲 ⇒ 第 9 条**永远塞不进去** ⇒
+ *     `queue_add_blocking` **永久阻塞**（`sdk/…/pico_util/queue.c:114` 是"满了就一直等"，**不是 panic** ✗）
+ *   ⇒ 教训：库里的队列深度是【常数】✗，改缓冲条数前先看队列能装多少 ✓（也见 docs\陷阱.md 的"一次只改一个变量"）。
+ *   保留 8（= 队列允许的最大 ✓）：比原来的 2 多 4 倍抖动余量，且不越界 ✓。 */
+#define N_SCANLINE_BUFS     8
 
 /* CEA-861 N-value for 32 kHz. */
 #define HDMI_AUDIO_N        4096
