@@ -39,3 +39,49 @@ git -C ..\DeepSeekCode worktree list     # 能看到两个工作树
 甚至改 `package.json` 的 `exports` 指向别的入口文件 —— **都无效**，加载器仍 import 旧模块。
 （2026-10-06/07 反复实测，见 `DeepSeekCode\台架接口沙箱化说明.md` §八。）
 ⇒ **攒着一起改**，别改一行验一行。
+
+## 🔐 沙箱之外的脚本：哈希钉在工作区外（2026-10-07 红队突破后加）
+
+**为什么**：沙箱只管得住"经沙箱出去"的命令；而 `pico_build` / `pico_serial` / `pico_console` / `pico_flash` /
+`/pico swd` / `/pico procs` / `pico_status(proc_guard)` 这 7 处**豁免沙箱**，跑的都是**工作区里的脚本** ——
+工作区恰恰是被沙箱关住的那个 Agent **唯一能写的地方** ⇒
+"把 payload 写进 `tools\proc_guard.ps1`，再调一次 `pico_status`" 就是一条**不过沙箱**的任意代码执行。
+（同源的已确认突破：`pico_serial.outFile` 收绝对路径 ⇒ 往桌面写了 258 B，已修。）
+
+**做法**：这 8 个脚本的 SHA256 钉在**工作区之外**：
+`<工作区的父目录>\_picophone_trust\trusted-scripts.json`
+（默认 `C:\Users\Chen\Desktop\Pico\_picophone_trust\trusted-scripts.json` —— 沙箱里的 Agent 写不到那里）。
+每次执行前核对：**不符就拒绝**，错误里给出现在值 / 登记值 / 人该敲什么。
+
+**受管脚本（8 个）**：`tools\build.cmd`、`build_sub.ps1`、`serial.ps1`、`serial-session.ps1`、
+`flash_bootsel.ps1`、`flash_backdoor.ps1`、`swd.ps1`、`proc_guard.ps1`。
+
+### 流程 —— 人
+
+```
+/pico trust                     # 看状态：✓ 匹配 / ✗ 已变更 / · 未登记
+/pico trust tools/build.cmd     # 改完脚本后，只重新登记这一个
+/pico trust init                # 全部重新登记
+```
+
+> 登记入口**只挂在 `/pico` 命令上，故意不做成工具** —— 做成工具就等于"AI 能自己把恶意脚本登记掉"。
+
+### 流程 —— AI（**后来的 AI 请先读这一段，别晕**）
+
+1. 你**可以**改这些脚本（工作区里你有写权限），但改完**下一次调用会被拒绝**，报：
+   ```
+   ⛔ 拒绝执行【沙箱之外】的脚本：tools/proc_guard.ps1
+      原因：已变更（登记之后又被改过）
+      当前 sha256_16 = …        登记值 = …
+      ⇒ 请人敲：/pico trust tools/proc_guard.ps1
+   ```
+   **这不是 bug，是设计**：这类脚本要碰设备/要跑 cmake，只能跑在沙箱外，所以它的内容必须是人认可过的。
+2. **别试着绕过**：把清单配到工作区之内会被 `trustDirIsSafe()` 直接拒（清单必须在工作区之外）；
+   改插件源码（`index.js`）要**重启 DSH 才生效**，而且会留在 `git diff` 里被看见 ✓
+3. **想跑你自己新写的脚本？照旧** —— 走 `pico_run`（**沙箱内**），这层**不管**。
+   被管的只有"必须跑在沙箱外"的那 8 个 ⇒ 灵活性一点没丢 ✓
+
+### 第一次会遇到的坑
+
+刚加这层时清单还不存在 ⇒ **所有沙箱外的 op 都会被拒**（fail-closed，故意的）。
+人敲一次 `/pico trust init` 即恢复。

@@ -73,6 +73,7 @@ const DEFAULTS = {
   gitSslCa: null,           // 默认 <root>\dsh-plugins\.certs\watt-ca.pem（本机代理 Watt Toolkit 的 CA）
   gitTokenFile: null,       // 默认 $DSH_HOME\.git-token（一行：user:token 或裸 token）
   gitCredentialsFile: null, // 默认 $DSH_HOME\.git-credentials（备用重试路径）
+  trustDir: null,           // 默认 <工作区的父目录>\_picophone_trust ——【必须在工作区之外】
   // BOOTSEL 盘身份（#6）：DUT 与探针的引导盘长得几乎一样，写错就是烧错板
   boardIds: { dut: 'RP2350', probe: 'RPI-RP2', sampler: 'RPI-RP2' },
   devices: {
@@ -175,6 +176,8 @@ function resolveConfig(raw) {
   cfg.gitSslCa = cfg.gitSslCa ?? path.join(cfg.root, 'dsh-plugins', '.certs', 'watt-ca.pem');
   cfg.gitTokenFile = cfg.gitTokenFile ?? path.join(dshHome, '.git-token');
   cfg.gitCredentialsFile = cfg.gitCredentialsFile ?? path.join(dshHome, '.git-credentials');
+  // 沙箱之外脚本的信任清单：默认放在【工作区的父目录】下（沙箱里的 Agent 写不到那里）
+  cfg.trustDir = cfg.trustDir ?? path.join(path.dirname(path.resolve(cfg.root)), '_picophone_trust');
   return cfg;
 }
 
@@ -270,6 +273,143 @@ const SANDBOX_MODE = 'workspace-write';
 
 // 由 apply() 填：{ shell, workspaceRoot }
 let sandboxContext = null;
+
+// ---------------------------------------------------------------- 脚本信任登记（2026-10-07 红队突破后加）
+
+// 为什么需要：上面的沙箱只管得住"经 ctx.shell 出去的"那些命令；但豁免沙箱的那 7 处 op
+// （build / serial / console / flash / swd / procs / status 的 proc_guard）跑的是
+// 【工作区里的脚本】，而工作区正是被沙箱关住的那个 Agent **唯一能写的地方** ⇒
+// "把 payload 写进 tools\proc_guard.ps1，再调 pico_status" 就是一条【不过沙箱】的任意代码执行。
+// 办法：把这几个脚本的 SHA256 钉在【工作区之外】，每次执行前核对；不符 ⇒ 拒绝执行。
+// ⚠️ 登记入口只做在 /pico 命令里（人敲），**不做成工具** —— 否则 AI 自己就能把恶意脚本登记掉。
+// （createHash 在文件顶部已经 import 过，这里别再引一次 —— 重复声明会直接 SyntaxError。）
+const TRUSTED_TOOLS_REL = [
+  'tools/build.cmd',
+  'tools/build_sub.ps1',
+  'tools/serial.ps1',
+  'tools/serial-session.ps1',
+  'tools/flash_bootsel.ps1',
+  'tools/flash_backdoor.ps1',
+  'tools/swd.ps1',
+  'tools/proc_guard.ps1',
+];
+
+/**
+ * 受管脚本的清单键 = **相对 `cfg.root`** 的路径（与 `relToRoot()` 同一口径）。
+ * ⚠️ 别再写死 `'tools/xxx'`：脚本其实在 `<root>\DeepSeekCode\tools\` 下，
+ *    写死会让 `/pico trust init` 一个都找不到、登记不上，门就永远拒着（2026-10-07 实测踩到）。
+ */
+function trustedScripts(cfg) {
+  const prefix = path.relative(cfg.root, cfg.repo).split(path.sep).join('/');
+  return TRUSTED_TOOLS_REL.map((rel) => (prefix ? `${prefix}/${rel}` : rel));
+}
+
+function trustFilePath(cfg) {
+  return path.join(cfg.trustDir, 'trusted-scripts.json');
+}
+
+/** 信任清单【必须】在工作区之外：否则被关住的 Agent 连清单一起改，这层就白加了。 */
+function trustDirIsSafe(cfg) {
+  const root = path.resolve(cfg.root).toLowerCase().replace(/[\\/]+$/, '');
+  const dir = path.resolve(cfg.trustDir).toLowerCase();
+  return !(dir === root || dir.startsWith(`${root}${path.sep}`));
+}
+
+function relToRoot(cfg, file) {
+  return path.relative(cfg.root, file).split(path.sep).join('/');
+}
+
+function sha256Of(file) {
+  try {
+    return createHash('sha256').update(readFileSync(file)).digest('hex');
+  } catch {
+    return null;
+  }
+}
+
+function loadTrust(cfg) {
+  try {
+    const parsed = JSON.parse(readFileSync(trustFilePath(cfg), 'utf8'));
+    return parsed && typeof parsed === 'object' && parsed.scripts ? parsed : { version: 1, scripts: {} };
+  } catch {
+    return null; // 不存在或读不了 ⇒ 一律按"未登记"处理（fail-closed）
+  }
+}
+
+/** 返回 { ok, rel, now, want, why }。ok=false 时调用方必须拒绝执行。 */
+function trustVerdict(cfg, file) {
+  const rel = relToRoot(cfg, file);
+  const now = sha256Of(file);
+  if (!trustDirIsSafe(cfg)) return { ok: false, rel, now, want: null, why: '信任清单目录被配到了工作区【之内】（它必须在工作区之外，否则这层形同虚设）' };
+  const manifest = loadTrust(cfg);
+  const rec = manifest?.scripts?.[rel];
+  if (!now) return { ok: false, rel, now, want: rec?.sha256 ?? null, why: '文件读不到' };
+  if (!manifest) return { ok: false, rel, now, want: null, why: '清单不存在（这些脚本还没登记过）' };
+  if (!rec) return { ok: false, rel, now, want: null, why: '未登记' };
+  if (rec.sha256 !== now) return { ok: false, rel, now, want: rec.sha256, why: '已变更（登记之后又被改过）' };
+  return { ok: true, rel, now, want: rec.sha256, why: '匹配' };
+}
+
+/** 拒绝执行时给的那段话 —— 它必须自解释：说清原因、给出现在值与登记值、给出人该敲什么。 */
+function trustRefusal(cfg, file) {
+  const v = trustVerdict(cfg, file);
+  return [
+    `⛔ 拒绝执行【沙箱之外】的脚本：${v.rel}`,
+    `   原因：${v.why}`,
+    `   当前 sha256_16 = ${v.now ? v.now.slice(0, 16) : '(读不到)'}`,
+    `   登记值         = ${v.want ? v.want.slice(0, 16) : '(无)'}`,
+    '',
+    '   这类脚本必须跑在沙箱外（要碰设备 / 要跑 cmake），所以它的内容必须是【人认可过的】：',
+    '   登记入口只挂在 /pico 命令上（AI 无权调用），人敲：',
+    '     /pico trust                             # 看全部受管脚本的登记状态',
+    `     /pico trust ${v.rel}`,
+    '     /pico trust init                        # 全部重新登记',
+    `   清单位置（工作区之外）：${trustFilePath(cfg)}`,
+  ].join('\n');
+}
+
+async function opTrust(cfg, args = {}) {
+  const action = String(args.action ?? 'list').toLowerCase();
+  if (!trustDirIsSafe(cfg)) {
+    return { kind: 'error', text: `✗ 信任清单必须放在工作区之外；当前配置 ${cfg.trustDir} 在工作区之内 ⇒ 拒绝登记。` };
+  }
+  const names = action === 'init' ? trustedScripts(cfg) : action === 'list' ? [] : [String(args.name ?? '')].filter(Boolean);
+  if (names.length > 0) {
+    const manifest = loadTrust(cfg) ?? { version: 1, scripts: {} };
+    mkdirSync(cfg.trustDir, { recursive: true });
+    const lines = [];
+    for (const rel of names) {
+      const now = sha256Of(path.join(cfg.root, rel));
+      if (!now) { lines.push(`✗ ${rel}  读不到`); continue; }
+      manifest.scripts[rel] = { sha256: now, registeredAt: new Date().toISOString() };
+      lines.push(`✓ ${rel}  →  ${now.slice(0, 16)}…`);
+    }
+    try {
+      writeFileSync(trustFilePath(cfg), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+    } catch (error) {
+      return { kind: 'error', text: `✗ 写清单失败: ${error && error.message ? error.message : error}` };
+    }
+    return { kind: 'success', text: `已登记 ${lines.length} 个脚本\n清单：${trustFilePath(cfg)}\n${lines.join('\n')}` };
+  }
+  const rows = trustedScripts(cfg).map((rel) => {
+    const v = trustVerdict(cfg, path.join(cfg.root, rel));
+    const mark = v.ok ? '✓ 匹配  ' : v.want ? '✗ 已变更' : '· 未登记';
+    const detail = v.ok ? '' : `   当前 ${v.now ? v.now.slice(0, 8) : '(读不到)'} / 登记 ${v.want ? v.want.slice(0, 8) : '无'}`;
+    return `  ${mark}  ${rel}${detail}`;
+  });
+  const exists = loadTrust(cfg) ? '' : '（清单还不存在 ⇒ 上面这些都会被执行时拒绝）';
+  return {
+    kind: 'success',
+    text: [
+      '沙箱之外脚本的信任登记：',
+      `  清单 ${trustFilePath(cfg)}  ${exists}`,
+      '',
+      ...rows,
+      '',
+      '重新登记：/pico trust <相对路径>    或    /pico trust init（全部）',
+    ].join('\n'),
+  };
+}
 
 /** 走 DSH 的 OS 级沙箱执行器（Windows = 路径 ACL + 受限令牌）。 */
 async function runSandboxedCommand(command, options = {}) {
@@ -493,6 +633,22 @@ function shellFor(scriptPath) {
 
 /** 跑仓库内的脚本：.ps1 -> pwsh、.cmd/.bat -> cmd、.py -> python。 */
 function runProjectScript(cfg, scriptPath, args, options = {}) {
+  if (options.sandbox !== true) {
+    // 【信任门】沙箱之外的脚本，先与工作区外的哈希清单核对；不符即拒绝（fail-closed）。
+    // 沙箱化的调用（run/exec/docs/agents）不走这里 —— 它们本来就跑在沙箱里，随便改无所谓。
+    const verdict = trustVerdict(cfg, scriptPath);
+    if (!verdict.ok) {
+      return Promise.resolve({
+        ok: false,
+        exitCode: null,
+        timedOut: false,
+        stdout: '',
+        stderr: '',
+        durationMs: 0,
+        spawnError: trustRefusal(cfg, scriptPath),
+      });
+    }
+  }
   if (options.sandbox === true) {
     return runSandboxedCommand(buildCommandLine(scriptPath, args), {
       cwd: options.cwd ?? cfg.repo,
@@ -1417,14 +1573,29 @@ async function opSerial(cfg, args = {}, ctx = {}) {
   // ⇒ 默认自己给一个 %TEMP% 下的文件，保证读到的字节一定能看见。
   let outFile = '';
   let autoOutFile = false;
+  let fencedNote = '';
   if (args.list !== true) {
     if (args.outFile) {
-      outFile = String(args.outFile);
+      // 🚨 红队 2026-10-07【唯一确认的突破】就出在这里：原先是 `outFile = String(args.outFile)` ——
+      //    绝对路径原样使用，而 pico_serial 本身【豁免沙箱】（Host 侧直接 spawn serial.ps1）
+      //    ⇒ 只要有任意一个能打开的串口，就能往窗口之外写文件（实测：往桌面根写了 258 B）。
+      //    修法：与 pico_temp 对齐，【无条件】围栏 —— 只认 %TEMP% 之内，越界一律压回。
+      const raw = String(args.outFile);
+      const asked = path.isAbsolute(raw) ? path.normalize(raw) : safeTempPath(cfg, raw);
+      const rootNorm = path.resolve(cfg.tempRoot).toLowerCase().replace(/[\\/]+$/, '');
+      const askedNorm = path.resolve(asked).toLowerCase();
+      const insideTemp = askedNorm === rootNorm || askedNorm.startsWith(`${rootNorm}${path.sep}`);
+      if (!insideTemp) {
+        const fenced = path.join(cfg.tempRoot, path.basename(asked) || `picophone_serial_${stamp()}.txt`);
+        fencedNote = `⚠️ outFile 越出 %TEMP%（请求 ${raw}）⇒ 已压回 ${fenced}（pico_serial 一律只落 %TEMP%）`;
+        outFile = fenced;
+      } else {
+        outFile = asked;
+      }
     } else {
       outFile = path.join(cfg.tempRoot, `picophone_serial_${stamp()}.txt`);
       autoOutFile = true;
     }
-    if (!path.isAbsolute(outFile)) outFile = safeTempPath(cfg, outFile);
     scriptArgs.push('-OutFile', outFile);
   }
 
@@ -1442,6 +1613,7 @@ async function opSerial(cfg, args = {}, ctx = {}) {
       extra['落盘'] = outFile;
       extra['读到的内容'] = existsSync(outFile) ? `\n${tailFile(outFile, 120, cfg)}` : '(没有落盘文件)';
     }
+    if (fencedNote) extra['围栏'] = fencedNote;
     return { ok: res.ok, exitCode: res.exitCode, text: describeRun(label, res, cfg, extra), json: { serial: { label, outFile, ok: res.ok } } };
   } finally {
     releaseRigLock(lock);
@@ -1836,7 +2008,7 @@ function buildToolDefinitions(cfg) {
           seconds: { type: 'number', description: 'Capture window, default 5 s.' },
           send: { type: 'string', description: 'Text written after opening. The probe backdoor needs a CR terminator.' },
           escapes: { type: 'boolean', description: 'Interpret send as a PowerShell escape sequence, so `` `r `` becomes CR.' },
-          outFile: { type: 'string', description: 'Where to save the capture; a relative path resolves under %TEMP%. Defaults to a timestamped file in %TEMP%, whose contents are echoed back either way.' },
+          outFile: { type: 'string', description: 'Where to save the capture. Always lands under %TEMP%: a relative path resolves there, and an absolute path outside it is re-fenced into it (reported as 围栏). Defaults to a timestamped file in %TEMP%, whose contents are echoed back either way.' },
           list: { type: 'boolean', description: 'Only enumerate ports and their VID/PID.' },
           timeoutMs: { type: 'number', description: 'Hard timeout, default 120000 ms.' },
         },
@@ -2005,6 +2177,9 @@ async function dispatchCommand(cfg, line, ctx = {}) {
             probeTarget: flags.get('target'),
           }, ctx),
         );
+      }
+      case 'trust': {
+        return await opTrust(cfg, { action: (tail[0] ?? 'list').toLowerCase(), name: tail[1] ?? '' });
       }
       case 'lock': {
         const file = lockFilePath(cfg);
