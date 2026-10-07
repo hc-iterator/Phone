@@ -69,6 +69,10 @@ const DEFAULTS = {
   sessionOpenTimeoutMs: 20000,
   // 自动落盘的串口抓包最多留几份（只删 picophone_serial_*.txt 这一种）
   serialKeep: 20,
+  // git over HTTPS 在沙箱下的两个前提（不是"开口子"，是把信任与凭据变成文件）
+  gitSslCa: null,           // 默认 <root>\dsh-plugins\.certs\watt-ca.pem（本机代理 Watt Toolkit 的 CA）
+  gitTokenFile: null,       // 默认 $DSH_HOME\.git-token（一行：user:token 或裸 token）
+  gitCredentialsFile: null, // 默认 $DSH_HOME\.git-credentials（备用重试路径）
   // BOOTSEL 盘身份（#6）：DUT 与探针的引导盘长得几乎一样，写错就是烧错板
   boardIds: { dut: 'RP2350', probe: 'RPI-RP2', sampler: 'RPI-RP2' },
   devices: {
@@ -167,6 +171,10 @@ function resolveConfig(raw) {
   cfg.allowExec = Array.isArray(cfg.allowExec) ? cfg.allowExec.map((s) => String(s).toLowerCase()) : DEFAULTS.allowExec;
   const extra = Array.isArray(cfg.extraPath) ? cfg.extraPath.map((s) => String(s)) : [];
   toolPathPrefix = [...extra, ...discoverToolDirs(cfg)].join(path.delimiter);
+  const dshHome = process.env.DSH_HOME || path.join(process.env.USERPROFILE || '', '.dsh');
+  cfg.gitSslCa = cfg.gitSslCa ?? path.join(cfg.root, 'dsh-plugins', '.certs', 'watt-ca.pem');
+  cfg.gitTokenFile = cfg.gitTokenFile ?? path.join(dshHome, '.git-token');
+  cfg.gitCredentialsFile = cfg.gitCredentialsFile ?? path.join(dshHome, '.git-credentials');
   return cfg;
 }
 
@@ -279,14 +287,18 @@ async function runSandboxedCommand(command, options = {}) {
     };
   }
   try {
-    // ⚠️ 沙箱路径【必须自己注入 PATH】：实测走 ctx.shell 时 `Get-Command ninja` / `arm-none-eabi-gcc` 都是空，
-    //    因为 ctx.shell 用的是它自己的环境（系统 PATH），不是我们给子进程拼的那个前缀。
-    const withPath =
-      toolPathPrefix && !/^\s*\$env:PATH\s*=/.test(command)
-        ? `$env:PATH = ${quoteArg(`${toolPathPrefix}${path.delimiter}`)} + $env:PATH; ${command}`
-        : command;
+    // ⚠️ 沙箱路径【必须自己注入环境】—— 实测走 ctx.shell 时：
+    //    ① `Get-Command ninja` / `arm-none-eabi-gcc` 都是空（它用系统 PATH，不是我们给子进程拼的前缀）；
+    //    ② 连 `$env:DSH_HOME` 都没有 ⇒ 依赖它的脚本（如 tools\clear_rig_lock.ps1）会看错地方、报假 FREE。
+    const envPrefix = [];
+    if (toolPathPrefix && !/^\s*\$env:PATH\s*=/.test(command)) {
+      envPrefix.push(`$env:PATH = ${quoteAlways(`${toolPathPrefix}${path.delimiter}`)} + $env:PATH;`);
+    }
+    if (process.env.DSH_HOME) envPrefix.push(`$env:DSH_HOME = ${quoteAlways(process.env.DSH_HOME)};`);
+    if (process.env.DSH_PROFILE) envPrefix.push(`$env:DSH_PROFILE = ${quoteAlways(process.env.DSH_PROFILE)};`);
+    const withEnv = envPrefix.length > 0 ? `${envPrefix.join(' ')} ${command}` : command;
     const spec = shell.resolve({
-      command: withPath,
+      command: withEnv,
       workdir: options.cwd ?? sandboxContext.workspaceRoot,
       timeoutMs: options.timeoutMs ?? DEFAULTS.shortTimeoutMs,
       ...(options.stdin === undefined ? {} : { stdin: options.stdin }),
@@ -325,6 +337,15 @@ function quoteArg(value) {
   if (text === '') return "''";
   if (!/[\s"'`$&|<>();,{}\[\]]/.test(text)) return text;
   return `'${text.replace(/'/g, "''")}'`;
+}
+
+/**
+ * 【强制】单引号 —— 专给"环境变量赋值"用。
+ * 实测教训：`$env:DSH_HOME = C:\固态盘秘钥\.dsh;` 这种裸词赋值会被 PowerShell **当成命令**去执行
+ * （报 "not recognized as a name of a cmdlet"），变量根本没赋上。引用成 'C:\...' 才稳。
+ */
+function quoteAlways(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
 }
 
 /**
@@ -1533,6 +1554,39 @@ async function opTemp(cfg, args = {}) {
   return { ok: false, exitCode: null, text: `未知 op: ${op}` };
 }
 
+/**
+ * git over HTTPS 在沙箱下的两个前提（都不是"开口子"，是把信任与凭据变成【文件】）：
+ *   · TLS 信任：本机代理（Watt Toolkit）的中间人 CA 导出成工作区里的 PEM ⇒ 沙箱读得到
+ *   · 凭据：Git 默认助手要 spawn sh.exe/bash.exe ⇒ 要建命名管道 ⇒ 被沙箱拒（Win32 error 5）
+ *           ⇒ 主路用 extraHeader（令牌不落盘），失败时**重试** git 内建的 store 助手（读一个文件）。
+ * 返回 null = 这条路当前不可用（文件不存在）。
+ */
+function gitAuthArgs(cfg, kind) {
+  const out = [];
+  if (cfg.gitSslCa && existsSync(cfg.gitSslCa)) {
+    out.push('-c', 'http.sslBackend=openssl', '-c', `http.sslCAInfo=${cfg.gitSslCa}`);
+  }
+  if (kind === 'header') {
+    if (!cfg.gitTokenFile || !existsSync(cfg.gitTokenFile)) return null;
+    let raw = '';
+    try {
+      raw = readFileSync(cfg.gitTokenFile, 'utf8').trim();
+    } catch {
+      return null;
+    }
+    if (raw === '') return null;
+    const pair = raw.includes(':') ? raw : `x-access-token:${raw}`;
+    out.push('-c', `http.extraHeader=Authorization: Basic ${Buffer.from(pair, 'utf8').toString('base64')}`);
+    return out;
+  }
+  if (kind === 'store') {
+    if (!cfg.gitCredentialsFile || !existsSync(cfg.gitCredentialsFile)) return null;
+    out.push('-c', `credential.helper=store --file=${cfg.gitCredentialsFile}`);
+    return out;
+  }
+  return out.length > 0 ? out : null;
+}
+
 async function opGit(cfg, args = {}) {
   const dir = resolveRepoArg(cfg, args.repo);
   const list = Array.isArray(args.args) ? args.args.map((s) => String(s)) : [];
@@ -1547,8 +1601,27 @@ async function opGit(cfg, args = {}) {
     };
   }
   const timeoutMs = Number.isFinite(args.timeoutMs) ? args.timeoutMs : 120000;
-  const res = await runProcess('git', [...gitArgsFor(cfg, dir), ...list], { cwd: dir, timeoutMs, sandbox: true });
-  return { ok: res.ok, exitCode: res.exitCode, text: describeRun(`git -C ${dir} ${list.join(' ')}`, res, cfg) };
+  const netVerb = ['push', 'fetch', 'pull', 'ls-remote', 'clone'].includes(verb);
+  const primary = gitAuthArgs(cfg, 'header');
+  const retry = netVerb ? gitAuthArgs(cfg, 'store') : null;
+  const label = `git -C ${dir} ${list.join(' ')}`;
+  const res = await runProcess('git', [...gitArgsFor(cfg, dir), ...(primary ?? []), ...list], { cwd: dir, timeoutMs, sandbox: true });
+  if (!res.ok && retry) {
+    const first = describeRun(`${label} [主路 extraHeader 失败]`, res, cfg);
+    const res2 = await runProcess('git', [...gitArgsFor(cfg, dir), ...retry, ...list], { cwd: dir, timeoutMs, sandbox: true });
+    return {
+      ok: res2.ok,
+      exitCode: res2.exitCode,
+      text: `${first}\n\n== 错误重试路径：改走 credential.helper=store（读 ${cfg.gitCredentialsFile}）==\n${describeRun(label, res2, cfg)}`,
+      json: { git: { verb, attempts: ['extraHeader', 'store'], ok: res2.ok } },
+    };
+  }
+  return {
+    ok: res.ok,
+    exitCode: res.exitCode,
+    text: `${describeRun(label, res, cfg)}\n（凭据路径：${primary ? 'extraHeader 主路' : '未注入凭据'}）`,
+    json: { git: { verb, attempts: [primary ? 'extraHeader' : 'none'], ok: res.ok } },
+  };
 }
 
 const SCRIPT_EXT = new Set(['.ps1', '.cmd', '.bat', '.py']);
