@@ -362,6 +362,14 @@ function ensureRuntimeTree(cfg) {
   if (key === runtimeTreeKey && existsSync(path.join(rtRepo, 'tools'))) return rtRepo;
   mkdirSync(rtRepo, { recursive: true });
   copyTree(path.join(cfg.repo, 'tools'), path.join(rtRepo, 'tools'));
+  // 插件自己的会话 worker【不在仓库里】：按同一套映射单独抄一份
+  // （否则 pico_console 会报"运行本不可用" —— 2026-10-07 实测踩到）
+  const workerSrc = path.join(PACKAGE_DIR, 'serial-session.ps1');
+  if (existsSync(workerSrc)) {
+    const workerDst = runtimePath(cfg, workerSrc);
+    mkdirSync(path.dirname(workerDst), { recursive: true });
+    writeFileSync(workerDst, readFileSync(workerSrc));
+  }
   runtimeTreeKey = key;
   return rtRepo;
 }
@@ -370,7 +378,7 @@ function ensureRuntimeTree(cfg) {
 function resolveRuntimeScript(cfg, file) {
   const rtRepo = ensureRuntimeTree(cfg);
   if (!rtRepo) return null;
-  const dst = path.join(rtRepo, path.relative(path.resolve(cfg.repo), path.resolve(file)));
+  const dst = runtimePath(cfg, file); // 与 runtimePath 同一套映射（相对 <工作区父目录>）
   return existsSync(dst) ? dst : null;
 }
 
