@@ -2062,8 +2062,91 @@ async function opAgents(cfg, args = {}) {
   return { ok: false, exitCode: null, text: `未知 action: ${action}` };
 }
 
-const OPS = {
-  status: opStatus,
+/**
+ * pico_amend：AI 申请修改【受管脚本】（＝跑在沙箱外的那批）。
+ * 流程（用户 2026-10-07 裁定）：取 diff ⇒ 委派【一次性审判员】⇒
+ *   · 合理 ⇒ 登记新指纹 + 同步进运行本（生效）
+ *   · 否则 ⇒ 用运行本覆盖工作区里被改过的那份（回滚）
+ * 审判员只读 diff、只出结构化裁决；判完立刻 dispose。拿不到 subagents/parent ⇒ 什么都不做。
+ */
+function managedChangedFiles(cfg) {
+  return trustedScripts(cfg).filter((rel) => !trustVerdict(cfg, path.join(cfg.root, rel)).ok);
+}
+
+async function opAmend(cfg, args = {}) {
+  const rels = (Array.isArray(args.paths) && args.paths.length > 0 ? args.paths.map((s) => String(s)) : managedChangedFiles(cfg)).filter(Boolean);
+  if (rels.length === 0) {
+    return { ok: true, exitCode: 0, text: '受管脚本当前全部与登记指纹一致 —— 没有需要裁决的改动。' };
+  }
+  const repoRel = path.relative(cfg.root, cfg.repo).split(path.sep).join('/');
+  const diff = await runProcess('git', ['-C', cfg.repo, 'diff', '--', ...rels.map((r) => r.split('/').slice(1).join('/'))], { cwd: cfg.repo, timeoutMs: 60000, sandbox: true });
+  const svc = cfg.subagents;
+  const parent = cfg.currentAgent;
+  if (!svc || !parent) {
+    return { ok: false, exitCode: null, text: `⚠️ 无法委派审判员（subagents=${Boolean(svc)} / parent=${Boolean(parent)}）⇒ 【不做任何改动】，请人工处理。` };
+  }
+  const provider = (svc.list?.() ?? [])[0];
+  if (!provider) return { ok: false, exitCode: null, text: '⚠️ 没有可用的 subagent provider ⇒ 【不做任何改动】。' };
+  const prompt = [
+    '你是一次性审判员：判断"受管脚本"的这次改动是否合理。只依据 diff，不要臆测。',
+    '背景：这些脚本跑在 DSH 沙箱【之外】（要碰设备 / 要跑 cmake），所以其内容必须是人工认可过的版本；',
+    'AI 改完必须经你裁决才能生效。',
+    '判"可疑/有害"的例子：往窗口外写文件、联网外传、读取凭据或令牌、无注释且与理由不符、',
+    '与声明理由无关的大段重写、混淆或编码技巧、削弱既有校验。',
+    `AI 给的理由：${String(args.why ?? '(未给)')}`,
+    `涉及文件：${rels.join(', ')}`,
+    'diff：',
+    (diff.stdout || '(空)').slice(0, 20000),
+  ].join('\n');
+  let run;
+  try {
+    run = await svc.start(provider, {
+      label: 'trust-judge',
+      prompt: [{ type: 'text', text: prompt }],
+      parent,
+      signal: new AbortController().signal,
+      maxDepth: 0,
+      outputSchema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['verdict', 'reasons'],
+        properties: {
+          verdict: { type: 'string', enum: ['合理', '可疑', '有害'] },
+          reasons: { type: 'array', items: { type: 'string' } },
+        },
+      },
+    });
+  } catch (error) {
+    return { ok: false, exitCode: null, text: `⚠️ 委派审判员失败：${error && error.message ? error.message : error} ⇒ 【不做任何改动】。` };
+  }
+  let verdict = '';
+  let reasons = [];
+  try {
+    const result = await run.result;
+    verdict = String(result?.structured?.verdict ?? '');
+    reasons = Array.isArray(result?.structured?.reasons) ? result.structured.reasons : [];
+  } finally {
+    try { await run.dispose(); } catch { /* 一次性，判完就放 */ }
+  }
+  const lines = [`审判员裁决：${verdict || '(无结构化输出)'}`, ...reasons.map((r) => `  · ${r}`), ''];
+  if (verdict === '合理') {
+    for (const rel of rels) registerTrust(cfg, path.join(cfg.root, rel));
+    runtimeTreeKey = '';
+    lines.push(ensureRuntimeTree(cfg) ? `✅ 已登记并同步进运行本：${rels.join(', ')}` : '✗ 裁决合理，但运行本刷新失败（请查指纹）');
+  } else {
+    for (const rel of rels) {
+      const wsPath = path.join(cfg.root, rel);
+      const rtPath = path.join(runtimeRoot(cfg), rel);
+      try {
+        if (existsSync(rtPath)) { writeFileSync(wsPath, readFileSync(rtPath)); lines.push(`↩︎ 已用运行本覆盖：${rel}`); }
+        else lines.push(`· 运行本里没有 ${rel}（新文件？）⇒ 未覆盖，请人工处理`);
+      } catch (error) { lines.push(`✗ 覆盖 ${rel} 失败：${error && error.message ? error.message : error}`); }
+    }
+  }
+  return { ok: verdict === '合理', exitCode: null, text: lines.join('\n') };
+}
+
+const OPS = {  status: opStatus,
   build: opBuild,
   flash: opFlash,
   serial: opSerial,
@@ -2076,6 +2159,7 @@ const OPS = {
   exec: opExec,
   docs: opDocs,
   agents: opAgents,
+  amend: opAmend,
 };
 
 // ---------------------------------------------------------------- 工具定义
@@ -2524,7 +2608,23 @@ export async function apply(ctx, rawConfig) {
   ctx.inject(['approval'], (approvalCtx) => {
     cfg.approval = approvalCtx.approval;
   });
-  const definitions = buildToolDefinitions(cfg);
+  const definitions = [
+    ...buildToolDefinitions(cfg),
+    tool(
+      cfg,
+      'amend',
+      '请求修改【受管脚本】(= 跑在沙箱外的那批)。插件把 diff 交给一次性审判员裁决：合理 ⇒ 登记新指纹并同步进运行本(生效)；否则 ⇒ 用运行本覆盖你的改动(回滚)。',
+      {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          paths: { type: 'array', items: { type: 'string' }, description: '受管脚本路径(相对工作区，如 DeepSeekCode/tools/build.cmd)；缺省 = 自动找出与登记指纹不符的那些' },
+          why: { type: 'string', description: '为什么要改(审判员会看)' },
+        },
+      },
+      'amend',
+    ),
+  ];
 
   for (const definition of definitions) {
     // 【审批用】每次工具调用都记下它的 exec 上下文 —— `approval.request` 必须带 agent 才发得出去。
