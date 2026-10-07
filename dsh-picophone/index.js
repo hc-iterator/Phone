@@ -2441,6 +2441,16 @@ export async function apply(ctx, rawConfig) {
   const definitions = buildToolDefinitions(cfg);
 
   for (const definition of definitions) {
+    // 【审批用】每次工具调用都记下它的 exec 上下文 —— `approval.request` 必须带 agent 才发得出去。
+    // 只记不拦：绝不改参数、绝不吞异常；拦/放仍由信任门自己决定。
+    // 拿不到 agent 时 cfg.currentAgent 保持原样（最终为 undefined）⇒ 审批报 'unavailable' ⇒ 拒绝（fail-closed）。
+    const inner = definition.execute;
+    if (typeof inner === 'function') {
+      definition.execute = async (args, exec) => {
+        if (exec && exec.agent) cfg.currentAgent = exec.agent;
+        return inner.call(definition, args, exec);
+      };
+    }
     ctx.effect(() => ctx.tools.register(definition), `dsh-picophone: ${definition.name}`);
   }
 
