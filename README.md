@@ -106,3 +106,16 @@ git -C ..\DeepSeekCode worktree list     # 能看到两个工作树
 
 - 报 `审批服务不可用（ctx.approval 没拿到）` ⇒ 审批服务没注入（profile 里缺 `approval`）。
 - 报 `拿不到发起审批所需的 agent` ⇒ 插件拿不到发起者身份 ⇒ **保持拒绝**（不会误放行），此时才需要回到 `/pico trust`。
+
+### ✅ 已实测闭环（2026-10-07）
+
+改 `serial-session.ps1` 一行注释 ⇒ 指纹不符 ⇒ 调 `pico_console open` ⇒ **审批框弹出** ⇒
+点【拒绝】⇒ 输出 `审批结果：rejected`，**拒绝生效**（无崩溃、无漏锁）。
+随后按备份把 worker **整文件恢复**到登记值 ⇒ 串口/console 路径无需再登记即恢复正常。
+
+**教训 1（改受管脚本）**：不要用"文本替换"小修小补 —— `Add-Content`/替换会改**编码与行尾**，
+哈希就变成 `61cd0560…` 这种对不上的值。要么**整文件恢复**（用 `_backups\` 里的备份），要么**重新登记**。
+
+**教训 2（沙箱里推代码）**：用 `pico_git`（它自动带 openssl + 工作区里的 CA + 令牌 header）；
+**裸 `git push` 在沙箱里必失败** —— schannel 要用户加密存储（`SEC_E_NO_CREDENTIALS`），
+`sh.exe` 要命名管道（`couldn't create signal pipe`）。
