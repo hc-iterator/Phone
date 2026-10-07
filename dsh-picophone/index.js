@@ -366,7 +366,15 @@ function registerTrust(cfg, file) {
 async function askTrustApproval(cfg, file, opts = {}) {
   const service = cfg.approval;
   const verdict = trustVerdict(cfg, file);
-  const sid = cfg.pluginCtx ? String(currentSessionId(cfg.pluginCtx) ?? '') : '';
+  // ⚠️ 插件级 ctx **没有**会话上下文：直接 currentSessionId(cfg.pluginCtx) 会抛
+  //    `cannot get property "sessionId" without inject`（2026-10-07 实测，且连带漏了一把台架锁）。
+  //    ⇒ 包起来；拿不到身份就 fail-closed（拒绝），绝不误放行。
+  let sid = '';
+  try {
+    sid = cfg.pluginCtx ? String(currentSessionId(cfg.pluginCtx) ?? '') : '';
+  } catch {
+    sid = '';
+  }
   const agent = cfg.currentAgent ?? (/^[\w.:-]{8,}$/.test(sid) && !sid.startsWith('(') ? { id: sid } : undefined);
   if (!service || typeof service.request !== 'function') return { outcome: 'unavailable', verdict, detail: '审批服务不可用（ctx.approval 没拿到）' };
   if (!agent) return { outcome: 'unavailable', verdict, detail: '拿不到发起审批所需的 agent（这条链没接上 ⇒ 保持拒绝）' };
@@ -1188,9 +1196,17 @@ async function sessionOpen(cfg, args, ctx = {}) {
   // 2026-10-07：它先前是漏的 —— 往 serial-session.ps1 里塞点东西再 pico_console open 就是沙箱外任意代码。
   let workerTrust = trustVerdict(cfg, worker);
   if (!workerTrust.ok) {
-    const ask = await askTrustApproval(cfg, worker, { toolName: 'pico_console' });
-    if (ask.outcome === 'allowed-once' && registerTrust(cfg, worker)) workerTrust = trustVerdict(cfg, worker);
-    else {
+    // ⚠️ 这里必须 try/catch：锁已经拿在手里了，审批若抛异常而直接冒泡，就会【漏锁】
+    //    （2026-10-07 实测漏了一把，得等 10 分钟陈锁判据或人手动清）。
+    let ask;
+    try {
+      ask = await askTrustApproval(cfg, worker, { toolName: 'pico_console' });
+    } catch (error) {
+      ask = { outcome: 'unavailable', detail: `审批异常: ${error && error.message ? error.message : error}` };
+    }
+    if (ask.outcome === 'allowed-once' && registerTrust(cfg, worker)) {
+      workerTrust = trustVerdict(cfg, worker);
+    } else {
       releaseRigLock(lock);
       return { ok: false, text: `${trustRefusal(cfg, worker)}\n\n（审批结果：${ask.outcome}${ask.detail ? ` — ${ask.detail}` : ''}）` };
     }

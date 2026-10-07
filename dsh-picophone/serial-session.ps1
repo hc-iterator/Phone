@@ -256,3 +256,5 @@ if ($null -ne $script:sp) {
     try { if ($script:sp.IsOpen) { $script:sp.Close() } } catch { }
     try { $script:sp.Dispose() } catch { }
 }
+
+# [2026-10-07 工具线] 这行是为了验证【信任门 + 审批】链路而加的：指纹一变，pico_console 就应先弹审批。
