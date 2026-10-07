@@ -370,6 +370,25 @@ function ensureRuntimeTree(cfg) {
     mkdirSync(path.dirname(workerDst), { recursive: true });
     writeFileSync(workerDst, readFileSync(workerSrc));
   }
+  // 给"运行本"留一张说明：这里才是真正被执行的那份；tools\ 只是源码（用户 2026-10-07 要求标记）
+  try {
+    writeFileSync(
+      path.join(runtimeRoot(cfg), 'README-这是运行本.md'),
+      [
+        '# 这是运行本（Pico 文件夹内）',
+        '',
+        'pico_* 工具【只执行这里的这一份】。',
+        '',
+        '- `DeepSeekCode/tools/` = 源码 / **不运行的副本**：AI 可以改它，但改了对执行【没有影响】。',
+        '- 想让改动生效 ⇒ 调 `pico_amend`（一次性审判员裁决）：合理 ⇒ 同步到这里；不合理 ⇒ 用这里的版本覆盖回去。',
+        '- 旁边就是信任清单 `trusted-scripts.json`，同样在工作区之外（沙箱里的 Agent 两样都写不到）。',
+        '',
+        '_由 dsh-picophone 插件自动生成，别手改（下次刷新会覆盖）。_',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+  } catch { /* 写不了说明不影响功能 */ }
   runtimeTreeKey = key;
   return rtRepo;
 }

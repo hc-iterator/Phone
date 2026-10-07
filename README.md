@@ -119,3 +119,43 @@ git -C ..\DeepSeekCode worktree list     # 能看到两个工作树
 **教训 2（沙箱里推代码）**：用 `pico_git`（它自动带 openssl + 工作区里的 CA + 令牌 header）；
 **裸 `git push` 在沙箱里必失败** —— schannel 要用户加密存储（`SEC_E_NO_CREDENTIALS`），
 `sh.exe` 要命名管道（`couldn't create signal pipe`）。
+
+## 📦 运行本（Pico 文件夹内）与 `pico_amend`（2026-10-07）
+
+**为什么要这样**：豁免沙箱的那些 op（build / serial / console / flash / swd / procs）跑的都是**工作区里的脚本**，
+而工作区正是被沙箱关住的 Agent **唯一能写的地方** ⇒ 改脚本 = 窗外任意代码执行（红队审计 ①②③）。
+
+**现在**：
+
+```
+DeepSeekCode/tools/…                        ← 源码 / 不运行的副本（AI 可写，但对执行无影响）
+_picophone_trust/
+    ├─ trusted-scripts.json                 ← 信任清单（受管脚本的 SHA256）
+    └─ runtime/DeepSeekCode/
+         ├─ tools/…                         ← 【运行本】整棵副本（含子脚本 ⇒ 缺口②消失）
+         ├─ src/ build/ docs/ …             ← junction 回真仓库（脚本用 %~dp0 推树时看到【真树】）
+         └─ CMakeLists.txt 等               ← 硬链接回真文件
+```
+
+- 执行**只走运行本**；运行本存在就直接用（工作区脏了也不影响台架 ✓）
+- 运行本缺文件时才谈"刷新"，且**只有全部受管指纹一致**才允许刷新
+- **改受管脚本 ⇒ 调 `pico_amend { paths, why }`**：
+  取 diff ⇒ 委派**一次性审判员**（结构化裁决 `合理/可疑/有害`，判完 `dispose`）
+  · 合理 ⇒ 登记新指纹 + 同步进运行本（生效）
+  · 否则 ⇒ 用运行本覆盖工作区被改过的那份（回滚；运行本里没有该文件时如实报告"未覆盖"）
+  · 拿不到 subagents / 发起者 ⇒ **什么都不做**（fail-safe）
+
+### 实测（2026-10-07，花了 1 次模型调用）
+
+- promote 分支落点核实 ✓：工作区 `55fc7fa9…` = 新登记 `55fc7fa9…`，运行本与工作区**逐字节相同**
+- 审判员**揪出一个真 bug**：`pico_amend` 原先写死 `git -C <cfg.repo>` 取 diff，而 `dsh-plugins/` 下的受管脚本
+  属于**另一个 worktree** ⇒ git 对不匹配的 pathspec **静默返回空** ⇒ 审判员盲判 ✗
+  ⇒ 已改为**逐文件向上找最近的 `.git`、按仓库根分组取 diff**；未跟踪新文件显式提示；**空 diff 写进提示词当警告** ✓
+- `maxDepth` 必须是 `1`（子本身即 depth 1；`0` 会被拒）✓
+
+### 已知代价 / 边界
+
+- **构建会重编一次**：运行本里的源码路径变了 ⇒ cmake 重新 configure（一次性）
+- **reject 分支未专门实证**（要再花 1 次调用）；它是 promote 的镜像路径
+- 运行本里没有该文件的受管脚本（如刚新增的）被否决时**无法自动回滚** ⇒ 会如实报"未覆盖，请人工处理"
+- 日志里出现过 `%~dp0` 推树的坑：所以**运行本树必须保留 junction/硬链接骨架**（一次性由人建好）
