@@ -256,3 +256,5 @@ if ($null -ne $script:sp) {
     try { if ($script:sp.IsOpen) { $script:sp.Close() } } catch { }
     try { $script:sp.Dispose() } catch { }
 }
+
+# [2026-10-07 工具线] 本行用于实证 pico_amend：受管脚本的改动须经一次性审判员裁决才生效。

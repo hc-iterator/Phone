@@ -359,14 +359,14 @@ function ensureRuntimeTree(cfg) {
   if (!treeIsTrusted(cfg)) return null;
   const rtRepo = path.join(runtimeRoot(cfg), path.relative(path.dirname(path.resolve(cfg.repo)), path.resolve(cfg.repo)));
   const key = trustedScripts(cfg).map((rel) => sha256Of(path.join(cfg.root, rel))).join(':');
-  if (key === runtimeTreeKey && existsSync(path.join(rtRepo, 'tools'))) return rtRepo;
+  const workerSrc = path.join(PACKAGE_DIR, 'serial-session.ps1');
+  const workerDst = runtimePath(cfg, workerSrc);
+  if (key === runtimeTreeKey && existsSync(path.join(rtRepo, 'tools')) && existsSync(workerDst)) return rtRepo;
   mkdirSync(rtRepo, { recursive: true });
   copyTree(path.join(cfg.repo, 'tools'), path.join(rtRepo, 'tools'));
   // 插件自己的会话 worker【不在仓库里】：按同一套映射单独抄一份
   // （否则 pico_console 会报"运行本不可用" —— 2026-10-07 实测踩到）
-  const workerSrc = path.join(PACKAGE_DIR, 'serial-session.ps1');
   if (existsSync(workerSrc)) {
-    const workerDst = runtimePath(cfg, workerSrc);
     mkdirSync(path.dirname(workerDst), { recursive: true });
     writeFileSync(workerDst, readFileSync(workerSrc));
   }
@@ -376,9 +376,11 @@ function ensureRuntimeTree(cfg) {
 
 /** 拿"该跑的那一份"（运行本树里的同路径文件）。null = 不能跑（fail-closed）。 */
 function resolveRuntimeScript(cfg, file) {
-  const rtRepo = ensureRuntimeTree(cfg);
-  if (!rtRepo) return null;
-  const dst = runtimePath(cfg, file); // 与 runtimePath 同一套映射（相对 <工作区父目录>）
+  const dst = runtimePath(cfg, file);
+  // ⚠️ 必须【先用已存在的运行本】：工作区被改脏（比如正在等审判员裁决）是【正常状态】，
+  //    不该让全部窗外 op 一起瘫 —— 2026-10-07 实测：改一个受管脚本后连 proc_guard 都不跑了。
+  if (existsSync(dst)) return dst;
+  if (!ensureRuntimeTree(cfg)) return null;
   return existsSync(dst) ? dst : null;
 }
 
@@ -2088,7 +2090,8 @@ async function opAmend(cfg, args = {}) {
   }
   const repoRel = path.relative(cfg.root, cfg.repo).split(path.sep).join('/');
   const diff = await runProcess('git', ['-C', cfg.repo, 'diff', '--', ...rels.map((r) => r.split('/').slice(1).join('/'))], { cwd: cfg.repo, timeoutMs: 60000, sandbox: true });
-  const svc = cfg.subagents;
+  // 取服务两种方式都试：apply 时的 inject 没回调过，就在调用时 ctx.get 一次（2026-10-07 实测 inject 没拿到）
+  const svc = cfg.subagents ?? cfg.pluginCtx?.get?.('subagents');
   const parent = cfg.currentAgent;
   if (!svc || !parent) {
     return { ok: false, exitCode: null, text: `⚠️ 无法委派审判员（subagents=${Boolean(svc)} / parent=${Boolean(parent)}）⇒ 【不做任何改动】，请人工处理。` };
