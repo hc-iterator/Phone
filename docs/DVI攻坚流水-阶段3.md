@@ -1,6 +1,6 @@
 # DVI 攻坚流水 · 阶段3：2026-10-01 旧结论摘要 + 最早一批「第 29~54 轮」（倒序，含两条真根因）
 
-> **覆盖**：原 `docs\DVI攻坚流水.md` 第 1425–2064 行（§14.0 旧结论摘要整块 + 第 29~54 轮倒序史）｜原 640 行 ⇒ 成品 NNN 行
+> **覆盖**：原 `docs\DVI攻坚流水.md` 第 1425–2064 行（§14.0 旧结论摘要整块 + 第 29~54 轮倒序史）｜原 640 行 ⇒ 成品 550 行
 > **⚠️ 原文时间线是【倒序】的**（第 54 轮在最前、第 29 轮在后），且用的是当时自造的"第 N 轮"编号，跨会话不连续。**本册按【主题】重排成 4 组**，组内保持原文措辞与编号：
 > ① 旧结论摘要 / 最新状态 ② RP2350 特有真根因：GPIO 基址 + 数据脚方向 + `WRAP_TOP` ③ 帧率测量与主循环重启 ④ 已排除的歧路与 autopull 悬案。
 > **本阶段结论**（每条含判据与"为什么走到下一步"）：
@@ -75,7 +75,9 @@
 
 **唯一卡点 = 行频不够：**
 ```
-640x480p60 要行频 31.5 kHz；实测 ≈18.2k 行/s（≈34.7fps）⇒ 行频 ~18 kHz ⇒ 显示器不同步 ⇒ 黑屏 IRQ 处理器每行 ~61 µs ⇒ 上限 ~31fps；其中【守卫 2000 次循环 ≈31.7 µs】占一半（很可能是我自己的瓶颈） ⇒ 假设：守卫→100，行率应显著上升
+640x480p60 要行频 31.5 kHz；实测 ≈18.2k 行/s（≈34.7fps）⇒ 行频 ~18 kHz ⇒ 显示器不同步 ⇒ 黑屏
+IRQ 处理器每行 ~61 µs ⇒ 上限 ~31fps；其中【守卫 2000 次循环 ≈31.7 µs】占一半（很可能是我自己的瓶颈）
+⇒ 假设：守卫→100，行率应显著上升
 ```
 **⇒ 详细交接在 `docs\历史.md` 末尾（含怎么烧、怎么量、六个坑、明天顺序）。**
 
@@ -105,14 +107,16 @@
 
 **② ★★★ 数据脚方向从来没被设成输出** —— `frank_serialiser.pio` 里原文：
 ```c
-pio_sm_set_pins_with_mask(pio, sm, 2u << data_pins, 3u << data_pins); pio_sm_set_pindirs_with_mask(pio, sm, ~0u, 3u << data_pins);
+pio_sm_set_pins_with_mask(pio, sm, 2u << data_pins, 3u << data_pins);
+pio_sm_set_pindirs_with_mask(pio, sm, ~0u, 3u << data_pins);
 ```
 **`data_pins` = 32/34/36 ⇒ `3u << 32/34/36` 是 32 位移位【溢出】⇒ 掩码 = 0 ⇒ 这两句什么都没做** ⇒ **6 根数据脚一直是【输入】⇒ side-set 把 TMDS 写上去也出不了引脚。**
 修法：换成 64 位安全的 `pio_sm_set_consecutive_pindirs` + `pio_sm_set_pins_with_mask64`，并放到 `pio_sm_init` 之后。
 
 ### 铁证（同一条探针、同一采样方法；探针自检=40 万次变化，证明方法有效）
 ```
-修复前  CHANGES_32..39 =      0      0     0     0     0     0     0     0 修复后  CHANGES_32..39 =  91064  93090    16 61632 257662 255998 1143044 1077938
+修复前  CHANGES_32..39 =      0      0     0     0     0     0     0     0
+修复后  CHANGES_32..39 =  91064  93090    16 61632 257662 255998 1143044 1077938
                          ↑32    ↑33   ↑34  ↑35   ↑36    ↑37    ↑38(时钟) ↑39
 ```
 **⇒ 8 根引脚【全部】在翻转 ⇒ DVI 输出（数据 + 时钟）已经完整。**
@@ -262,7 +266,10 @@ pio_sm_set_pins_with_mask(pio, sm, 2u << data_pins, 3u << data_pins); pio_sm_set
 
 **结果**：
 ```
-FRAMES = 0   HB-LINES = 1 SM0 ADDR = 0x09  ← 【新程序确实烧进去了】（旧程序只会在 0/1） SM0 EXECCTRL = 0x0001f000  ← 仍是复位值（WRAP_TOP=31） SM0 PINCTRL  = 0x14000000  ← 仍是复位值（OUT_COUNT=0）
+FRAMES = 0   HB-LINES = 1
+SM0 ADDR = 0x09  ← 【新程序确实烧进去了】（旧程序只会在 0/1）
+SM0 EXECCTRL = 0x0001f000  ← 仍是复位值（WRAP_TOP=31）
+SM0 PINCTRL  = 0x14000000  ← 仍是复位值（OUT_COUNT=0）
 ```
 
 **✅ 已验证不是构建链的问题**：生成的头文件里**确实有**我那两行（`frank_serialiser.pio.h` 第 109 行 `sm_config_set_wrap(&c, offset + 0, offset + 1)`、第 112 行 `sm_config_set_out_pins(&c, data_pins, 1)`，时间 22:23:05 晚于我改 .pio 的 22:22:58）。
@@ -296,7 +303,12 @@ FRAMES = 0   HB-LINES = 1 SM0 ADDR = 0x09  ← 【新程序确实烧进去了】
 
 **烧 `26a53a9` 后实测（10 秒）**：
 ```
-FRAMES = 616 / 10s  ⇒ 【61.6 fps】      （设计目标 60、用户一阶段门槛 30） SM0: EXECCTRL = 0x00001000   ← wrap 从 [0,31] 变 [0,1] ✓ PINCTRL  = 0x40005000   ← 引脚基址终于落位 ✓ ADDR = 1, INSTR = 0x000068a1   ← 停在程序【内部】(out pc,1 side 0b01) ✓ SM1: PINCTRL = 0x40004800    SM2: PINCTRL = 0x40004000   ← 每条 lane 各自对上 ✓ PIO0 FSTAT = 0x0f000f07（TXEMPTY=0xf，正常 pull）
+FRAMES = 616 / 10s  ⇒ 【61.6 fps】      （设计目标 60、用户一阶段门槛 30）
+SM0: EXECCTRL = 0x00001000   ← wrap 从 [0,31] 变 [0,1] ✓
+     PINCTRL  = 0x40005000   ← 引脚基址终于落位 ✓
+     ADDR = 1, INSTR = 0x000068a1   ← 停在程序【内部】(out pc,1 side 0b01) ✓
+SM1: PINCTRL = 0x40004800    SM2: PINCTRL = 0x40004000   ← 每条 lane 各自对上 ✓
+PIO0 FSTAT = 0x0f000f07（TXEMPTY=0xf，正常 pull）
 ```
 
 ### 🔑 一个缺失的调用，同时造成了【五个症状】
@@ -348,9 +360,11 @@ FRAMES = 616 / 10s  ⇒ 【61.6 fps】      （设计目标 60、用户一阶段
 ## ⚠️⚠️ 第 52 轮更正：**60 fps 没有持续住 —— 60 秒长跑只有 24.85 fps**
 
 ```
-T0: frame=1222  irq=641418   tcr_timeouts=2 T1: frame=2713  irq=1423812  tcr_timeouts=2     （60 秒后）
+T0: frame=1222  irq=641418   tcr_timeouts=2
+T1: frame=2713  irq=1423812  tcr_timeouts=2     （60 秒后）
 
-Δframe = 1491 / 60s  ⇒ 【24.85 fps】 Δirq   = 782394 / 60s ⇒ 13,040 行/秒   ÷ 24.85 = 【524.7 行/帧】✓
+Δframe = 1491 / 60s  ⇒ 【24.85 fps】
+Δirq   = 782394 / 60s ⇒ 13,040 行/秒   ÷ 24.85 = 【524.7 行/帧】✓
 ```
 
 **⇒ 而第 51 轮那个 10 秒窗口给出 60.6 fps（`Δirq` 31,851/s）** **⇒ 【帧率随时间波动】，不是稳定 60。** **⇒ `Δirq` 是从不清零的普通计数器，它也给出 13,040 行/秒 ⇒ 这不是计数器假象，引擎在这 60 秒里真的只出了 ~25 fps。**
@@ -375,14 +389,19 @@ T0: frame=1222  irq=641418   tcr_timeouts=2 T1: frame=2713  irq=1423812  tcr_tim
 **测法（重要：必须在一个 openocd 会话内用 `sleep` 做两次采样，重复连接不稳）**： `init; halt; mdw×3; resume; sleep 10000; halt; mdw×3; resume; shutdown`
 
 ```
-T0: frame=616   hb=4154    irq=322905 T1: frame=1222  hb=8254    irq=641418（10 秒后）
+T0: frame=616   hb=4154    irq=322905
+T1: frame=1222  hb=8254    irq=641418（10 秒后）
 
-Δ frame = 606 / 10s  ⇒ 【60.6 fps】          ← 设计目标 60 fps ✓ Δ irq   = 318513 / 10s = 31851/s 31851 ÷ 60.6 = 【525.6 IRQ/帧】     ← 正好是每帧 525 条物理行 ✓ ⇒ 【31,851 物理行/秒】，目标写的是 31,500 ⇒ 达成
+Δ frame = 606 / 10s  ⇒ 【60.6 fps】          ← 设计目标 60 fps ✓
+Δ irq   = 318513 / 10s = 31851/s
+          31851 ÷ 60.6 = 【525.6 IRQ/帧】     ← 正好是每帧 525 条物理行 ✓
+⇒ 【31,851 物理行/秒】，目标写的是 31,500 ⇒ 达成
 ```
 
 **⚠️ 小陷阱**：`dvi_frame_count` 在 `dvi_start()` 里会被**清零**，所以单次采样可能撞上重启边界而读到相同值 ⇒ **必须用差值**；而 `irq/frame` 这个比值是过硬的。
 
-**⇒ 会话起点是"卡死在 14 帧 / 1.3 fps"，现在是 60.6 fps。判据①完成。** **⇒ 只剩判据②：请用户拔插 HDMI 看屏幕（引脚映射已在第 50 轮验证对上）。**
+**⇒ 会话起点是"卡死在 14 帧 / 1.3 fps"，现在是 60.6 fps。判据①完成。**
+**⇒ 只剩判据②：请用户拔插 HDMI 看屏幕（引脚映射已在第 50 轮验证对上）。**
 
 ---
 
@@ -429,13 +448,17 @@ T0: frame=616   hb=4154    irq=322905 T1: frame=1222  hb=8254    irq=641418（10
 
 ### ⚠️ 第 36 轮更正 + 新线索（把 `FLEVEL` 按 SDK 权威布局逐字段重解）
 ```
-失败现场 FLEVEL = 0x00080808 TX0 = 8【满】  RX0 = 8   TX1 = 8【满】  TX2 = 0【空！】
+失败现场 FLEVEL = 0x00080808
+  TX0 = 8【满】  RX0 = 8   TX1 = 8【满】  TX2 = 0【空！】
 ```
 **⇒ 不是"三个都满"，而是【SM0 和 SM1 卡住、SM2 还在消费】。** **⇒ 而正常工作时（无 side-set 的 40 fps 版）`FLEVEL = 0`（三个全空，都在消费）。** **⇒ 于是谜题从"所有 SM 都停"缩小成："为什么三个跑同一个程序的 SM 会有不同命运？"** —— 这是个更有抓手的问题（下一步应逐 SM 读 `ADDR`/`INSTR`/`FSTAT` 对比，而不是笼统看 `FLEVEL`）。
 
 ### ✅ 第 37 轮：健康状态的逐 SM 参照系（跟失败变体对比用）
 ```
-健康（库原版、5 fps）：PIO0 CTRL=0x7  FSTAT=0x0f000f07  FDEBUG=0x07000000  FLEVEL=0 SM0 = SM1 = SM2 【三个完全一样】： CLKDIV=0x00010000  EXECCTRL=0x0001f000  SHIFTCTRL=0x680e0000 ADDR=0  INSTR=0x000070a1(=out pc,1 side 0b10)  PINCTRL=0x14000000
+健康（库原版、5 fps）：PIO0 CTRL=0x7  FSTAT=0x0f000f07  FDEBUG=0x07000000  FLEVEL=0
+SM0 = SM1 = SM2 【三个完全一样】：
+  CLKDIV=0x00010000  EXECCTRL=0x0001f000  SHIFTCTRL=0x680e0000
+  ADDR=0  INSTR=0x000070a1(=out pc,1 side 0b10)  PINCTRL=0x14000000
 ```
 **⇒ `FSTAT` 的 `TXEMPTY=0xf`（三个 TX FIFO 全空）+ 三个 SM 都停在 `ADDR=0`（第一条 `out`）⇒ 完全自洽：健康状态下三个 SM 都在第一条 `out` 上等 FIFO 数据，这正是 DREQ 节流设计的正常样子。**
 **⇒ 失败变体（`out pins,1`）则表现为 TX0/TX1 满、TX2 空 ⇒ 拿这张表逐项比就能看出差异。**
