@@ -2651,6 +2651,8 @@ const RIG_PROMPT = [
   '  ②像 empty.uf2 那种**不开 USB stdio 的固件不能当中转件**（烧上去既没串口也没后门）；要中转就编 backdoor_only。',
   '- **"板上现在跑的是哪一份"**：看 pico_status 的「最后烧写」（记在 debug_logs/flash_ledger.jsonl，含 uf2 的 sha256 前 16 位与源码 commit）；pico_build 会把 build_info.txt 落在产物旁。',
   '- 每个工具的参数、行为与**全部失败分支**见 DeepSeekCode\\docs\\台架接口.md；插件自述见 dsh-plugins\\dsh-picophone\\README.md。',
+  '- **子智能体（用户一提到它，回复里就必须带一句"优先复用"）**：先复用已有 Agent（看 _agents\\ 下的空间与 PicoPhone\\子Agent须知.md），**不要随手新建** ✗；',
+  '  复用前先跑 tools\\sync_agent_spaces.ps1 同步它的空间（旧空间是旧快照，不同步就会引用旧名 ✗）；确需新建时，**要写明为什么不能复用**。',
 ].join('\n');
 
 export async function apply(ctx, rawConfig) {
