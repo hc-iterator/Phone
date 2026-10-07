@@ -771,7 +771,10 @@ async function runProjectScript(cfg, scriptPath, args, options = {}) {
         spawnError: `⛔ 运行本不可用：${relToRoot(cfg, scriptPath)}\n（工作区版本与登记指纹不一致，运行本里也没有对应的一份）\n⇒ 先 /pico trust <路径> 登记，或用 pico_amend 提交改动让审判员裁决。`,
       };
     }
-    scriptPath = resolvedRuntime;
+    // ⏸ 暂不切到运行本：2026-10-07 实测——逐文件副本会让脚本以自己的位置推树
+    //   （proc_guard 打出 repo=<runtime>\DeepSeekCode），且子脚本（serial_worker.ps1）不在副本里
+    //   ⇒ build 会编译错树、serial 直接坏。等 ACL 只读（或整树 + junction）方案定稿再切。
+    void resolvedRuntime;
   }
   if (options.sandbox === true) {
     return runSandboxedCommand(buildCommandLine(scriptPath, args), {
@@ -1267,7 +1270,7 @@ async function sessionOpen(cfg, args, ctx = {}) {
   }
   let child;
   try {
-    child = spawn(cfg.powershell, ['-NoProfile', '-NonInteractive', '-File', workerRuntime], {
+    child = spawn(cfg.powershell, ['-NoProfile', '-NonInteractive', '-File', worker], {
       cwd: cfg.repo,
       windowsHide: true,
       env: spawnEnv(),
