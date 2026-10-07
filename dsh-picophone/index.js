@@ -283,16 +283,20 @@ let sandboxContext = null;
 // 办法：把这几个脚本的 SHA256 钉在【工作区之外】，每次执行前核对；不符 ⇒ 拒绝执行。
 // ⚠️ 登记入口只做在 /pico 命令里（人敲），**不做成工具** —— 否则 AI 自己就能把恶意脚本登记掉。
 // （createHash 在文件顶部已经 import 过，这里别再引一次 —— 重复声明会直接 SyntaxError。）
-const TRUSTED_TOOLS_REL = [
+const TRUSTED_REPO_TOOLS_REL = [
   'tools/build.cmd',
   'tools/build_sub.ps1',
   'tools/serial.ps1',
-  'tools/serial-session.ps1',
   'tools/flash_bootsel.ps1',
   'tools/flash_backdoor.ps1',
   'tools/swd.ps1',
   'tools/proc_guard.ps1',
 ];
+
+// ⚠️ 会话 worker **不在 `tools/` 里** —— 它是插件自己的文件（见下面 `path.join(PACKAGE_DIR, …)`）。
+//    2026-10-07 实测踩到：原先这里写了 `tools/serial-session.ps1`（不存在 ⇒ 永远"读不到"），
+//    而真正的 worker 是【直接 spawn】的、不过信任门 ⇒ 那是一条真口子（改 worker = 沙箱外任意代码）。
+const TRUSTED_PLUGIN_REL = ['dsh-plugins/dsh-picophone/serial-session.ps1'];
 
 /**
  * 受管脚本的清单键 = **相对 `cfg.root`** 的路径（与 `relToRoot()` 同一口径）。
@@ -301,7 +305,7 @@ const TRUSTED_TOOLS_REL = [
  */
 function trustedScripts(cfg) {
   const prefix = path.relative(cfg.root, cfg.repo).split(path.sep).join('/');
-  return TRUSTED_TOOLS_REL.map((rel) => (prefix ? `${prefix}/${rel}` : rel));
+  return [...TRUSTED_REPO_TOOLS_REL.map((rel) => (prefix ? `${prefix}/${rel}` : rel)), ...TRUSTED_PLUGIN_REL];
 }
 
 function trustFilePath(cfg) {
@@ -1115,6 +1119,13 @@ async function sessionOpen(cfg, args, ctx = {}) {
   if (!existsSync(worker)) {
     releaseRigLock(lock);
     return { ok: false, text: `缺少 ${worker}` };
+  }
+  // 【信任门】worker 是【直接 spawn】的（不经过 runProjectScript）⇒ 必须在 here 手动加同一道门。
+  // 2026-10-07：它先前是漏的 —— 往 serial-session.ps1 里塞点东西再 pico_console open 就是沙箱外任意代码。
+  const workerTrust = trustVerdict(cfg, worker);
+  if (!workerTrust.ok) {
+    releaseRigLock(lock);
+    return { ok: false, text: trustRefusal(cfg, worker) };
   }
   let child;
   try {
