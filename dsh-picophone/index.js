@@ -308,8 +308,41 @@ function trustedScripts(cfg) {
   return [...TRUSTED_REPO_TOOLS_REL.map((rel) => (prefix ? `${prefix}/${rel}` : rel)), ...TRUSTED_PLUGIN_REL];
 }
 
-function trustFilePath(cfg) {
-  return path.join(cfg.trustDir, 'trusted-scripts.json');
+// ---------------------------------------------------------------- 运行本（Pico 文件夹里的常设副本）
+
+// 红队审计（2026-10-07）确认：豁免沙箱的 op 跑的是【工作区里的脚本】，而工作区正是被关住的
+// Agent 唯一能写的地方 ⇒ 改脚本 / 改子脚本 / 改构建输入 = 窗外任意代码执行（缺口 ①②③）。
+// 用户裁定：tools\ 只当【源码】（不运行）；Pico 文件夹里常设一份【运行本】，插件只跑运行本；
+// AI 想改 ⇒ 走 pico_amend（一次性审判员）⇒ 合理则同步进运行本，否则用运行本覆盖回去。
+function runtimeRoot(cfg) {
+  return path.join(cfg.trustDir, 'runtime');
+}
+
+/** 工作区文件 → 运行本路径（相对 <工作区的父目录> 保形 ⇒ 映射唯一、可预测）。 */
+function runtimePath(cfg, file) {
+  return path.join(runtimeRoot(cfg), path.relative(path.dirname(path.resolve(cfg.repo)), path.resolve(file)));
+}
+
+/** 把工作区文件同步进运行本（人批准 / 审判员通过后调用）。返回运行本路径。 */
+function syncToRuntime(cfg, file) {
+  const dst = runtimePath(cfg, file);
+  mkdirSync(path.dirname(dst), { recursive: true });
+  writeFileSync(dst, readFileSync(file)); // 用 read/write 而不是 copyFileSync：后者本文件没 import
+  return dst;
+}
+
+/**
+ * 拿"该跑的那一份"：运行本存在 ⇒ 就用它（工作区怎么改都不影响执行 ✓）；
+ * 不存在 ⇒ **只有**工作区版本与登记指纹一致时才抄过去；否则 null（fail-closed）。
+ */
+function resolveRuntimeScript(cfg, file) {
+  const dst = runtimePath(cfg, file);
+  if (existsSync(dst)) return dst;
+  if (!trustVerdict(cfg, file).ok) return null;
+  return syncToRuntime(cfg, file);
+}
+
+function trustFilePath(cfg) {  return path.join(cfg.trustDir, 'trusted-scripts.json');
 }
 
 /** 信任清单【必须】在工作区之外：否则被关住的 Agent 连清单一起改，这层就白加了。 */
@@ -447,7 +480,8 @@ async function opTrust(cfg, args = {}) {
       const now = sha256Of(path.join(cfg.root, rel));
       if (!now) { lines.push(`✗ ${rel}  读不到`); continue; }
       manifest.scripts[rel] = { sha256: now, registeredAt: new Date().toISOString() };
-      lines.push(`✓ ${rel}  →  ${now.slice(0, 16)}…`);
+      try { syncToRuntime(cfg, path.join(cfg.root, rel)); } catch { /* 同步失败不影响登记 */ }
+      lines.push(`✓ ${rel}  →  ${now.slice(0, 16)}…（已同步进运行本）`);
     }
     try {
       writeFileSync(trustFilePath(cfg), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
@@ -724,6 +758,20 @@ async function runProjectScript(cfg, scriptPath, args, options = {}) {
         spawnError: `${trustRefusal(cfg, scriptPath)}\n\n${askNote}`,
       };
     }
+    // 【运行本】指纹过了还不够：真正要跑的是 Pico 文件夹里那一份（工作区那份只是源码）。
+    const resolvedRuntime = resolveRuntimeScript(cfg, scriptPath);
+    if (!resolvedRuntime) {
+      return {
+        ok: false,
+        exitCode: null,
+        timedOut: false,
+        stdout: '',
+        stderr: '',
+        durationMs: 0,
+        spawnError: `⛔ 运行本不可用：${relToRoot(cfg, scriptPath)}\n（工作区版本与登记指纹不一致，运行本里也没有对应的一份）\n⇒ 先 /pico trust <路径> 登记，或用 pico_amend 提交改动让审判员裁决。`,
+      };
+    }
+    scriptPath = resolvedRuntime;
   }
   if (options.sandbox === true) {
     return runSandboxedCommand(buildCommandLine(scriptPath, args), {
@@ -1211,9 +1259,15 @@ async function sessionOpen(cfg, args, ctx = {}) {
       return { ok: false, text: `${trustRefusal(cfg, worker)}\n\n（审批结果：${ask.outcome}${ask.detail ? ` — ${ask.detail}` : ''}）` };
     }
   }
+  // 【运行本】worker 也只跑 Pico 文件夹里那一份
+  const workerRuntime = resolveRuntimeScript(cfg, worker);
+  if (!workerRuntime) {
+    releaseRigLock(lock);
+    return { ok: false, text: `⛔ 会话 worker 的运行本不可用：${relToRoot(cfg, worker)}\n⇒ 先登记，或走 pico_amend。` };
+  }
   let child;
   try {
-    child = spawn(cfg.powershell, ['-NoProfile', '-NonInteractive', '-File', worker], {
+    child = spawn(cfg.powershell, ['-NoProfile', '-NonInteractive', '-File', workerRuntime], {
       cwd: cfg.repo,
       windowsHide: true,
       env: spawnEnv(),
