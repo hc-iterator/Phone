@@ -2116,7 +2116,7 @@ async function opAmend(cfg, args = {}) {
       prompt: [{ type: 'text', text: prompt }],
       parent,
       signal: new AbortController().signal,
-      maxDepth: 0,
+      maxDepth: 1, // 子本身即 depth 1（0 会被拒：'subagent depth 1 exceeds maxDepth 0'，2026-10-07 实测）；1 = 只准它自己、不准再往下派
       outputSchema: {
         type: 'object',
         additionalProperties: false,
