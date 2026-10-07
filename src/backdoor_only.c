@@ -21,15 +21,49 @@
 #include "hardware/watchdog.h"   /* watchdog_reboot */
 #include "hardware/clocks.h"     /* clock_get_hz */
 
+/* ── 变体标签：串口上一眼能分清现在跑的是哪一份（2026-10-07 加）──────────────
+ * 目的：同一份"安静固件"在 150 MHz 与 252 MHz 各跑一次，用来对照 SWD 通不通 ✓
+ *   · 不带宏 ⇒ backdoor_only     （默认时钟，不碰电压）
+ *   · 带宏   ⇒ backdoor_only_oc  （提压 + 提频，档位必须是项目实测过的 ✓）
+ */
+#ifdef BACKDOOR_OC_KHZ
+#define BD_TAG "backdoor_only_oc"
+#else
+#define BD_TAG "backdoor_only"
+#endif
+
+#ifdef BACKDOOR_OC_KHZ
+/* ── 超频变体：配方照抄项目已验证的写法（**不自己发明** ✗）────────────────────
+ *   · 提压：vreg_set_voltage(VREG_VOLTAGE_1_25) —— 与 src/dvi_min.c 的超频工装同档 ✓
+ *   · 提频：set_sys_clock_khz(KHZ, false) —— 与 core1_monitor 的探针超频配方同写法 ✓
+ * ⚠️ 两个关键点（都是本项目踩出来的）：
+ *   ① 第二参数**必须 false**（尽力而为）：启动阶段 panic 等于又要人按 BOOTSEL ✗
+ *   ② **先提压、再提频、最后才 stdio_init_all()** —— USB CDC 要按最终主频配置 ✓
+ *      （2026-10-06 用户明确纠正过这一条 ✓）
+ * ⚠️ 频率只许用项目**实测过**的档位（252 MHz = dvi_min 正在跑的档 ✓）——
+ *    不许把频率调到没试过的区间 ✗（docs\开工前自检.md §三.2 用户原话）
+ */
+#include "hardware/vreg.h"
+
+static void oc_apply(void) {
+    vreg_set_voltage(VREG_VOLTAGE_1_25);
+    sleep_ms(10);
+    (void)set_sys_clock_khz(BACKDOOR_OC_KHZ, false);   /* 上不去就留默认时钟继续跑，绝不 panic ✓ */
+}
+#endif
+
 static void banner(void) {
-    printf("\n[backdoor_only] 纯后门固件在跑：本固件不做别的事\n");
-    printf("[backdoor_only] sysclk = %lu kHz\n",
+    printf("\n[%s] 纯后门固件在跑：本固件不做别的事\n", BD_TAG);
+    printf("[%s] sysclk = %lu kHz\n", BD_TAG,
            (unsigned long)(clock_get_hz(clk_sys) / 1000));
-    printf("[backdoor_only] 命令： B = 进 BOOTSEL   R = 重启   ? = 再打一遍这三行\n");
+    printf("[%s] 命令： B = 进 BOOTSEL   R = 重启   ? = 再打一遍这几行\n", BD_TAG);
     fflush(stdout);
 }
 
 int main(void) {
+#ifdef BACKDOOR_OC_KHZ
+    oc_apply();                  /* 必须在 stdio_init_all() 之前 ✓ */
+#endif
     stdio_init_all();
     sleep_ms(300);               /* 等 USB 枚举，别让开机那几行丢掉 */
     banner();
@@ -47,11 +81,11 @@ int main(void) {
             sleep_ms(50);
             watchdog_reboot(0, 0, 0);       /* 不再返回 */
         } else if (c == '?') {
-            printf("[backdoor_only] sysclk = %lu kHz   (alive)\n",
+            printf("[%s] sysclk = %lu kHz   (alive)\n", BD_TAG,
                    (unsigned long)(clock_get_hz(clk_sys) / 1000));
             fflush(stdout);
         } else if (c >= 0) {
-            printf("[backdoor_only] 收到 0x%02X，本固件只认 B / R / ?\n",
+            printf("[%s] 收到 0x%02X，本固件只认 B / R / ?\n", BD_TAG,
                    (unsigned)c);
             fflush(stdout);
         } else {

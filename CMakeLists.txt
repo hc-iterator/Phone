@@ -262,6 +262,23 @@ target_link_libraries(backdoor_only pico_stdlib)
 pico_add_extra_outputs(backdoor_only)
 
 # ============================================================================
+# 纯后门固件的【超频变体】：同一份安静固件，只换主频（2026-10-07 用户指定）
+#   用途：与 backdoor_only 做**对照实验** —— 同一块板、同样"什么都不干"的固件，
+#         唯一变量是主频 ⇒ 才能判定「SWD 通不通」与主频到底有没有关系 ✓
+#   档位：vreg 1.25V + 252000 kHz —— **照抄项目实测过的档**（dvi_min 正在跑的那档 ✓），
+#         不发明没试过的频率 ✗（docs\开工前自检.md §三.2）
+#   构建：ninja -C build backdoor_only_oc     产物：build/backdoor_only_oc.uf2
+# ============================================================================
+add_executable(backdoor_only_oc src/backdoor_only.c)
+pico_set_program_name(backdoor_only_oc "backdoor_only_oc")
+pico_set_program_version(backdoor_only_oc "0.1")
+pico_enable_stdio_uart(backdoor_only_oc 1)
+pico_enable_stdio_usb(backdoor_only_oc 1)
+target_compile_definitions(backdoor_only_oc PRIVATE BACKDOOR_OC_KHZ=252000)
+target_link_libraries(backdoor_only_oc pico_stdlib)
+pico_add_extra_outputs(backdoor_only_oc)
+
+# ============================================================================
 # 引脚连通性测试固件（焊接后查连锡，避免带短路接信号上电）
 #   不需要接任何外部信号：只检查 GPIO 8..15 之间/对 GND/对 3V3 是否相通
 # ============================================================================
