@@ -425,7 +425,7 @@ function trustRefusal(cfg, file) {
     `   登记值         = ${v.want ? v.want.slice(0, 16) : '(无)'}`,
     '',
     '   这类脚本必须跑在沙箱外（要碰设备 / 要跑 cmake），所以它的内容必须是【人认可过的】：',
-    '   登记入口只挂在 /pico 命令上（AI 无权调用），人敲：',
+    '   现在 AI 会自己弹审批给你（approval）；被拒或审批不可用时，也可以人敲 /pico 命令手动盖章：',
     '     /pico trust                             # 看全部受管脚本的登记状态',
     `     /pico trust ${v.rel}`,
     '     /pico trust init                        # 全部重新登记',
