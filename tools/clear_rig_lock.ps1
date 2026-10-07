@@ -1,116 +1,89 @@
-#  clear_rig_lock.ps1 -- 查看 / 清理 PicoPhone 台架的"陈锁"（stale rig lock）
+#  clear_rig_lock.ps1 -- RETIRED 2026-10-06. It only DIAGNOSES now; it never deletes.
 #
-#  为什么需要它（2026-10-06 实测）：
-#    台架锁文件在 $DSH_HOME\picophone.lock —— **在工作区之外**。
-#    会话被收紧成 workspace-write 之后，**会话 shell 写不了那里**（Access denied），
-#    所以"手动删陈锁"这条退路在会话侧断了 ✗。
-#    本脚本要经 `pico_run` 跑（= 由 Host 插件直接 spawn，不经会话沙箱）才能删得动 ✓：
-#        pico_run tools/clear_rig_lock.ps1                 # 只报告（默认，不删）
-#        pico_run tools/clear_rig_lock.ps1 -Clear          # 仅在"确属陈锁"时删
-#        pico_run tools/clear_rig_lock.ps1 -Clear -Force   # 无条件删（活进程也删，慎用）
+#  What it used to do:
+#    Delete a stale rig lock at $DSH_HOME\picophone.lock -- a path OUTSIDE the session
+#    workspace, which the session shell cannot write. It worked only because pico_run
+#    spawned the script directly from the Host process, bypassing any sandbox.
 #
-#  陈锁判据（与插件一致，见 dsh-plugins/dsh-picophone/index.js）：
-#    ① 占用进程已不存在  ② 或锁龄 > MaxAgeMin（插件默认 lockStaleMs = 600000 ms = 10 分钟）
+#  [2026-10-06 note] pico_run now runs inside the DSH sandbox (workspace-write).
+#    Writing outside the workspace is denied by the OS -- measured:
+#      UnauthorizedAccessException for C:\Users\Chen\Desktop\... and for $DSH_HOME\...
+#    So this script can no longer delete the lock, and pretending otherwise would just
+#    produce a confusing failure. Evidence: DeepSeekCode\台架接口沙箱化说明.md section 3
+#    (rows 5 and 6). The previous implementation is kept in git history (commit ed01fd4).
 #
-#  输出**全 ASCII**：避免 GBK 控制台在打印 ✓/⚠️/中文 时 UnicodeEncodeError 崩掉
-#  （项目踩过两次的坑，见 docs/陷阱.md 错 29）。
+#  Use instead:
+#    /pico lock clear     -- the plugin deletes it from the Host process (not sandboxed)
+#    /pico lock           -- who holds it, since when, how long
 #
-#  退出码：0 = 空闲或已清除；1 = 仍被占用（拒绝删除）；2 = 出错
+#  This file stays useful as a READ-ONLY diagnosis (reading outside the workspace is
+#  still allowed, so it works inside the sandbox):
+#    pico_run tools/clear_rig_lock.ps1
+#
+#  Staleness rule (same as the plugin): holder process gone, or lock age > MaxAgeMin
+#  (plugin default lockStaleMs = 600000 ms = 10 min).
+#
+#  Output is ASCII only: printing check marks / emoji / Chinese to a GBK console is a
+#  known crash in this project (docs/陷阱.md 错 29).
+#
+#  Exit codes: 0 = lock free; 1 = lock present (NOT deleted, by design); 2 = error.
 
 [CmdletBinding()]
 param(
-    [switch]$Clear,                 # 允许删除（仍受"确属陈锁"约束）
-    [switch]$Force,                 # 无视判据，强删
-    [int]$MaxAgeMin = 10,           # 陈锁年龄阈值（分钟），与插件 lockStaleMs 对齐
-    [string]$Path = ''              # 默认 $DSH_HOME\picophone.lock
+    [switch]$Clear,                 # accepted for compatibility; ignored (nothing is deleted)
+    [switch]$Force,                 # accepted for compatibility; ignored
+    [int]$MaxAgeMin = 10,           # staleness threshold in minutes, aligned with the plugin
+    [string]$Path = ''              # default: $DSH_HOME\picophone.lock
 )
 
-$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Continue'
 
-function Get-LockPath([string]$p) {
-    if ($p -and $p.Trim() -ne '') { return $p }
-    $home2 = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $HOME '.dsh' }
-    return (Join-Path $home2 'picophone.lock')
+if ($Clear -or $Force) {
+    Write-Host "NOTE: -Clear / -Force are ignored -- this script no longer deletes anything." -ForegroundColor Yellow
+    Write-Host "      Use  /pico lock clear  instead."
+    Write-Host ""
 }
 
-function Test-PidAlive([int]$pid2) {
-    if (-not $pid2 -or $pid2 -le 0) { return $false }
-    try { $null = Get-Process -Id $pid2 -ErrorAction Stop; return $true }
-    catch { return $false }
-}
+$home_ = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE '.dsh' }
+$lock = if ($Path -ne '') { $Path } else { Join-Path $home_ 'picophone.lock' }
 
-$lock = Get-LockPath $Path
-Write-Host ("LOCK-FILE  = " + $lock)
-
-if (-not (Test-Path $lock)) {
-    Write-Host "RESULT     = FREE (no lock file)"
+if (-not (Test-Path -LiteralPath $lock)) {
+    Write-Host "VERDICT = FREE"
+    Write-Host "  lock file: $lock (does not exist)"
     exit 0
 }
 
-# ---- 读锁内容（解析失败也算"陈" —— 坏掉的锁不该继续挡路）----
-$raw = Get-Content -Path $lock -Raw -ErrorAction SilentlyContinue
+$raw = Get-Content -LiteralPath $lock -Raw -ErrorAction SilentlyContinue
 $info = $null
-$parseOk = $false
-try { $info = $raw | ConvertFrom-Json; $parseOk = $true } catch { $parseOk = $false }
+try { $info = $raw | ConvertFrom-Json } catch { $info = $null }
 
-$holderPid = 0
-$ageSec = -1
-if ($parseOk) {
-    Write-Host ("HOLDER     = " + $info.what)
-    Write-Host ("  pid      = " + $info.pid)
-    Write-Host ("  session  = " + $info.session)
-    Write-Host ("  profile  = " + $info.profile)
-    Write-Host ("  since    = " + $info.sinceText)
-    if ($info.pid) { $holderPid = [int]$info.pid }
-    if ($info.since) {
-        try {
-            $t0 = [DateTimeOffset]::FromUnixTimeMilliseconds([int64]$info.since)
-            $ageSec = [math]::Round(((Get-Date).ToUniversalTime() - $t0.UtcDateTime).TotalSeconds, 1)
-        } catch { $ageSec = -1 }
-    }
-} else {
-    Write-Host "HOLDER     = <unparsable lock content; treating as stale>"
-    Write-Host ("  raw      = " + ($raw -replace "\s+", ' '))
-    $fi = Get-Item $lock
-    $ageSec = [math]::Round(((Get-Date) - $fi.LastWriteTime).TotalSeconds, 1)
-}
-
-$alive = Test-PidAlive $holderPid
-$ageMin = if ($ageSec -ge 0) { [math]::Round($ageSec / 60.0, 1) } else { -1 }
-
-Write-Host ("AGE        = " + $ageSec + " s (" + $ageMin + " min);  threshold = " + $MaxAgeMin + " min")
-Write-Host ("PID-ALIVE  = " + $alive)
-
-$stale = $true
-$why = @()
-if (-not $parseOk) { $why += 'unparsable' }
-if ($holderPid -le 0) { $why += 'no-pid'; }
-elseif (-not $alive) { $why += 'holder-process-gone' }
-if ($ageMin -ge 0 -and $ageMin -gt $MaxAgeMin) { $why += 'older-than-threshold' }
-if ($why.Count -eq 0) { $stale = $false }
-
-Write-Host ("VERDICT    = " + $(if ($stale) { 'STALE (' + ($why -join ',') + ')' } else { 'HELD (fresh, holder alive)' }))
-
-if (-not $Clear) {
-    Write-Host "ACTION     = none (report only; add -Clear to remove a stale lock)"
-    if ($stale) { Write-Host "RESULT     = STALE (rerun with -Clear to remove)"; exit 0 }
-    Write-Host "RESULT     = HELD (refusing nothing: nothing was asked)"
-    exit 0
-}
-
-if (-not $stale -and -not $Force) {
-    Write-Host "ACTION     = refused: lock looks fresh and its holder is alive. Use -Force only if you have confirmed it is abandoned."
-    Write-Host "RESULT     = HELD (not deleted)"
+if ($null -eq $info) {
+    Write-Host "VERDICT = UNREADABLE"
+    Write-Host "  lock file: $lock"
+    Write-Host "  cannot parse it as JSON -> use /pico lock, or delete the file by hand"
     exit 1
 }
 
-try {
-    Remove-Item -Path $lock -Force -ErrorAction Stop
-    Write-Host ("ACTION     = deleted" + $(if ($Force -and -not $stale) { ' (forced)' } else { '' }))
-    Write-Host "RESULT     = CLEARED"
-    exit 0
-} catch {
-    Write-Host ("ACTION     = delete failed: " + $_.Exception.Message)
-    Write-Host "RESULT     = ERROR"
-    exit 2
+$since = 0
+try { $since = [int64]$info.since } catch { $since = 0 }
+$ageMin = 0
+if ($since -gt 0) {
+    $ageMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $since
+    $ageMin = [math]::Round($ageMs / 60000.0, 2)
 }
+
+$alive = $false
+if ($info.pid) {
+    try { $null = Get-Process -Id ([int]$info.pid) -ErrorAction Stop; $alive = $true } catch { $alive = $false }
+}
+$stale = (-not $alive) -or ($ageMin -gt $MaxAgeMin)
+
+Write-Host ("VERDICT = " + $(if ($stale) { "STALE" } else { "HELD" }))
+Write-Host ("  what    : " + $info.what)
+Write-Host ("  pid     : " + $info.pid + "   holder-alive=" + $alive)
+Write-Host ("  session : " + $info.session)
+Write-Host ("  age     : " + $ageMin + " min (threshold " + $MaxAgeMin + " min)")
+Write-Host ("  lock    : " + $lock)
+Write-Host ""
+Write-Host "NOT DELETED (by design, 2026-10-06). To clear it:  /pico lock clear"
+exit 1
