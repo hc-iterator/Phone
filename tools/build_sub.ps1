@@ -1,3 +1,5 @@
+# ⚠️ 这是【不运行的副本】：pico_* 工具执行的是 C:\Users\Chen\Desktop\Pico\_picophone_trust\runtime\ 下的同名文件（由 pico_amend/审批同步）。
+
 <#
   build_sub.ps1 —— 一键编译独立子工程（probe_rp2040 / wboard_dvi / core1_monitor）
 
