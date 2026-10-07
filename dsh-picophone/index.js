@@ -2089,7 +2089,35 @@ async function opAmend(cfg, args = {}) {
     return { ok: true, exitCode: 0, text: '受管脚本当前全部与登记指纹一致 —— 没有需要裁决的改动。' };
   }
   const repoRel = path.relative(cfg.root, cfg.repo).split(path.sep).join('/');
-  const diff = await runProcess('git', ['-C', cfg.repo, 'diff', '--', ...rels.map((r) => r.split('/').slice(1).join('/'))], { cwd: cfg.repo, timeoutMs: 60000, sandbox: true });
+  // 取 diff：受管脚本可能【不在 cfg.repo 里】（如 dsh-plugins\ 下的 worker 属于另一个 worktree）
+  // ⇒ 逐个文件找最近的 .git，按仓库根分组取 diff。
+  // 2026-10-07 审判员实测发现：写死 cfg.repo 会对这类文件恒取到【空 diff】（git 对不匹配的
+  // pathspec 静默返回空）⇒ 审判员盲判。空 diff 现在会被显式写进提示词里当警告。
+  const byRoot = new Map();
+  for (const rel of rels) {
+    const abs = path.join(cfg.root, rel);
+    let dir = path.dirname(abs);
+    let root = cfg.repo;
+    for (let i = 0; i < 12; i += 1) {
+      if (existsSync(path.join(dir, '.git'))) { root = dir; break; }
+      const up = path.dirname(dir);
+      if (up === dir) break;
+      dir = up;
+    }
+    if (!byRoot.has(root)) byRoot.set(root, []);
+    byRoot.get(root).push(path.relative(root, abs).split(path.sep).join('/'));
+  }
+  let diffText = '';
+  let diffNote = '';
+  for (const [root, list] of byRoot) {
+    const res = await runProcess('git', ['-C', root, 'diff', '--', ...list], { cwd: cfg.repo, timeoutMs: 60000, sandbox: true });
+    diffText += `# 仓库根 ${root}\n${res.stdout || ''}\n`;
+    const untracked = await runProcess('git', ['-C', root, 'ls-files', '--others', '--exclude-standard', '--', ...list], { cwd: cfg.repo, timeoutMs: 30000, sandbox: true });
+    const u = (untracked.stdout || '').trim();
+    if (u) diffNote += `\n注意：以下文件是【未跟踪的新文件】，git diff 没有基线：${u}`;
+    if (res.spawnError) diffNote += `\n注意：取 diff 失败（${res.spawnError}）`;
+  }
+  if (!diffText.replace(/# 仓库根 .*/g, '').trim()) diffNote += '\n警告：本次 diff 为空 —— 若确实有改动，说明仓库根判断错，请人工核实后再裁决。';
   // 取服务两种方式都试：apply 时的 inject 没回调过，就在调用时 ctx.get 一次（2026-10-07 实测 inject 没拿到）
   const svc = cfg.subagents ?? cfg.pluginCtx?.get?.('subagents');
   const parent = cfg.currentAgent;
@@ -2107,7 +2135,8 @@ async function opAmend(cfg, args = {}) {
     `AI 给的理由：${String(args.why ?? '(未给)')}`,
     `涉及文件：${rels.join(', ')}`,
     'diff：',
-    (diff.stdout || '(空)').slice(0, 20000),
+    (diffText || '(空)').slice(0, 20000),
+    diffNote,
   ].join('\n');
   let run;
   try {
