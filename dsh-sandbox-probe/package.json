@@ -1,0 +1,13 @@
+{
+  "name": "dsh-sandbox-probe",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Temporary diagnostic: run one command through ctx.shell with an explicit sandbox policy.",
+  "type": "module",
+  "exports": {
+    ".": "./probe-v2.js",
+    "./package.json": "./package.json"
+  },
+  "files": ["probe-v2.js", "cordis.patch.yml"],
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
+}

@@ -1,0 +1,26 @@
+{
+  "name": "dsh-picophone",
+  "version": "1.0.0",
+  "private": true,
+  "description": "PicoPhone rig capabilities: build toolchain, uf2 flashing, serial, SWD, %TEMP% access",
+  "icon": "./icon.svg",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "serial-session.ps1",
+    "cordis.patch.yml",
+    "icon.svg",
+    "locale/*.json",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

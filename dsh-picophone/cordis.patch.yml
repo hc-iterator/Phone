@@ -1,0 +1,7 @@
+# PicoPhone 能力包：把台架接口装进 Harness。
+# 一个 Host 插件行，注册 9 个 pico_* 工具 + 1 个 /pico 命令。
+# 🗓 2026-10-06：原写"8 个"（漏了 pico_console）；实测代码一直是 9 个，已按事实改正。
+
+- insert:
+    - id: picophone
+      name: dsh-picophone

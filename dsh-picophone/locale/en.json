@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "PicoPhone Toolkit",
+    "description": "Build, flash, serial, SWD, git and %TEMP% capabilities for the PicoPhone rig, plus the /pico command."
+  }
+}

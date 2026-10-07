@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "PicoPhone 工具台",
+    "description": "PicoPhone 台架能力：构建链 / 烧写 / 串口 / SWD / git / %TEMP% 读写，以及 /pico 命令。"
+  }
+}

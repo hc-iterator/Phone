@@ -1,0 +1,4 @@
+# 临时探针：只为回答一个问题 —— 插件能否要求 ctx.shell 按我指定的沙箱策略执行。
+- insert:
+    - id: sandbox-probe
+      name: dsh-sandbox-probe
