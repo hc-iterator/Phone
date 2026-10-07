@@ -331,15 +331,47 @@ function syncToRuntime(cfg, file) {
   return dst;
 }
 
+/** 递归拷目录（只用已 import 的 fs：readdirSync / mkdirSync / readFileSync / writeFileSync）。 */
+function copyTree(src, dst) {
+  mkdirSync(dst, { recursive: true });
+  for (const entry of readdirSync(src, { withFileTypes: true })) {
+    const s = path.join(src, entry.name);
+    const d = path.join(dst, entry.name);
+    if (entry.isDirectory()) copyTree(s, d);
+    else writeFileSync(d, readFileSync(s));
+  }
+}
+
+/** 所有受管脚本的指纹是否都与登记一致。 */
+function treeIsTrusted(cfg) {
+  return trustedScripts(cfg).every((rel) => trustVerdict(cfg, path.join(cfg.root, rel)).ok);
+}
+
 /**
- * 拿"该跑的那一份"：运行本存在 ⇒ 就用它（工作区怎么改都不影响执行 ✓）；
- * 不存在 ⇒ **只有**工作区版本与登记指纹一致时才抄过去；否则 null（fail-closed）。
+ * 建/刷新【运行本树】：
+ *   runtime\<相对 <工作区父目录> 的路径>\  = 真仓库的骨架（除 tools\ 外全部 junction/硬链接回真身，
+ *                                          一次性由人建好 ⇒ 脚本用 %~dp0 推树时看到的是【真树】）
+ *                                        + tools\ 的【整棵副本】（含子脚本 ⇒ 缺口②结构性消失）
+ * 只有全部受管指纹一致才允许刷新；否则返回 null（fail-closed）。
  */
+let runtimeTreeKey = '';
+function ensureRuntimeTree(cfg) {
+  if (!treeIsTrusted(cfg)) return null;
+  const rtRepo = path.join(runtimeRoot(cfg), path.relative(path.dirname(path.resolve(cfg.repo)), path.resolve(cfg.repo)));
+  const key = trustedScripts(cfg).map((rel) => sha256Of(path.join(cfg.root, rel))).join(':');
+  if (key === runtimeTreeKey && existsSync(path.join(rtRepo, 'tools'))) return rtRepo;
+  mkdirSync(rtRepo, { recursive: true });
+  copyTree(path.join(cfg.repo, 'tools'), path.join(rtRepo, 'tools'));
+  runtimeTreeKey = key;
+  return rtRepo;
+}
+
+/** 拿"该跑的那一份"（运行本树里的同路径文件）。null = 不能跑（fail-closed）。 */
 function resolveRuntimeScript(cfg, file) {
-  const dst = runtimePath(cfg, file);
-  if (existsSync(dst)) return dst;
-  if (!trustVerdict(cfg, file).ok) return null;
-  return syncToRuntime(cfg, file);
+  const rtRepo = ensureRuntimeTree(cfg);
+  if (!rtRepo) return null;
+  const dst = path.join(rtRepo, path.relative(path.resolve(cfg.repo), path.resolve(file)));
+  return existsSync(dst) ? dst : null;
 }
 
 function trustFilePath(cfg) {  return path.join(cfg.trustDir, 'trusted-scripts.json');
@@ -771,10 +803,7 @@ async function runProjectScript(cfg, scriptPath, args, options = {}) {
         spawnError: `⛔ 运行本不可用：${relToRoot(cfg, scriptPath)}\n（工作区版本与登记指纹不一致，运行本里也没有对应的一份）\n⇒ 先 /pico trust <路径> 登记，或用 pico_amend 提交改动让审判员裁决。`,
       };
     }
-    // ⏸ 暂不切到运行本：2026-10-07 实测——逐文件副本会让脚本以自己的位置推树
-    //   （proc_guard 打出 repo=<runtime>\DeepSeekCode），且子脚本（serial_worker.ps1）不在副本里
-    //   ⇒ build 会编译错树、serial 直接坏。等 ACL 只读（或整树 + junction）方案定稿再切。
-    void resolvedRuntime;
+    scriptPath = resolvedRuntime;
   }
   if (options.sandbox === true) {
     return runSandboxedCommand(buildCommandLine(scriptPath, args), {
@@ -1270,7 +1299,7 @@ async function sessionOpen(cfg, args, ctx = {}) {
   }
   let child;
   try {
-    child = spawn(cfg.powershell, ['-NoProfile', '-NonInteractive', '-File', worker], {
+    child = spawn(cfg.powershell, ['-NoProfile', '-NonInteractive', '-File', workerRuntime], {
       cwd: cfg.repo,
       windowsHide: true,
       env: spawnEnv(),
