@@ -367,8 +367,15 @@ void dvi_screen_test(void)
 
 
     uint32_t frame = 0;
+    /* ★ 2026-10-07 重画守卫（从 dvi_min.c 搬来 —— 那边实测过，主 App 这边一直缺 ✗）
+     * 证据：修前实测 hb÷t = 12,351 逻辑行/秒（需求 14,328）⇒ 生产者帧率只有 51.4 fps
+     *   ⇒ 每圈整屏重写 FB_W*FB_H = 320×240 = **76,800 字节** ⇒ Core0 突发抢总线
+     *   ⇒ Core1 的 TMDS 编码被顶穿 ⇒ DMA 重复旧行 ⇒ 屏幕【蓝白条纹闪】（用户 2026-10-07 实测症状 ✓）
+     * 做法：内容没变就一个字节都不写 ✓（本循环是静态测试图案，画一次就够 ✓）
+     * 同理见 docs\陷阱.md 与 dvi_min.c:605-608 的原始诊断 ✓ */
+    bool fb_drawn = false;
     while (true) {
-        draw_solid_test(frame);
+        if (!fb_drawn) { draw_solid_test(frame); fb_drawn = true; }   /* ★ 只画一次 ✓ */
         make_tone();
         frame++;
         g_loop_iter_total++;         /* ★ 只增不减：判定主循环是否真的在重启 */
