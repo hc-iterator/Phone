@@ -41,6 +41,17 @@ set(PICO_PSRAM_SIZE_BYTES 8*1024*1024)
 
 project(PicoPhone C CXX ASM)
 
+# ★ 2026-10-10 修复：USB stdio 写超时 500ms → 2ms（治"app 被 printf 拖死、DVI 引擎饿死"）
+# 实测（SWD 读计数器，串口被占也能取证 ✓）：Core0 主循环 3 分钟只跑 150 圈（≈0.8 圈/秒）✗，
+#   生产者 3 分钟只出 1062 行 ✗、引擎看门狗重启 1 次 ✗ ⇒ 屏幕蓝白闪。
+# 根因（SDK 源码定死 ✓）：stdio_usb.c:122 每次写会一直等主机把数据取走，上限 =
+#   PICO_STDIO_USB_STDOUT_TIMEOUT_US（stdio_usb.h:33 默认 500000 µs = 500 ms）✗。
+#   主机侧开着 COM 口却不取数据（经 USB Hub 尤其容易）⇒ 每次打印阻塞 0.5 s
+#   ⇒ 2 次/秒 ⇒ 与实测 0.8 圈/秒 数量级吻合 ✓✓。
+# ⚠️ 必须用 add_compile_definitions 且放在 pico_sdk_init() 之前：这个宏是在【SDK 自己的】
+#   stdio_usb.c 里用的，写 target_compile_definitions(PicoPhone ...) 到不了那里 ✗。
+add_compile_definitions(PICO_STDIO_USB_STDOUT_TIMEOUT_US=2000)
+
 set(PICO_CXX_ENABLE_EXCEPTIONS 1)
 
 set(PICO_CXX_ENABLE_RTTI 1)
