@@ -192,8 +192,8 @@
             config:
               customSkillDirs:
                 - !!js process.getBuiltinModule('node:path').join(process.getBuiltinModule('node:path').dirname(process.getBuiltinModule('node:module').createRequire(baseUrl).resolve('@deepseek-ai/dsh-agent-preset/package.json')), 'skills')
-                # 台架技能 pico-rig：随插件包走，只挂在本模式（其他模式看不到）
-                - !!js process.getBuiltinModule('node:path').join(process.getBuiltinModule('node:path').dirname(process.getBuiltinModule('node:module').createRequire(baseUrl).resolve('dsh-picophone/package.json')), 'skills')
+                # 台架技能 pico-rig：只挂在本模式。⚠️ 用【字面绝对路径】：本预设挂在 profile 侧，而 !!js 的 baseUrl 是 dsh 安装目录 ⇒ createRequire 解析不到 profile 里的 dsh-picophone（2026-10-11 实测：写 !!js 会导致整个预设加载失败）
+                - C:\Users\Chen\Desktop\Pico\PicoPhone\dsh-plugins\dsh-picophone\skills
           - id: tool-skill
             name: '@deepseek-ai/dsh-tool-skill'
           - id: tool-presentation
