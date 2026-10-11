@@ -2640,17 +2640,14 @@ async function dispatchCommand(cfg, line, ctx = {}) {
  * ⚠️ 这段文字里**不许出现反引号**（外面是 JS 模板字符串，反引号会把它截断 ✗）。
  */
 const RIG_PROMPT = [
-  'PicoPhone 台架（本 profile 常驻）已把常用操作装成一级工具：pico_status / pico_build /',
-  'pico_flash / pico_serial / pico_console / pico_temp / pico_git / pico_run / pico_exec。',
-  '**先调 pico_status 看台架状态，不要手搓 tools/ 下的旧命令**；等价的人工入口是 /pico 命令。',
+  'PicoPhone 台架（rig，**仅本模式具备**）：常用操作已装成一级工具 pico_status / pico_build / pico_flash /',
+  'pico_serial / pico_console / pico_temp / pico_git / pico_run / pico_exec，人工入口是 /pico 命令。',
   '',
-  '- 板子：dut = RP2350 待测板（2E8A:0009）；probe = RP2040 debugprobe（2E8A:000C，它的后门要 ESC ESC 前缀）；sampler = 采样探针。',
-  '- **串口与烧写互斥**：两者都占台架锁（锁文件在 $DSH_HOME\\picophone.lock），并发会被明确拒绝并报出占用者；空闲 2 分钟自动关会话并释放。',
-  '- **按键驱动的固件用 pico_console**（open 只付一次 4~5 秒开口成本，之后 send/read/expect 很便宜），不要用 pico_serial 反复开关同一个口。',
-  '- **烧写纪律（这块台架没有 RUN 引脚、SWD 不可用 ⇒ BOOTSEL 按钮是唯一救砖手段）**：①要烧的固件必须自带串口后门（B = 进 BOOTSEL、R = 重启）；',
-  '  ②像 empty.uf2 那种**不开 USB stdio 的固件不能当中转件**（烧上去既没串口也没后门）；要中转就编 backdoor_only。',
-  '- **"板上现在跑的是哪一份"**：看 pico_status 的「最后烧写」（记在 debug_logs/flash_ledger.jsonl，含 uf2 的 sha256 前 16 位与源码 commit）；pico_build 会把 build_info.txt 落在产物旁。',
-  '- 每个工具的参数、行为与**全部失败分支**见 DeepSeekCode\\docs\\台架接口.md；插件自述见 dsh-plugins\\dsh-picophone\\README.md。',
+  '⚠️ **先读技能再动手**：在第一次调用任何 pico_* 工具或 /pico 命令【之前】，必须先调用 skill 加载 pico-rig。',
+  '台架的硬规矩（BOOTSEL 是唯一救砖手段；串口与烧写互斥；受管脚本走信任门/审批；按键固件用 pico_console…）、',
+  '九个工具的关键约束、以及常见失败的含义，**只写在那个技能里** —— 不先加载它就直接调工具是错的。',
+  '（先把 pico_status 跑起来看台架状态，是本模式下的第一步。）',
+  '',
   '- **子智能体（用户一提到它，回复里就必须带一句"优先复用"）**：先复用已有 Agent（看 _agents\\ 下的空间与 PicoPhone\\子Agent须知.md），**不要随手新建** ✗；',
   '  复用前先跑 tools\\sync_agent_spaces.ps1 同步它的空间（旧空间是旧快照，不同步就会引用旧名 ✗）；确需新建时，**要写明为什么不能复用**。',
 ].join('\n');
