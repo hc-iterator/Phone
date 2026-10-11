@@ -7,7 +7,7 @@
       config:
         id: pico
         name: Pico 全能模式
-        description: 标准 + 极简 + PTC + 创造 的全部能力，外加 PicoPhone 台架（台架仅对本模式开放）。
+        description: 标准 + PTC + 创造 的能力（**不含极简的持久终端** —— 2026-10-11 用户裁定删除），外加 PicoPhone 台架（台架仅对本模式开放）。
         order: 5
         plugins:
           # Same persona as `standard`: tool descriptions and the skill catalog carry
@@ -25,51 +25,17 @@
           # ⚠️ 这里【不挂】标准的 tool-bash/tool-pwsh：它们与极简模式的 persistent-* 注册【同一个工具名】
           #    （实测：'persistent-pwsh(dsh-tool-pwsh-persistent): tool "pwsh" is already registered in
           #     this scope' ⇒ 整个预设挂载失败）。极简的持久 shell 是超集（状态跨调用保留），保留它即可。
-          - id: persistent-shell
-            name: cordis:group
-            group: true
-            isolate:
-              terminals: true
-            config:
-              - id: pty
-                name: '@deepseek-ai/dsh-terminal'
-              - id: terminal-bash
-                name: '@deepseek-ai/dsh-terminal-bash'
-                disabled: !!js process.platform === 'win32'
-                config:
-                  timeoutMs: 300000
-              - id: persistent-bash
-                name: '@deepseek-ai/dsh-tool-bash-persistent'
-                disabled: !!js process.platform === 'win32'
-                config:
-                  timeoutMs: 300000
-                  description: |-
-                    Run commands in a bash shell
-                    * When invoking this tool, the contents of the "command" parameter does NOT need to be XML-escaped.
-                    * Network access depends on the task environment. Prefer configured mirrors/proxies when they are available.
-                    * State is persistent across command calls and discussions with the user.
-                    * To inspect a particular line range of a file, e.g. lines 10-25, try 'sed -n 10,25p /path/to/the/file'.
-                    * Please avoid commands that may produce a very large amount of output.
-                    * Please run long lived commands in the background, e.g. 'sleep 10 &' or start a server in the background.
-              - id: terminal-pwsh
-                name: '@deepseek-ai/dsh-terminal-bash'
-                disabled: !!js process.platform !== 'win32'
-                config:
-                  shellDialect: pwsh
-                  timeoutMs: 300000
-              - id: persistent-pwsh
-                name: '@deepseek-ai/dsh-tool-pwsh-persistent'
-                disabled: !!js process.platform !== 'win32'
-                config:
-                  timeoutMs: 300000
-                  description: |-
-                    Run commands in a PowerShell shell
-                    * When invoking this tool, the contents of the "command" parameter does NOT need to be XML-escaped.
-                    * You don't have access to the internet via this tool.
-                    * State is persistent across command calls and discussions with the user.
-                    * Use native Windows paths (C:\...) and $env:NAME variables; this is PowerShell, not bash.
-                    * Please avoid commands that may produce a very large amount of output.
-                    * Please run long lived commands in the background, e.g. 'Start-Job' or start a server with Start-Process.
+          # 标准 shell（2026-10-11 用户裁定：极简那套 persistent-shell 全部删掉）
+          # 删它的原因：极简的 persistent-pwsh 与标准 tool-pwsh 【抢同一个工具名 pwsh】；
+          #   且持久终端要等就绪/提示符，卡住时只表现为"长时间不返回"（它自身默认超时 300s）。
+          #   台架的持久会话由 pico_console 提供，这里不需要持久终端。
+          # 注：PTC 与极简无关 —— PTC 只贡献 tool-presentation 的呈现方式，那行照留。
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
           - id: tool-fs
             name: '@deepseek-ai/dsh-tool-fs'
           - id: tool-fs-search
