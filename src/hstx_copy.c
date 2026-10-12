@@ -400,8 +400,8 @@ static int ber_sampler(PIO pio, int gpio_base, int in_pin, uint32_t *dst)
     sm_config_set_in_shift(&c, false, true, 8);      /* 左移? 否, autopush, 8 位 */
     sm_config_set_clkdiv(&c, 10.0f);                 /* 25.2 MSa/s（DMA 只需 100MB/s，不会反压） */
     pio_sm_init(pio, sm, off, &c);
-    /* ⚠️ 绝不 pio_gpio_init 输入脚：那会改 FUNCSEL，把 HSTX 从 12-19 上踢开 */
-    pio_sm_set_pindirs_with_mask(pio, sm, 0, 0xFFFFFFFFu);   /* 本 SM 全输入，不驱动任何脚 */
+    /* ⚠️ 不碰 pindirs、不 pio_gpio_init 输入脚：前者可能影响同实例其他 SM 的输出使能，
+     *    后者会改 FUNCSEL 把 HSTX 从 12-19 上踢开。pio_sm_init 后本 SM 本来就是全输入。 */
     pio_sm_clear_fifos(pio, sm);
     int ch = dma_claim_unused_channel(true);
     dma_channel_config dc = dma_channel_get_default_config(ch);
@@ -474,9 +474,16 @@ static void ber_test(void)
     g_relay_div = 80;                      /* 252/3.15 = 80：中继与位率逐位同步 */
     relay_start(false);                    /* 真实路径：12-19 -> 20-27 -> 32-39 */
     sleep_ms(50);
+    /* 先证明"pad 到底有没有在动"，把"源没驱动"与"采样读不到"分开 */
+    activity("源   12-19", &sio_hw->gpio_in,    0x000FF000u);
+    activity("中继1 20-27", &sio_hw->gpio_in,    0x0FF00000u);
+    activity("中继2 32-39", &sio_hw->gpio_hi_in, 0x000000FFu);
 
     int ch_src = ber_sampler(pio2, 0, 12, g_ber_src);   /* 源：12-19 */
     int ch_out = ber_sampler(pio1, 16, 32, g_ber_out);  /* 输出：32-39 */
+    printf("  —— 启动采样后再看 pad 是否还在动 ——\n");
+    activity("源   12-19", &sio_hw->gpio_in,    0x000FF000u);
+    activity("中继2 32-39", &sio_hw->gpio_hi_in, 0x000000FFu);
     dma_channel_wait_for_finish_blocking(ch_src);
     dma_channel_wait_for_finish_blocking(ch_out);
 
