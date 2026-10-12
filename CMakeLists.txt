@@ -371,3 +371,24 @@ target_compile_definitions(hstx_auto PRIVATE
 pico_enable_stdio_usb(hstx_auto 1)
 pico_enable_stdio_uart(hstx_auto 1)
 pico_add_extra_outputs(hstx_auto)
+
+# hstx_auto_inv —— 自动出图 + 取反极性（真屏黑屏时换这一张）
+add_executable(hstx_auto_inv
+        src/hstx_copy.c
+        )
+target_link_libraries(hstx_auto_inv
+        pico_stdlib
+        pico_multicore
+        hardware_pio
+        hardware_clocks
+        hardware_vreg
+        pico_hdmi
+        )
+target_compile_definitions(hstx_auto_inv PRIVATE
+        PICO_STDIO_USB_STDOUT_TIMEOUT_US=2000
+        HSTX_AUTOSTART_SEC=10
+        HSTX_AUTOSTART_INVERT=1
+        )
+pico_enable_stdio_usb(hstx_auto_inv 1)
+pico_enable_stdio_uart(hstx_auto_inv 1)
+pico_add_extra_outputs(hstx_auto_inv)

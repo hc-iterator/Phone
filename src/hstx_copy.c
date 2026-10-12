@@ -644,7 +644,12 @@ int main(void)
     print_menu();
 #ifdef HSTX_AUTOSTART_SEC
     absolute_time_t t_boot = get_absolute_time();
-    printf("[auto] 本固件为自动出图版：%d 秒内没收到命令就自己走 Y 路径\n", HSTX_AUTOSTART_SEC);
+#ifdef HSTX_AUTOSTART_INVERT
+    g_relay_invert = true;
+    printf("[auto] 自动出图版（10 秒）+ 取反极性（四对 P/N 交换）\n");
+#else
+    printf("[auto] 自动出图版（10 秒，原样极性）\n");
+#endif
     fflush(stdout);
 #endif
 
