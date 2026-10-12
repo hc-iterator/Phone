@@ -157,6 +157,38 @@ HSTX   12-19  20ms内变化=119263
 
 烧 **`hstx_auto.uf2`** → 看屏（出条 = 收工）；黑屏 ⇒ 我再烧 `hstx_copy.uf2` 用 `Y`/`Z` 做极性 A/B 与 `W`/`P` 定位。
 
+### HSTX 的 lane 映射：不是假设，而是**库自己写出来的**（2026-10-12 核实）
+
+`video_output.c:824-832`（`video_output_core1_run()`）：
+
+```c
+hstx_ctrl_hw->bit[0] = HSTX_CTRL_BIT0_CLK_BITS | HSTX_CTRL_BIT0_INV_BITS;   // GPIO12 = CLK P
+hstx_ctrl_hw->bit[1] = HSTX_CTRL_BIT0_CLK_BITS;                             // GPIO13 = CLK N
+for (uint lane = 0; lane < 3; ++lane) {
+    int bit = 2 + (lane * 2);                                              // bit 2,4,6 → GPIO14,16,18
+    uint32_t lane_data_sel_bits = (lane * 10) << SEL_P | ((lane * 10) + 1) << SEL_N;
+    hstx_ctrl_hw->bit[bit]     = lane_data_sel_bits | HSTX_CTRL_BIT0_INV_BITS;
+    hstx_ctrl_hw->bit[bit + 1] = lane_data_sel_bits;
+}
+for (int i = PIN_HSTX_CLK; i <= PIN_HSTX_D2 + 1; ++i) gpio_set_function(i, 0);  // 12..19 → HSTX
+```
+
+- **GPIO12/13 = 时钟对**（bit0 反相 = P、bit1 = N）⇒ 这是库配置的**直接结论**，不是我们的假设 ✅
+- 三条数据 lane 落在 **GPIO14/15、16/17、18/19**（lane 序 0,1,2）
+- 「哪条是 D0 / 哪条是 D2」由库的 TMDS 位序决定 ⇒ **若接反，表现是"颜色错"而不是黑屏** ✗
+  ⇒ 真屏若出图但颜色不对，只改 stage-1 的 `in_pin` 排列即可（不改机制）。
+
+### `U` 的逐 lane 统计（本轮实测；结论：`U` 不能用来判时钟）
+
+| 采集 | 逐 lane 结果 |
+|---|---|
+| SRC 12-19 | bit2/bit3(14/15) 跳变 63/63（唯一成对相等）；bit0(12) 仅 6；bit1(13) **为 0** |
+| OUT 32-39 | bit6/bit7(38/39 = 时钟脚) **静态**；其余 6 个 bit 在动 |
+
+⇒ 在人为降速（CSR=400）下，HSTX 的**时钟 lane 不跳**（数据 lane 照常）⇒
+`U` 只能证明"数据侧有真实码流"，**不能判时钟/极性**；时钟 lane 的存在性只能靠满速活动度（32-39 全 mask 都测到跳变 ✅）或真屏确认。
+
+
 ```
 
 （`mov pins, !pins` 之所以等价于"交换 P/N"：差分对的两条线在数字域上本就互补，整对取反 = P↔N。）

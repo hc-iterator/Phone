@@ -528,6 +528,27 @@ static void ber_test(void)
 //    位率 = 10 * (clk_hstx / CSR_CLKDIV)；取 CSR=400 ⇒ 126MHz/400*10 = 3.15 Mbit/s
 //    中继 clkdiv=80（252/3.15）；采样 clkdiv=10（25.2MSa/s ⇒ 8 采样/位）
 // ---------------------------------------------------------------------------
+/* 逐 lane 统计：clock lane 的 run 长度最整齐（占比高），data lane 长短不齐 ⇒ 用来判"哪一对是时钟" */
+static void lane_stats(const char *tag, uint32_t *buf, int n)
+{
+    printf("  %s\n", tag);
+    for (int b = 0; b < 8; b++) {
+        uint32_t runs[256]; for (int i = 0; i < 256; i++) runs[i] = 0;
+        uint32_t trans = 0, best = 0, besti = 0, tot = 0;
+        int cur = 1; uint32_t prev = (buf[0] >> b) & 1u;
+        for (int i = 1; i < n; i++) {
+            uint32_t v = (buf[i] >> b) & 1u;
+            if (v == prev) { cur++; }
+            else { if (cur < 256) runs[cur]++; trans++; cur = 1; prev = v; }
+        }
+        for (int i = 1; i < 256; i++) { tot += runs[i]; if (runs[i] > best) { best = runs[i]; besti = (uint32_t)i; } }
+        printf("    bit%d: trans=%lu  mainRun=%lu  reg=%lu%%\n", b,
+               (unsigned long)trans, (unsigned long)besti,
+               (unsigned long)(tot ? best * 100u / tot : 0));
+    }
+    fflush(stdout);
+}
+
 static void verify_slow(void)
 {
     printf("\n--- U：慢速 HSTX 验证（CSR 分频 + 8 采样/位）---\n"); fflush(stdout);
@@ -558,13 +579,16 @@ static void verify_slow(void)
     activity("源   12-19", &sio_hw->gpio_in,    0x000FF000u);
     activity("中继2 32-39", &sio_hw->gpio_hi_in, 0x000000FFu);
 
-    int ch = ber_sampler(pio1, 16, 32, g_ber_out);
+    int ch = ber_sampler(pio2, 0, 12, g_ber_src);      /* 源：12-19（判哪一对是时钟） */
+    int ch2 = ber_sampler(pio1, 16, 32, g_ber_out);    /* 输出：32-39 */
     {
         uint32_t t0 = time_us_32();
         while (dma_channel_is_busy((uint)ch) && (time_us_32() - t0) < 200000u) {
             watchdog_update();
             tight_loop_contents();
         }
+        while (dma_channel_is_busy((uint)ch2) && (time_us_32() - t0) < 200000u) { watchdog_update(); tight_loop_contents(); }
+        if (dma_channel_is_busy((uint)ch2)) dma_channel_abort((uint)ch2);
         if (dma_channel_is_busy((uint)ch)) {
             dma_channel_abort((uint)ch);
             printf("  [warn] capture timeout (dma busy 200ms) => samples may be partial\n");
@@ -584,9 +608,9 @@ static void verify_slow(void)
            (unsigned long)edges, (unsigned long)first_edge, (unsigned long)last_edge,
            edges > 2 ? (double)(last_edge - first_edge) / (double)(edges - 1) : 0.0,
            edges > 2 ? 2.0 * (double)(last_edge - first_edge) / (double)(edges - 1) : 0.0);
-    printf("  DUMP-BEGIN\n");
-    for (int i = 0; i < 192; i++) printf("%02lx\n", (unsigned long)(g_ber_out[i] & 0xFFu));
-    printf("  DUMP-END\n\n"); fflush(stdout);
+    lane_stats("SRC 12-19 (bit0=pin12 ... bit7=pin19)", g_ber_src, BER_N);
+    lane_stats("OUT 32-39 (bit0=pin32 ... bit7=pin39)", g_ber_out, BER_N);
+    fflush(stdout);
 }
 
 static void print_menu(void)
