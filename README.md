@@ -23,14 +23,17 @@ git -C ..\DeepSeekCode worktree list     # 能看到两个工作树
 |---|---|
 | `dsh-picophone\` | **主力插件**：9 个 `pico_*` 工具 + `/pico` 命令（台架：构建 / 烧写 / 串口 / SWD / %TEMP% / git / 脚本） |
 | `dsh-sandbox-probe\` | **临时探针插件**：只为回答"插件提的沙箱策略被不被采纳"（验完卸掉/删掉） |
-| `uninstall-picophone-plugin.cmd` / `.ps1` | 一键卸载器：只撤本插件加进 profile 的那 4 处 |
+| `uninstall-picophone-plugin.cmd` / `.ps1` | 一键卸载器：撤 profile 依赖条目、`node_modules` 软链接，以及旧版遗留的 bundles/覆盖行（**不动 Agent 预设**） |
 | `_backups\` | 动手前的快照（**已 gitignore**，不进版本库） |
 
 ## 装 / 卸
 
 ```powershell
-# 装（在 DSH 里）：plugin_manager  install_bundle  target = <这个目录>\dsh-picophone
-# 卸：双击 uninstall-picophone-plugin.cmd  （或 plugin_manager remove_bundle dsh-picophone）
+# 装：profile package.json 加依赖 link:<这个目录>\dsh-picophone → pnpm install 建链接
+#     真正的挂载行在 Agent 预设里：dsh-pico-preset\cordis.patch.yml 的 `- id: picophone`
+#     ⚠️ 故意【不】声明 dsh.bundle、不进 dsh.profile.bundles：台架只对本模式开放；
+#        一旦同时是 bundle，插件面板会出现"显示关闭却删不掉"的假开关（bundle-in-use）—— 2026-10-11 移除
+# 卸：双击 uninstall-picophone-plugin.cmd（别忘了同时删预设里那一行）
 ```
 
 ## 🔴 改这里的东西，必须重启 DSH 才生效

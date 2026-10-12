@@ -1,12 +1,16 @@
 @echo off
 REM ===========================================================================
-REM  One-click uninstall of the dsh-picophone DSH plugin bundle.
+REM  One-click uninstall of the dsh-picophone DSH plugin.
 REM
 REM  It removes ONLY what that plugin added to the DSH profile:
 REM    1) dependencies["dsh-picophone"] in the profile package.json
-REM    2) "dsh-picophone" in dsh.profile.bundles
-REM    3) the "- id: picophone" row in cordis.patch.yml
+REM    2) (legacy installs only) "dsh-picophone" in dsh.profile.bundles
+REM    3) (legacy installs only) the "- id: picophone" row in the profile cordis.patch.yml
 REM    4) node_modules\dsh-picophone (pnpm remove does this one)
+REM
+REM  WARNING: it does NOT touch the agent preset. After uninstalling, delete the
+REM  "- id: picophone" row in dsh-pico-preset\cordis.patch.yml yourself, otherwise
+REM  that preset dangles and its whole mount fails.
 REM
 REM  It never touches pnpm itself, other plugins, project sources or git repos.
 REM

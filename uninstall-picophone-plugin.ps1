@@ -3,9 +3,13 @@
 #
 #  一键卸载「dsh-picophone」这个 DSH 插件包 —— 只撤销【它自己加进 profile 的东西】：
 #     ①  profile package.json 的 dependencies["dsh-picophone"]
-#     ②  profile package.json 的 dsh.profile.bundles 里的 "dsh-picophone"
-#     ③  profile cordis.patch.yml 里的 `- id: picophone` 覆盖行
+#     ②  （仅旧版安装才有）profile package.json 的 dsh.profile.bundles 里的 "dsh-picophone"
+#     ③  （仅旧版安装才有）profile cordis.patch.yml 里的 `- id: picophone` 覆盖行
 #     ④  profile node_modules\dsh-picophone 软链接（交给 pnpm remove 处理）
+#
+#  ⚠️ 2026-10-11 起本包【不再是 bundle】：挂载行由 Agent 预设 `pico` 声明
+#     （dsh-plugins\dsh-pico-preset\cordis.patch.yml 的 `- id: picophone`）。
+#     ⇒ 本脚本【不动预设】；卸载后请自己删掉预设里那一行，否则预设会引用一个不存在的包、整个挂载失败。
 #
 #  **不碰**：pnpm 本身、别的插件与依赖、项目源码（除非显式 -PurgeSource）、
 #            _agents\ 空间、git 仓库、debug_logs。
@@ -95,7 +99,8 @@ if (-not $depSpec -and -not $inBundles -and -not $patchHasRow -and -not $linkExi
 }
 
 Say ''
-Say '本脚本只动上面这 4 处；**不碰 pnpm、不碰别的插件与依赖、不碰项目源码与 git 仓库**。'
+Say '本脚本只动上面这些；**不碰 pnpm、不碰别的插件与依赖、不碰项目源码与 git 仓库**。'
+Say '⚠️ 它**不动 Agent 预设**：卸载后请自己删掉 dsh-pico-preset\cordis.patch.yml 里的 `- id: picophone` 行，否则预设悬空、整个挂载失败。'
 if ($PurgeSource) { WarnMsg '已指定 -PurgeSource：源码目录也会被删除。' }
 
 # ---------------------------------------------------------------- 确认

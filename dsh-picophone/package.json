@@ -13,14 +13,8 @@
   "files": [
     "index.js",
     "serial-session.ps1",
-    "cordis.patch.yml",
     "icon.svg",
     "locale/*.json",
     "README.md"
-  ],
-  "dsh": {
-    "bundle": {
-      "patch": "./cordis.patch.yml"
-    }
-  }
+  ]
 }

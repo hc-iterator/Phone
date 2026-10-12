@@ -35,44 +35,53 @@ CMake/ninja/VS 工具链、烧写 uf2、读串口、%TEMP% 读写都能真正落
 
 ## 配置
 
-`cordis.patch.yml` 的 `config` 可覆盖默认值（不填就用插件里的默认）：
+配置写在**挂载它的那一行**上 —— 也就是 Agent 预设 `pico` 里
+（`dsh-plugins\dsh-pico-preset\cordis.patch.yml` 的 `- id: picophone`）；
+不填就用插件里的默认值：
 
 ```yaml
-- insert:
-    - id: picophone
-      name: dsh-picophone
-      config:
-        root: 'C:\Users\Chen\Desktop\Pico\PicoPhone'
-        repo: null            # 默认 <root>\DeepSeekCode
-        tempRoot: null        # 默认系统 %TEMP%
-        powershell: 'pwsh'
-        python: 'python'
-        timeoutMs: 900000     # 构建默认超时
-        maxOutputChars: 14000 # 单次结果截断长度
-        profileName: 'web'    # Host 里探不到 profile 名时手填（见「已知事项」的 A/B 对照）
-        serialKeep: 20        # pico_serial 自动落盘的抓包最多留几份（只删 picophone_serial_*.txt）
-        allowExec: ['cmake', 'ninja', 'git', 'picotool', 'openocd', 'python']
-        devices:
-          dut: { vid: '2E8A', pid: '0009' }
-          probe: { vid: '2E8A', pid: '000C' }
-          sampler: { vid: '2E8A', pid: '000A' }
+- id: picophone
+  name: dsh-picophone
+  config:
+    root: 'C:\Users\Chen\Desktop\Pico\PicoPhone'
+    repo: null            # 默认 <root>\DeepSeekCode
+    tempRoot: null        # 默认系统 %TEMP%
+    powershell: 'pwsh'
+    python: 'python'
+    timeoutMs: 900000     # 构建默认超时
+    maxOutputChars: 14000 # 单次结果截断长度
+    profileName: 'web'    # Host 里探不到 profile 名时手填（见「已知事项」的 A/B 对照）
+    serialKeep: 20        # pico_serial 自动落盘的抓包最多留几份（只删 picophone_serial_*.txt）
+    allowExec: ['cmake', 'ninja', 'git', 'picotool', 'openocd', 'python']
+    devices:
+      dut: { vid: '2E8A', pid: '0009' }
+      probe: { vid: '2E8A', pid: '000C' }
+      sampler: { vid: '2E8A', pid: '000A' }
 ```
 
 ## 安装 / 卸载
 
-安装（在当前 profile 里）：
+**它不是 bundle**（2026-10-11 起）：本包只作为 profile 的依赖（`link:`）存在，
+挂载行由 Agent 预设 `pico` 声明（`dsh-pico-preset\cordis.patch.yml` 的 `- id: picophone`）。
 
-```
-plugin_manager install_bundle  target = <这个目录的绝对路径>
-```
+> 为什么不再当 bundle：以前它同时是 profile 层，插件面板就多出一个"启用/关闭"开关 ——
+> 那个 `enabled` 只看 `dsh.profile.bundles`，而台架实际由预设挂载 ⇒ 面板显示**关闭**；
+> 删除又被 `bundle-in-use` 拒（判据正是"patch 声明的 `picophone`/`dsh-picophone` 行在 loader 里活着"，
+> 而这一行现在来自预设）。于是"显示关闭 / 删不掉 / 却在干活"三者并存。
+> 去掉 `dsh.bundle` 声明后，那个假开关不再出现（挂载方式一点没变）。
+
+安装 / 改：
+
+1. profile `package.json` 的 `dependencies` 里保留 `"dsh-picophone": "link:<这个目录的绝对路径>"`，跑一次 `pnpm install` 建链接；
+2. 预设里保留 `- id: picophone` / `name: dsh-picophone` 行。（`plugin_manager install_bundle` **不再适用**。）
 
 卸载：
 
-- Agent 侧：`plugin_manager remove_bundle  target = dsh-picophone`；
-- 人侧一键：[../uninstall-picophone-plugin.cmd](../uninstall-picophone-plugin.cmd)（双击即可，只撤销本插件加进 profile 的 4 处：
-  dependencies 条目、`dsh.profile.bundles` 条目、`- id: picophone` 覆盖行、`node_modules` 软链接；
+- 人侧一键：[../uninstall-picophone-plugin.cmd](../uninstall-picophone-plugin.cmd)（撤 dependencies 条目、`node_modules` 软链接，以及旧版遗留在 profile patch 里的 bundles / 覆盖行；
   **不碰 pnpm、不碰别的插件与依赖、不碰项目源码与 git 仓库**）。
   想看会删什么加 `-DryRun`，想跳过确认加 `-Yes`，想连源码一起删加 `-PurgeSource`。
+- ⚠️ **别忘了预设里那一行**：包卸掉后 `dsh-pico-preset\cordis.patch.yml` 的 `- id: picophone` 就成了悬空引用
+  ⇒ 整个预设挂载失败。要么同时删那一行，要么把 `@local/dsh-pico-preset` 从 `dsh.profile.bundles` 里摘掉。
 
 ## 冒烟测试
 

@@ -3,6 +3,6 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Pico all-round mode: standard + minimal + PTC + cordis capabilities plus the PicoPhone rig.",
+  "description": "Pico all-round mode: standard + PTC + cordis capabilities plus the PicoPhone rig.",
   "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
 }
