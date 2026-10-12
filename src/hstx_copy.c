@@ -86,7 +86,12 @@ static void __scratch_x("") scanline_cb(uint32_t v_scanline, uint32_t active_lin
 // ---------------------------------------------------------------------------
 // PIO 复制层：4 个 SM，每个一条 `mov pins, pins`（0xA000），wrap=0
 // ---------------------------------------------------------------------------
-static const uint16_t copy_prog_insn[1] = { 0xA000u };
+static const uint16_t copy_prog_insn[1] = { 0xA000u };          /* mov pins, pins  */
+static const uint16_t copy_prog_insn_inv[1] = { 0xA008u };      /* mov pins, !pins（整字节取反 ⇒ 四对 P/N 全交换）*/
+static const struct pio_program copy_prog_inv = {
+    .instructions = copy_prog_insn_inv, .length = 1, .origin = -1,
+};
+static bool g_relay_invert = false;   /* 第二级是否取反（极性选项） */
 static const struct pio_program copy_prog = {
     .instructions = copy_prog_insn,
     .length = 1,
@@ -332,7 +337,7 @@ static void relay_start(bool mirror)
     /* 第二级 PIO1(base 16)：一个 SM 直通 20-27 -> 32-39（顺序已在第一级排好） */
     pio_set_gpio_base(pio1, mirror ? 0 : 16);
     int sm1 = pio_claim_unused_sm(pio1, true);
-    uint off1 = pio_add_program(pio1, &copy_prog);
+    uint off1 = pio_add_program(pio1, g_relay_invert ? &copy_prog_inv : &copy_prog);
     pio_sm_config c1 = pio_get_default_sm_config();
     sm_config_set_wrap(&c1, off1, off1);
     sm_config_set_in_pins(&c1, 20);
@@ -526,7 +531,7 @@ static void print_menu(void)
     printf("  W = 两级中继实验（含测量）\n  Y = HSTX + 两级中继 -> 32-39（出图）\n  M = 镜像版 -> 0-7（供采样解码）\n  L = 慢档 31.5MHz 开关\n");
     printf("  Q = 停止（关 HSTX、停 PIO、回空闲）\n");
     printf("  T = 引脚自测（逐脚驱动 0..20）\n");
-    printf("  A = 拉采样板 RUN（GPIO42）  H[脚号] = 持续驱动某脚高（默认 10）   N = 释放\n");
+    printf("  Z = 同 Y 但四对 P/N 取反（黑屏时换它试）\n  A = 拉采样板 RUN（GPIO42）  H[脚号] = 持续驱动某脚高（默认 10）   N = 释放\n");
     printf("  P = 打印现场\n");
     printf("  B = 进 BOOTSEL    R = 重启\n");
     printf("当前：空闲（未超频、未启动 HSTX）\n\n");
@@ -554,6 +559,8 @@ int main(void)
         case 'S': case 's': start_video(true);  break;   /* 带 PIO 复制（2 号系统：0-7） */
         case 'V': case 'v': start_video(false); break;   /* 只出 HSTX */
         case 'W': case 'w': relay_test(); break;          /* 两级 PIO 中继实验 + 测量 */
+        case 'Z': case 'z': g_relay_invert = true;  printf("[Z] 极性取反版（四对 P/N 交换）\n"); fflush(stdout);
+                            start_video(false); relay_start(false); printf("[Z] HSTX + 两级中继(取反) -> 32-39\n"); fflush(stdout); break;
         case 'Y': case 'y': start_video(false); relay_start(false); printf("[Y] HSTX + 两级中继 -> 32-39\n"); fflush(stdout); break;
         case 'M': case 'm': start_video(false); relay_start(true);  printf("[M] 镜像：两级中继 -> 0-7（采样板可解码）\n"); fflush(stdout); break;
         case 'K': case 'k': ber_test(); break;   /* 逐位对拍（BER） */
