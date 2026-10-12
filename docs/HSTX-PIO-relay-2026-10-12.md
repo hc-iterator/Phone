@@ -131,6 +131,32 @@
 uint32_t t0 = time_us_32();
 while (dma_channel_is_busy(ch) && (time_us_32() - t0) < 200000u) { watchdog_update(); tight_loop_contents(); }
 if (dma_channel_is_busy(ch)) { dma_channel_abort(ch); printf("capture timeout\n"); }
+
+### `hstx_auto`（自动出图版）—— 上真屏最稳的一条路（2026-10-12 实测）
+
+**目的**：即使 PiZero 的 USB CDC 不工作（或没接串口），屏幕也能出图 ⇒ **上真屏不依赖任何命令**。
+
+**做法**：同一份 `src/hstx_copy.c`，编译期加 `-DHSTX_AUTOSTART_SEC=10`：
+上电后 10 秒内没收到命令 ⇒ 自动走 `Y` 路径（HSTX + 两级中继 → 32-39）。
+
+**实测（2 号系统）**：烧 `hstx_auto.uf2` 后**什么都不发**，等 15 秒再问 `W`：
+
+```
+HSTX   12-19  20ms内变化=119263
+中继1  20-27  20ms内变化=118163
+中继2  32-39  20ms内变化=117690
+```
+
+刚烧完是干净重启、期间没人下命令 ⇒ **它确实自己出图了** ✅
+（`[auto]` 那两行 printf 发生在串口打开之前，所以抓不到 —— 活动度才是证据。）
+
+- 产物：`build/hstx_auto.uf2`（110080 B）
+- 风险与恢复：自动出图后若挂住 ⇒ 8 秒看门狗复位 ⇒ 再次进入 10 秒窗口（串口随时有机会插进去），BOOTSEL 永远可用。
+
+### 上真屏最终建议路径
+
+烧 **`hstx_auto.uf2`** → 看屏（出条 = 收工）；黑屏 ⇒ 我再烧 `hstx_copy.uf2` 用 `Y`/`Z` 做极性 A/B 与 `W`/`P` 定位。
+
 ```
 
 （`mov pins, !pins` 之所以等价于"交换 P/N"：差分对的两条线在数字域上本就互补，整对取反 = P↔N。）

@@ -618,9 +618,21 @@ int main(void)
     printf("\n[hstx_copy] 上电。sys_clk=%lu Hz（默认档，未超频）\n",
            (unsigned long)clock_get_hz(clk_sys));
     print_menu();
+#ifdef HSTX_AUTOSTART_SEC
+    absolute_time_t t_boot = get_absolute_time();
+    printf("[auto] 本固件为自动出图版：%d 秒内没收到命令就自己走 Y 路径\n", HSTX_AUTOSTART_SEC);
+    fflush(stdout);
+#endif
 
     while (true) {
         watchdog_update();                       /* ★ 喂狗 */
+#ifdef HSTX_AUTOSTART_SEC
+        if (!g_relay_started &&
+            absolute_time_diff_us(t_boot, get_absolute_time()) > (int64_t)HSTX_AUTOSTART_SEC * 1000000) {
+            printf("[auto] 超时 ⇒ 自动出图（HSTX + 两级中继 -> 32-39）\n"); fflush(stdout);
+            start_video(false); relay_start(false);
+        }
+#endif
         int ch = getchar_timeout_us(10000);     // 10ms 轮询：既省电又不丢键
         if (ch == PICO_ERROR_TIMEOUT) continue;
 

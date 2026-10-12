@@ -347,3 +347,27 @@ target_compile_definitions(hstx_copy PRIVATE PICO_STDIO_USB_STDOUT_TIMEOUT_US=20
 pico_enable_stdio_usb(hstx_copy 1)
 pico_enable_stdio_uart(hstx_copy 1)
 pico_add_extra_outputs(hstx_copy)
+
+# ----------------------------------------------------------------------------
+# hstx_auto —— 同一个源文件的"自动出图"变体（屏幕验证专用）
+#   上电等 10 秒，没收到串口命令就自己走 Y 路径出图 ⇒ 即使 USB CDC 不工作也能出画面。
+#   产物：build/hstx_auto.uf2
+# ----------------------------------------------------------------------------
+add_executable(hstx_auto
+        src/hstx_copy.c
+        )
+target_link_libraries(hstx_auto
+        pico_stdlib
+        pico_multicore
+        hardware_pio
+        hardware_clocks
+        hardware_vreg
+        pico_hdmi
+        )
+target_compile_definitions(hstx_auto PRIVATE
+        PICO_STDIO_USB_STDOUT_TIMEOUT_US=2000
+        HSTX_AUTOSTART_SEC=10
+        )
+pico_enable_stdio_usb(hstx_auto 1)
+pico_enable_stdio_uart(hstx_auto 1)
+pico_add_extra_outputs(hstx_auto)
