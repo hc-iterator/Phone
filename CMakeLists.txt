@@ -41,23 +41,33 @@ set(PICO_PSRAM_SIZE_BYTES 8*1024*1024)
 
 project(PicoPhone C CXX ASM)
 
-# ★ 2026-10-10 修复：USB stdio 写超时 500ms → 2ms（治"app 被 printf 拖死、DVI 引擎饿死"）
-# 实测（SWD 读计数器，串口被占也能取证 ✓）：Core0 主循环 3 分钟只跑 150 圈（≈0.8 圈/秒）✗，
-#   生产者 3 分钟只出 1062 行 ✗、引擎看门狗重启 1 次 ✗ ⇒ 屏幕蓝白闪。
-# 根因（SDK 源码定死 ✓）：stdio_usb.c:122 每次写会一直等主机把数据取走，上限 =
-#   PICO_STDIO_USB_STDOUT_TIMEOUT_US（stdio_usb.h:33 默认 500000 µs = 500 ms）✗。
-#   主机侧开着 COM 口却不取数据（经 USB Hub 尤其容易）⇒ 每次打印阻塞 0.5 s
-#   ⇒ 2 次/秒 ⇒ 与实测 0.8 圈/秒 数量级吻合 ✓✓。
-# ⚠️ 必须用 add_compile_definitions 且放在 pico_sdk_init() 之前：这个宏是在【SDK 自己的】
-#   stdio_usb.c 里用的，写 target_compile_definitions(PicoPhone ...) 到不了那里 ✗。
-add_compile_definitions(PICO_STDIO_USB_STDOUT_TIMEOUT_US=2000)
-
 set(PICO_CXX_ENABLE_EXCEPTIONS 1)
 
 set(PICO_CXX_ENABLE_RTTI 1)
 
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
+
+# ★ 2026-10-10 修复：USB stdio 写超时 500ms → 2ms（治"app 被 printf 拖死、DVI 引擎饿死"）
+# 实测（SWD 计数器，串口被占也能取证 ✓）：Core0 主循环 3 分钟只跑 150 圈（≈0.8 圈/秒）✗、
+#   生产者只出 1062 行 ✗、引擎看门狗重启 1 次 ✗ ⇒ 屏幕蓝白闪。
+# 根因（SDK 源码定死 ✓）：stdio_usb.c:122 每次写会一直等主机把数据取走，上限 =
+#   PICO_STDIO_USB_STDOUT_TIMEOUT_US（stdio_usb.h:33 默认 500000 µs = 500 ms）✗。
+#   主机侧开着 COM 口却不取数据（经 USB Hub 尤其容易）⇒ 每次打印阻塞 0.5 s ⇒ 与 0.8 圈/秒吻合 ✓。
+# ⚠️ 这里【故意】只改 pico_stdio_usb 一个库：
+#   · 宏是在 SDK 自己的 stdio_usb.c 里用的，所以要能影响"sdk 库的编译"，而不是我们的源文件 ✓
+#   · 但绝不能用 add_compile_definitions 走全局 ✗ —— 那会把 500+ 个对象全部作废，
+#     包括 third_party/ILI9488_Pico 里那些对象路径超过 Windows 260 字符上限的目标 ✗
+#     （实测：编译报 opening dependency file ... .obj.d: No such file or directory），
+#     结果整个工程再也编不出来 ✓（2026-10-10 为此卡了一个小时 ✗）。
+#   · 关键（读 SDK 源码确认 ✓）：pico_stdio_usb 是个 INTERFACE 库，它把
+#     stdio_usb.c / stdio_usb_descriptors.c 用 target_sources(... INTERFACE ...) 挂出来，
+#     ⇒ 这些源文件是【跟着使用者目标一起编译】的 ✓ ⇒ 给 PicoPhone 加私有宏就能命中它们 ✓
+#   · 但绝不能走 add_compile_definitions 全局 ✗ —— 那会把 500+ 个对象（含 third_party/ILI9488_Pico
+#     里对象路径超过 Windows 260 字符上限的目标）全部作废，实测报 "opening dependency file ... .obj.d:
+#     No such file or directory"，整个工程再也编不出来 ✓（2026-10-10 为此卡了一个多小时 ✗）。
+# （本宏的 target_compile_definitions 必须放在 add_executable 之后 —— 目标得先存在 ✓）
+# 见下方 add_executable(PicoPhone) 之后的那一行 ✓
 
 # Add executable. Default name is the project name, version 0.1
 
@@ -74,6 +84,10 @@ add_executable(PicoPhone
         src/pio_dma_bench.c   # 第 19 轮临时诊断：PIO+DMA 最小对照基准（定位完删除）
         #psram_test.c
         )
+
+# ★ 2026-10-10：USB stdio 写超时 500ms → 2ms（长注释见本文件上方 project() 之后）
+#     它治的是"printf 阻塞 0.5 s ⇒ Core0 主循环只有 0.8 圈/秒 ⇒ DVI 引擎饿死 ⇒ 蓝白闪" ✗
+target_compile_definitions(PicoPhone PRIVATE PICO_STDIO_USB_STDOUT_TIMEOUT_US=2000)
 
 target_compile_definitions(PicoPhone PRIVATE
     PICO_AUTO_DETECT_PSRAM=0          # 自动检测 PSRAM
@@ -181,6 +195,10 @@ target_compile_definitions(PicoPhone PRIVATE
 
 add_subdirectory(third_party/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico-main/src)
 add_subdirectory(third_party/ILI9488_Pico)
+# ★ HSTX 分频：本板用 252 MHz 系统时钟（项目实测过的稳定档），必须 div2 才能保持
+#   25.2 MHz 像素时钟（库默认 126MHz/div1 产出同一像素时钟）。这个宏在【库】里生效，
+#   所以必须设在 add_subdirectory 之前。
+set(PICO_HDMI_HSTX_CLK_DIV "2" CACHE STRING "Override MODE_HSTX_CLK_DIV; empty keeps mode default" FORCE)
 add_subdirectory(third_party/pico_hdmi-0.0.7)
 
 # Add any user requested libraries
@@ -304,3 +322,28 @@ target_compile_definitions(pin_test PRIVATE
 )
 target_link_libraries(pin_test pico_stdlib)
 pico_add_extra_outputs(pin_test)
+
+# ============================================================================
+# HSTX + PIO 复制 —— 最小验证固件（2026-10-12）
+# ============================================================================
+# 板载 HDMI 口在 GPIO32..39（不可改），HSTX 硬连 GPIO12..19（不可改）⇒
+# HSTX 产生 TMDS，PIO 四个 SM 用单条 `mov pins, pins` 逐位同速复制到 32..39。
+# 时钟成对成立：sys 252MHz + HSTX div2（本文件上方设的缓存变量）+ PIO clkdiv=1。
+# 判据：烧上去后屏幕出 8 色竖条 ⇒ 方案成立。
+# 产物：build/hstx_copy.uf2
+add_executable(hstx_copy
+        src/hstx_copy.c
+        )
+target_link_libraries(hstx_copy
+        pico_stdlib
+        pico_multicore
+        hardware_pio
+        hardware_clocks
+        hardware_vreg
+        pico_hdmi
+        )
+# 串口没人读时不要卡死 core0（根工程 PicoPhone 早就这么做了）
+target_compile_definitions(hstx_copy PRIVATE PICO_STDIO_USB_STDOUT_TIMEOUT_US=2000)
+pico_enable_stdio_usb(hstx_copy 1)
+pico_enable_stdio_uart(hstx_copy 1)
+pico_add_extra_outputs(hstx_copy)

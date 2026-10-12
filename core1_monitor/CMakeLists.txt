@@ -49,3 +49,21 @@ target_link_libraries(core1_monitor
 )
 
 pico_add_extra_outputs(core1_monitor)
+
+# ============================================================================================
+#  pin_sniff —— RP2040 侧的"引脚观察器"（2026-10-12，2 号系统专属）
+#  为什么挂在本子工程里：新开子工程要改 tools\build_sub.ps1，而那份是【受管脚本】
+#  （跑的是运行本，改工作区那份不生效；改运行本那份会碰信任门）✗
+#  本目录是 junction 回真仓库 ⇒ 在这里加目标，pico_build core1_monitor 就会连它一起编 ✓
+#  产物：core1_monitor/build/pin_sniff.uf2
+# ============================================================================================
+add_executable(pin_sniff ${CMAKE_CURRENT_LIST_DIR}/pin_sniff.c)
+pico_enable_stdio_usb(pin_sniff 1)
+pico_enable_stdio_uart(pin_sniff 0)
+target_link_libraries(pin_sniff
+    pico_stdlib
+    hardware_gpio
+    hardware_watchdog
+    hardware_clocks
+)
+pico_add_extra_outputs(pin_sniff)
