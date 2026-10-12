@@ -37,6 +37,7 @@
 #include "hardware/structs/sio.h"
 #include "hardware/dma.h"
 #include "hardware/structs/clocks.h"
+#include "hardware/structs/hstx_ctrl.h"
 #include "hardware/watchdog.h"
 
 #include "pico_hdmi/hstx_data_island_queue.h"
@@ -423,7 +424,7 @@ static int ber_sampler(PIO pio, int gpio_base, int in_pin, uint32_t *dst)
 static void ber_test(void)
 {
     printf("\n--- K：逐位对拍（源 12-19 vs 输出 32-39，8 采样/位）---\n"); fflush(stdout);
-    watchdog_disable();                       /* 测试时间长，先关狗 */
+    watchdog_update();                        /* 别关狗：万一卡住，8 秒后自愈 */
 
     if (g_video_started || g_relay_started) { printf("  请先按 R 重启再发 K（本测试要求干净启动）\n\n"); return; }
 
@@ -519,7 +520,73 @@ static void ber_test(void)
            best_sh, best_sh / 8.0, (unsigned long)best_mm, BER_N);
     printf("  (未对齐时不一致位 = %lu；若最佳对齐下为 0 ⇒ 逐位相同)\n\n", (unsigned long)raw_mm);
     fflush(stdout);
-    watchdog_enable(8000, 0);                 /* 测试完重新上狗 */
+}
+
+// ---------------------------------------------------------------------------
+// U：验证模式 —— 把 HSTX 串行器【运行时降速】(改 CSR_CLKDIV)，从而能用 8 采样/位
+//    采到真实的 HSTX 输出，用来判：实际位率、极性/配对、控制码是否正确。
+//    位率 = 10 * (clk_hstx / CSR_CLKDIV)；取 CSR=400 ⇒ 126MHz/400*10 = 3.15 Mbit/s
+//    中继 clkdiv=80（252/3.15）；采样 clkdiv=10（25.2MSa/s ⇒ 8 采样/位）
+// ---------------------------------------------------------------------------
+static void verify_slow(void)
+{
+    printf("\n--- U：慢速 HSTX 验证（CSR 分频 + 8 采样/位）---\n"); fflush(stdout);
+    watchdog_update();                        /* 别关狗 */
+    if (g_video_started || g_relay_started) { printf("  请先按 R 重启再发 U\n\n"); watchdog_enable(8000,0); return; }
+
+    vreg_set_voltage(VREG_VOLTAGE_1_25); sleep_ms(50);
+    set_sys_clock_khz(252000, true);
+    hstx_di_queue_init();
+    video_output_init(FRAME_W, FRAME_H);
+    video_output_set_dvi_mode(true);
+    video_output_set_scanline_callback(scanline_cb);
+    multicore_launch_core1(video_output_core1_run);
+    g_video_started = true;
+
+    uint32_t csr = hstx_ctrl_hw->csr;
+    csr = (csr & ~HSTX_CTRL_CSR_CLKDIV_BITS) | (400u << HSTX_CTRL_CSR_CLKDIV_LSB);
+    hstx_ctrl_hw->csr = csr;
+    printf("  clk_hstx=%lu Hz  CSR_CLKDIV=400  ⇒ 像素≈%lu Hz, 位率≈%lu kbit/s\n",
+           (unsigned long)clock_get_hz(clk_hstx),
+           (unsigned long)(clock_get_hz(clk_hstx) / 400u),
+           (unsigned long)(10ull * clock_get_hz(clk_hstx) / 400u / 1000ull));
+
+    g_relay_div = 80;
+    relay_start(false);
+    sleep_ms(200);
+
+    activity("源   12-19", &sio_hw->gpio_in,    0x000FF000u);
+    activity("中继2 32-39", &sio_hw->gpio_hi_in, 0x000000FFu);
+
+    int ch = ber_sampler(pio1, 16, 32, g_ber_out);
+    {
+        uint32_t t0 = time_us_32();
+        while (dma_channel_is_busy((uint)ch) && (time_us_32() - t0) < 200000u) {
+            watchdog_update();
+            tight_loop_contents();
+        }
+        if (dma_channel_is_busy((uint)ch)) {
+            dma_channel_abort((uint)ch);
+            printf("  [warn] capture timeout (dma busy 200ms) => samples may be partial\n");
+        } else {
+            printf("  capture done in %lu us\n", (unsigned long)(time_us_32() - t0));
+        }
+        fflush(stdout);
+    }
+
+    /* 从采到的输出样本里量 CLK_P（bit6）的周期（样本数） */
+    uint32_t edges = 0, first_edge = 0, last_edge = 0, prev = (g_ber_out[0] >> 6) & 1u;
+    for (int i = 1; i < BER_N; i++) {
+        uint32_t cur = (g_ber_out[i] >> 6) & 1u;
+        if (cur != prev) { if (!edges) first_edge = (uint32_t)i; last_edge = (uint32_t)i; edges++; prev = cur; }
+    }
+    printf("  CLK_P 跳变 %lu 次；首/末跳变样本 %lu/%lu ⇒ 半周期≈%.1f 样本、像素周期≈%.1f 样本\n",
+           (unsigned long)edges, (unsigned long)first_edge, (unsigned long)last_edge,
+           edges > 2 ? (double)(last_edge - first_edge) / (double)(edges - 1) : 0.0,
+           edges > 2 ? 2.0 * (double)(last_edge - first_edge) / (double)(edges - 1) : 0.0);
+    printf("  DUMP-BEGIN\n");
+    for (int i = 0; i < 192; i++) printf("%02lx\n", (unsigned long)(g_ber_out[i] & 0xFFu));
+    printf("  DUMP-END\n\n"); fflush(stdout);
 }
 
 static void print_menu(void)
@@ -531,7 +598,9 @@ static void print_menu(void)
     printf("  W = 两级中继实验（含测量）\n  Y = HSTX + 两级中继 -> 32-39（出图）\n  M = 镜像版 -> 0-7（供采样解码）\n  L = 慢档 31.5MHz 开关\n");
     printf("  Q = 停止（关 HSTX、停 PIO、回空闲）\n");
     printf("  T = 引脚自测（逐脚驱动 0..20）\n");
-    printf("  Z = 同 Y 但四对 P/N 取反（黑屏时换它试）\n  A = 拉采样板 RUN（GPIO42）  H[脚号] = 持续驱动某脚高（默认 10）   N = 释放\n");
+    printf("  U = 慢速 HSTX 验证（运行时降串行器速率，采真实输出样本）\n");
+    printf("  Z = 同 Y 但四对 P/N 取反（黑屏时换它试）\n");
+    printf("  A = 拉采样板 RUN（GPIO42）  H[脚号] = 持续驱动某脚高（默认 10）   N = 释放\n");
     printf("  P = 打印现场\n");
     printf("  B = 进 BOOTSEL    R = 重启\n");
     printf("当前：空闲（未超频、未启动 HSTX）\n\n");
@@ -559,6 +628,7 @@ int main(void)
         case 'S': case 's': start_video(true);  break;   /* 带 PIO 复制（2 号系统：0-7） */
         case 'V': case 'v': start_video(false); break;   /* 只出 HSTX */
         case 'W': case 'w': relay_test(); break;          /* 两级 PIO 中继实验 + 测量 */
+        case 'U': case 'u': verify_slow(); break;   /* 慢速 HSTX 验证（CSR 分频） */
         case 'Z': case 'z':
             if (g_relay_started) {   /* 已经用某一极性启动过 ⇒ 换极性必须先重启，否则静默无效 */
                 printf("[Z] ⚠ 中继已启动过（极性已定）⇒ 请先按 R 重启，再发 Z\n"); fflush(stdout); break;
