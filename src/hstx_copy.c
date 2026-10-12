@@ -559,9 +559,17 @@ int main(void)
         case 'S': case 's': start_video(true);  break;   /* 带 PIO 复制（2 号系统：0-7） */
         case 'V': case 'v': start_video(false); break;   /* 只出 HSTX */
         case 'W': case 'w': relay_test(); break;          /* 两级 PIO 中继实验 + 测量 */
-        case 'Z': case 'z': g_relay_invert = true;  printf("[Z] 极性取反版（四对 P/N 交换）\n"); fflush(stdout);
+        case 'Z': case 'z':
+            if (g_relay_started) {   /* 已经用某一极性启动过 ⇒ 换极性必须先重启，否则静默无效 */
+                printf("[Z] ⚠ 中继已启动过（极性已定）⇒ 请先按 R 重启，再发 Z\n"); fflush(stdout); break;
+            }
+            g_relay_invert = true;  printf("[Z] 极性取反版（四对 P/N 交换）\n"); fflush(stdout);
                             start_video(false); relay_start(false); printf("[Z] HSTX + 两级中继(取反) -> 32-39\n"); fflush(stdout); break;
-        case 'Y': case 'y': start_video(false); relay_start(false); printf("[Y] HSTX + 两级中继 -> 32-39\n"); fflush(stdout); break;
+        case 'Y': case 'y':
+            if (g_relay_started && g_relay_invert) {
+                printf("[Y] ⚠ 当前中继是取反版（Z 启动）⇒ 请先按 R 重启，再发 Y\n"); fflush(stdout); break;
+            }
+            start_video(false); relay_start(false); printf("[Y] HSTX + 两级中继 -> 32-39\n"); fflush(stdout); break;
         case 'M': case 'm': start_video(false); relay_start(true);  printf("[M] 镜像：两级中继 -> 0-7（采样板可解码）\n"); fflush(stdout); break;
         case 'K': case 'k': ber_test(); break;   /* 逐位对拍（BER） */
         case 'L': case 'l': g_slow = !g_slow; printf("[L] 慢档 = %d（下次 S/V/Y/M 生效）\n", (int)g_slow); fflush(stdout); break;
