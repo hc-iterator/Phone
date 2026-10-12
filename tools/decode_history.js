@@ -8,7 +8,7 @@
  *
  * 用法：
  *   node decode_history.js [输入] [输出.md]
- *     输入：一个 session.v4.jsonl 文件，或一个包含若干日志的目录（默认 ./History，
+ *     输入：一个 session.v4.jsonl 文件，或一个包含若干日志的目录（默认 <仓库>/History，
  *           目录输入会递归找出所有 .jsonl，包括 subagents/ 子目录）
  *     输出：Markdown 文件；不填则写在输入目录下 summary.md
  *
@@ -35,7 +35,8 @@ if (flags.has('--help') || flags.has('-h')) { console.log(USAGE); process.exit(0
 
 const FULL = flags.has('--full');
 const STATS = flags.has('--stats');
-const input = pos[0] || 'History';
+// 默认输入解析到本脚本上两级的 History/（仓库根的 History/），这样从哪个目录调用都对
+const input = pos[0] || path.join(__dirname, '..', '..', 'History');
 const output = pos[1] || null;
 
 const LIMIT = { text: 2000, reason: 400, result: 400, args: 240, misc: 240, digest: 2400 };
