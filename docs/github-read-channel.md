@@ -95,25 +95,67 @@ pwsh -NoProfile -File tools\github_read.ps1 -Url <URL> [-Out <路径>] [-Lines N
 - 落盘：拿得到原始响应字节就**逐字节写**（GitHub 的文本响应本来就是 UTF-8 ✓）；拿不到字节时用 **UTF-8 无 BOM** 写字符串 ✓
 - 实现只用 `Invoke-WebRequest`（带 `User-Agent`），**不用 `curl`** ✓
 
-### 3.2 两种调用方式
+### 3.2 调用方式：**只有沙箱外的 `pwsh -NoProfile -File` 可用** ✓
 
-**① `pico_run`（沙箱内、推荐）** —— 脚本登记进**主仓库** `DeepSeekCode\tools\` 之后：
+**① `pico_run` —— 不可用 / 不推荐** ✗（2026-10-13 实测，主仓库已合入本脚本之后）
+
+`pico_run` 确实是"**沙箱内，可以自己写脚本随便跑**"✓，**新建脚本也确实不需要信任门登记** ✓
+（信任门只管 §3.3 那 10 个受管脚本，见下）—— 但 **"脚本能在沙箱里跑"与"沙箱里能不能联网/TLS"是两件事** ✗：
+脚本跑得起来 ✓，网络出不去 ✗。
+
+〔2026-10-13 注：本节原先写的是"① `pico_run`（沙箱内、**推荐** ✓）……合进主仓库之后 ① 才可用 ✓"，
+**该结论已被实测推翻** ✗，按"只划掉加注、不删"的口径保留此注；下面换成实测结论。〕
+
+派活方 2026-10-13 实跑原文（我用同一参数复跑，stdout **逐字一致** ✓）：
 
 ```
-pico_run(script: "tools/github_read.ps1", args: ["-Url", "https://api.github.com/repos/XiaoMi/ha_xiaomi_home", "-Json"])
+pico_run(script:"tools/github_read.ps1", args:["-Url","https://api.github.com/repos/morluto/rea","-Json","-Lines","2"])
+=> ok=false exitCode=1  sandbox={"mode":"workspace-write","denied":false,"enforcement":"partial"}  2539ms
+--- stdout ---
+ERR=request failed :: The SSL connection could not be established, see inner exception.
 ```
 
-`pico_run` 的定位就是"**沙箱内，可以自己写脚本随便跑**" ✓ ⇒ **新建脚本不需要信任门登记** ✓
-（信任门只管 §3.3 那 10 个受管脚本，见下）。
+2026-10-13 我在同一沙箱里补跑的判据（都用 `pico_run` 跑同一个脚本，参数不同）：
 
-> ⚠️ **但 `pico_run` 解析的是主仓库的 `tools\`**：它 `path.join(cfg.root, 'DeepSeekCode', 'tools', ...)`。
-> 2026-10-13 实测：在**子 agent 空间**里调 `pico_run(script: "tools/github_read.ps1")` 得到原文
-> ```
-> 脚本不存在: C:\Users\Chen\Desktop\Pico\PicoPhone\DeepSeekCode\tools\github_read.ps1
-> ```
-> ⇒ **只在空间里、还没合进主仓库时，用 ②** ✓；合进主仓库之后 ① 才可用 ✓。
+| 沙箱内请求 | 沙箱内结果（原文） |
+|---|---|
+| `-Url https://api.github.com/repos/morluto/rea -Json` | `ERR=request failed :: The SSL connection could not be established, see inner exception.` |
+| `-Url https://example.com`（公网域、不在 hosts 里） | 同上，**同一条 SSL 错** |
+| `-Url https://127.0.0.1/` | 同上，**同一条 SSL 错** |
+| `-Url http://127.0.0.1/`（明文 HTTP → 加速器 `:80`） | `ERR=HTTP 404 :: Response status code does not indicate success: 404 (Not Found).` |
+| `-Url http://127.0.0.1:443/`（**明文** HTTP → 加速器 `:443`） | `ERR=HTTP 404 :: Response status code does not indicate success: 404 (Not Found).` |
 
-**② `pwsh -NoProfile -File`（沙箱外直跑）** —— 任何位置都能用：
+**读法（2026-10-13）**：沙箱里 **TCP 与明文 HTTP 是通的** ✓（`127.0.0.1` 的 `80` 与 `443` 都答了 404）；
+**挂的是 TLS 那一步** ✗。而且**不是 GitHub 域的问题** ✗ —— 公网的 `example.com` 照样 SSL 失败。
+
+**根因定位到哪一层（2026-10-13）**：
+
+- 同一沙箱模式（`sandbox={"mode":"workspace-write",…}`）下用 `pico_exec` 跑 `python`（自带 CA bundle 的 OpenSSL，不是 .NET）实测：
+
+  ```
+  py 3.14.5
+  proxies {}
+  dns example.com 172.66.147.243
+  dns api.github.com 127.0.0.1
+  dns raw.githubusercontent.com 127.0.0.1
+  OK   https://example.com 200 577
+  OK   https://api.github.com/repos/morluto/rea 200 5195
+  FAIL http://127.0.0.1:443/ HTTPError HTTP Error 404: Not Found
+  ```
+
+  ⇒ **沙箱的网络本身没问题 ✓、加速器那条 loopback 通道也没问题 ✓（api.github.com 在沙箱里也能拿到 200 / 5195 字节）**。
+  ⇒ 真正挂掉的是**沙箱里 PowerShell/.NET 的 HTTP(S) 栈** ✗。
+- 最内层原因**未定位** ✗：脚本打出来的是 .NET 的**外层**消息（`see inner exception`），内层异常在沙箱里看不到。
+  候选（**只是候选，未证实**）：沙箱进程读不到 Windows 证书存储 ⇒ Schannel 链构建失败。
+  **本文件只记录到"TLS 层挂、网络层通"这一层判据，不下结论到证书存储。**
+- ⚠️ 别为了"在沙箱里也能用"去拿 `python` / `node` 反调 `powershell` 绕开 ✗ —— 那是**绕沙箱**，不是解决办法。
+
+> 附一个仍然成立、但与上面无关的事实：`pico_run` 解析的是**主仓库**的 `tools\`
+> （`path.join(cfg.root, 'DeepSeekCode', 'tools', …)`）。2026-10-13 在**子 agent 空间**里调
+> `pico_run(script: "tools/github_read.ps1")` 的原文是
+> `脚本不存在: C:\Users\Chen\Desktop\Pico\PicoPhone\DeepSeekCode\tools\github_read.ps1` ✗。
+
+**② `pwsh -NoProfile -File`（沙箱外直跑）—— 唯一可用路径** ✓ —— 任何位置都能用：
 
 ```powershell
 pwsh -NoProfile -File tools\github_read.ps1 -Url https://github.com/XiaoMi/ha_xiaomi_home
