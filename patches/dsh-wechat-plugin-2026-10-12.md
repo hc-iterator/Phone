@@ -39,3 +39,22 @@ if (target === undefined) {
 ## 4. 背景：工具卡片为何一直报错
 
 微信侧不接受该卡片类型：`errcode=-2 errmsg=prepare failed`，且常返回空 body ⇒ `JSON.parse('')` 抛 `Unexpected end of JSON input`。插件把最近错误放在内存环形缓冲（上限 50 条，`lib/host.js:2531`），所以设置页看起来"永远 50 条"。属噪音，不影响收发。
+
+## 5. 模型命令（2026-10-15 追加）
+
+**`dist/core/lib/router.js`**：新增两个命令
+- `/models` —— 调 `gateway.modelList()`（宿主 API ✓）列可用模型并编号；清单存内存（每对话一份 ⇒ 重载后编号失效，故同时支持写全）
+- `/model` —— 不带参数看当前（`gateway.currentModel()` ✓）；`/model <编号>` 或 `/model <provider/model>` 切换（`gateway.selectModel()` ✓）
+- 类里加了 `#modelLists = new Map();`；`HELP_TEXT` 补两行
+
+**`lib/host.js`**（`#gateway()` 里）：新增三个方法
+```js
+modelList:  async () => ctx.sessionController.modelCatalog()  → 展平成 [{provider, model, label}]
+currentModel: async (sessionId) => ctx.sessionController.inspect(sessionId) → { provider, model }
+selectModel: async (sessionId, provider, model) =>
+                 ctx.sessionController.selectModel({ sessionId, provider, model })
+```
+宿主 API 出处：`@deepseek-ai/dsh-api-session-controller` 的 `session/modelCatalog`、`session/selectModel`（`SessionSelectModelRequest extends ModelSelection { sessionId }`）✓
+
+**验证**：桩网关单测五条路径全绿 ✓（看当前 / 列表 / 按编号切 / 写全切 / 越界提示 ✓，`selectModel` 参数正确 ✓）；
+**生效方式**：`plugin_manager set_bundle dsh-wechat-plugin enabled:false → true`（热重载 ✓，实测 `apply: mounted`、`errors=0` ✓，无需整机重启 ✓，游标持久化 ⇒ 不丢消息 ✓）。
