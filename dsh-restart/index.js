@@ -55,10 +55,13 @@ const cmdText = (delay) => [
   'echo task end %DATE% %TIME% >> ' + MARKER
 ].join('\r\n');
 
+const PLOG = TMP + '\\dsh_restart_plugin.log';
+function plog(m) { try { nodeFs.appendFileSync(PLOG, new Date().toISOString() + ' ' + m + '\n', 'utf8'); } catch (e) { } }
 function readJson(p) { try { return JSON.parse(nodeFs.readFileSync(p, 'utf8')); } catch (e) { return null; } }
 function recent(at, ms) { const t = Date.parse(String(at || '').replace(' ', 'T')); return Number.isFinite(t) && Date.now() - t <= ms; }
 
 export function apply(ctx, config) {
+  plog('apply entered');
   const ensureFiles = (delay) => {
     try { nodeFs.writeFileSync(DOER, DOER_PS1, 'utf8'); nodeFs.writeFileSync(CMD, cmdText(delay), 'utf8'); return true; }
     catch (e) { return false; }
@@ -114,6 +117,7 @@ export function apply(ctx, config) {
 
   try {
     ctx.inject(['sessionController'], (sc) => {
+      plog('inject sessionController resolved');
       /*
        * 关键：结果文件是【重启之后】才写的，而本插件是在【重启过程中】挂载的 ⇒
        * 只在挂载时读一次永远赶不上（实测：用户一直看不到通知）。
@@ -122,6 +126,7 @@ export function apply(ctx, config) {
       let tries = 0;
       const timer = setInterval(() => {
         tries += 1;
+        if (tries <= 2 || tries % 20 === 0) plog('tick ' + tries + ' req=' + (nodeFs.existsSync(REQ) ? 'y' : 'n') + ' res=' + (nodeFs.existsSync(RES) ? 'y' : 'n'));
         if (tries > 60) { clearInterval(timer); return; }
         try {
           const req = readJson(REQ); const res = readJson(RES);
@@ -132,7 +137,7 @@ export function apply(ctx, config) {
           let done = false;
           for (const sid of [req.sessionId].concat(req.altIds || [])) {
             if (done || !sid) continue;
-            try { sc.sessionController.prompt({ requestId: 'dsh-restart-' + randomUUID(), sessionId: sid, mode: 'queue', content: [{ type: 'text', text: text0 }] }, new AbortController().signal); done = true; } catch (e) { }
+            try { sc.sessionController.prompt({ requestId: 'dsh-restart-' + randomUUID(), sessionId: sid, mode: 'queue', content: [{ type: 'text', text: text0 }] }, new AbortController().signal); plog('prompt ok sid=' + sid); done = true; } catch (e) { plog('prompt FAILED sid=' + sid + ' :: ' + (e && e.message ? e.message : String(e))); }
           }
           try { nodeFs.unlinkSync(REQ); } catch (e) { }
         } catch (e) { }
