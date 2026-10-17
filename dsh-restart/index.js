@@ -89,18 +89,21 @@ export function apply(ctx, config) {
       if (!ensureFiles(delay)) return { ok: false, text: '无法写入重启脚本到 ' + TMP };
       const { execFileSync } = await import('node:child_process');
       if (a.dryRun) {
-        try { execFileSync(PWSH, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', DOER, '-Delay', '0'], { encoding: 'utf8', timeout: 60000 });
+        try { execFileSync(PWSH, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', DOER, '-Delay', '0'], { encoding: 'utf8', timeout: 60000, windowsHide: true });
           return { ok: true, dryRun: true, text: '干跑完成（未重启）日志：' + LOG }; }
         catch (e) { return { ok: false, dryRun: true, text: '干跑失败：' + (e && e.message ? e.message : String(e)) }; }
       }
-      try { nodeFs.writeFileSync(REQ, JSON.stringify({ sessionId, at: new Date().toISOString(), delay }), 'utf8'); } catch (e) { }
+      const altIds = [];
+      try { if (exec && exec.agent && exec.agent.sessionId) altIds.push(String(exec.agent.sessionId)); } catch (e) { }
+      try { if (exec && exec.sessionId) altIds.push(String(exec.sessionId)); } catch (e) { }
+      try { nodeFs.writeFileSync(REQ, JSON.stringify({ sessionId, altIds, at: new Date().toISOString(), delay }), 'utf8'); } catch (e) { }
       try { nodeFs.unlinkSync(RES); } catch (e) { }
-      try { execFileSync('schtasks', ['/delete', '/tn', 'dsh_restart_once', '/f'], { encoding: 'utf8', timeout: 30000 }); } catch (e) { }
+      try { execFileSync('schtasks', ['/delete', '/tn', 'dsh_restart_once', '/f'], { encoding: 'utf8', timeout: 30000, windowsHide: true }); } catch (e) { }
       try {
         const st = new Date(Date.now() + 5 * 60000);
         const hhmm = String(st.getHours()).padStart(2, '0') + ':' + String(st.getMinutes()).padStart(2, '0');
-        execFileSync('schtasks', ['/create', '/tn', 'dsh_restart_once', '/tr', CMD, '/sc', 'once', '/st', hhmm, '/f'], { encoding: 'utf8', timeout: 30000 });
-        execFileSync('schtasks', ['/run', '/tn', 'dsh_restart_once'], { encoding: 'utf8', timeout: 30000 });
+        execFileSync('schtasks', ['/create', '/tn', 'dsh_restart_once', '/tr', CMD, '/sc', 'once', '/st', hhmm, '/f'], { encoding: 'utf8', timeout: 30000, windowsHide: true });
+        execFileSync('schtasks', ['/run', '/tn', 'dsh_restart_once'], { encoding: 'utf8', timeout: 30000, windowsHide: true });
       } catch (e) { return { ok: false, text: '排定重启任务失败：' + (e && e.message ? e.message : String(e)) }; }
       return { ok: true, scheduled: true, delaySeconds: delay, sessionId, resultPath: RES, logPath: LOG,
         text: '已排定重启：约 ' + delay + ' 秒后重启。完成后插件会把结果作为一条消息推给本会话（发给 Agent），并在 systemPrompt 里保留 10 分钟。' };
@@ -111,6 +114,30 @@ export function apply(ctx, config) {
 
   try {
     ctx.inject(['sessionController'], (sc) => {
+      /*
+       * 关键：结果文件是【重启之后】才写的，而本插件是在【重启过程中】挂载的 ⇒
+       * 只在挂载时读一次永远赶不上（实测：用户一直看不到通知）。
+       * 所以挂载后轮询最多 3 分钟，看到结果就推给会话，然后删掉请求文件。
+       */
+      let tries = 0;
+      const timer = setInterval(() => {
+        tries += 1;
+        if (tries > 60) { clearInterval(timer); return; }
+        try {
+          const req = readJson(REQ); const res = readJson(RES);
+          if (!req || !res || !recent(res.at, 10 * 60000) || !req.sessionId) return;
+          clearInterval(timer);
+          const text0 = '【DSH 重启完成】' + String(res.at) + '：3080 监听=' + res.up + '，pid ' + res.oldPid + ' → ' + res.newPid +
+            '，微信插件=' + (res.pluginEnabled ? 'OK' : 'FAIL') + '，账号=' + res.accounts + '。本次重启由该会话的工具调用触发。';
+          let done = false;
+          for (const sid of [req.sessionId].concat(req.altIds || [])) {
+            if (done || !sid) continue;
+            try { sc.sessionController.prompt({ requestId: 'dsh-restart-' + randomUUID(), sessionId: sid, mode: 'queue', content: [{ type: 'text', text: text0 }] }, new AbortController().signal); done = true; } catch (e) { }
+          }
+          try { nodeFs.unlinkSync(REQ); } catch (e) { }
+        } catch (e) { }
+      }, 3000);
+      try { if (timer && typeof timer.unref === 'function') timer.unref(); } catch (e) { }
       try {
         const req = readJson(REQ); const res = readJson(RES);
         if (!req || !res || !recent(res.at, 10 * 60000) || !req.sessionId) return;
