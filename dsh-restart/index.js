@@ -26,7 +26,7 @@ const BIN = 'C:\\Users\\Chen\\AppData\\Roaming\\npm\\node_modules\\@deepseek-ai\
 const PWSH = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
 
 const DOER_PS1 = [
-  'param([int]$Delay = 25)',
+  'param([int]$Delay = 25, [switch]$DryRun)',
   "$NODE = '" + NODE + "'", "$BIN = '" + BIN + "'", "$LOG = '" + LOG + "'", "$RES = '" + RES + "'",
   'function W($m) { ((Get-Date -Format "yyyy-MM-dd HH:mm:ss") + " " + $m) | Add-Content -LiteralPath $LOG -Encoding UTF8 }',
   'function ListenerPid { $l = (netstat -ano | Select-String ":3080 .*LISTENING" | Select-Object -First 1); if ($l) { return [int](($l -replace "\s+"," ").Trim().Split(" ")[-1]) } return 0 }',
@@ -34,6 +34,7 @@ const DOER_PS1 = [
   'Start-Sleep -Seconds $Delay',
   '$oldPid = ListenerPid',
   'W ("current dsh pid=" + $oldPid)',
+  'if ($DryRun) { W "dryRun: skip kill/restart"; exit 0 }',
   'if ($oldPid -gt 0) { try { Stop-Process -Id $oldPid -Force -ErrorAction Stop; W ("STOPPED pid=" + $oldPid) } catch { W ("stop failed: " + $_.Exception.Message) } }',
   'Start-Sleep -Seconds 8',
   'for ($i = 0; $i -lt 2; $i++) { try { Start-Process -FilePath $NODE -ArgumentList @($BIN, "web", "--no-open") -WindowStyle Hidden; W ("launched attempt " + ($i + 1)); break } catch { W ("launch failed: " + $_.Exception.Message); Start-Sleep -Seconds 3 } }',
@@ -98,7 +99,7 @@ export function apply(ctx, config) {
       if (!ensureFiles(delay)) return { ok: false, text: '无法写入重启脚本到 ' + TMP };
       const { execFileSync } = await import('node:child_process');
       if (a.dryRun) {
-        try { execFileSync(PWSH, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', DOER, '-Delay', '0'], { encoding: 'utf8', timeout: 60000, windowsHide: true });
+        try { execFileSync(PWSH, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', DOER, '-Delay', '0', '-DryRun'], { encoding: 'utf8', timeout: 60000, windowsHide: true });
           return { ok: true, dryRun: true, text: '干跑完成（未重启）日志：' + LOG }; }
         catch (e) { return { ok: false, dryRun: true, text: '干跑失败：' + (e && e.message ? e.message : String(e)) }; }
       }
