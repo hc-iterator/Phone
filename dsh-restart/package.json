@@ -1,0 +1,20 @@
+{
+  "name": "@local/dsh-restart",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Give the agent a reliable way to restart DSH, and report completion afterwards.",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "meta": {
+    "title": "DSH Restart",
+    "description": "让 Agent 可靠地重启 DSH，并在重启后回报结果。"
+  }
+}
