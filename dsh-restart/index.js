@@ -19,7 +19,7 @@ const LOG = TMP + '\\dsh_restart_log.txt';
 const RES = TMP + '\\dsh_restart_result.json';
 const REQ = TMP + '\\dsh_restart_request.json';
 const MARKER = TMP + '\\dsh_restart_marker.txt';
-const CMD = TMP + '\\dsh_restart.cmd';
+const VBS = TMP + '\\dsh_restart_silent.vbs';
 const DOER = TMP + '\\dsh_restart_doer.ps1';
 const NODE = 'C:\\Program Files\\nodejs\\node.exe';
 const BIN = 'C:\\Users\\Chen\\AppData\\Roaming\\npm\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js';
@@ -69,7 +69,7 @@ function recent(at, ms) { const t = Date.parse(String(at || '').replace(' ', 'T'
 export function apply(ctx, config) {
   plog('apply entered');
   const ensureFiles = (delay) => {
-    try { nodeFs.writeFileSync(DOER, DOER_PS1, 'utf8'); nodeFs.writeFileSync(CMD, cmdText(delay), 'utf8'); return true; }
+    try { nodeFs.writeFileSync(DOER, DOER_PS1, 'utf8'); nodeFs.writeFileSync(VBS, vbsText(delay), 'utf8'); return true; }
     catch (e) { return false; }
   };
 
@@ -111,7 +111,7 @@ export function apply(ctx, config) {
       try {
         const st = new Date(Date.now() + 5 * 60000);
         const hhmm = String(st.getHours()).padStart(2, '0') + ':' + String(st.getMinutes()).padStart(2, '0');
-        execFileSync('schtasks', ['/create', '/tn', 'dsh_restart_once', '/tr', CMD, '/sc', 'once', '/st', hhmm, '/f'], { encoding: 'utf8', timeout: 30000, windowsHide: true });
+        execFileSync('schtasks', ['/create', '/tn', 'dsh_restart_once', '/tr', 'wscript.exe //B //Nologo ' + VBS, '/sc', 'once', '/st', hhmm, '/f'], { encoding: 'utf8', timeout: 30000, windowsHide: true });
         execFileSync('schtasks', ['/run', '/tn', 'dsh_restart_once'], { encoding: 'utf8', timeout: 30000, windowsHide: true });
       } catch (e) { return { ok: false, text: '排定重启任务失败：' + (e && e.message ? e.message : String(e)) }; }
       return { ok: true, scheduled: true, delaySeconds: delay, sessionId, resultPath: RES, logPath: LOG,
