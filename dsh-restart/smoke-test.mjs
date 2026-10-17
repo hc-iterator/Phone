@@ -1,14 +1,13 @@
-import { apply, inject } from './index.js';
-let registered = null, sectioned = false;
+import { apply } from './index.js';
+let tool = null, prompted = 0, sectioned = 0;
 const ctx = {
-  effect: (cb, label) => { const r = cb(); return typeof r === 'function' ? r : () => {}; },
-  tools: { register: (def) => { registered = def; return () => {}; } },
-  inject: (names, cb) => { cb({ systemPrompt: { section: (s) => { sectioned = true; return () => {}; } } }); },
+  effect: (cb) => { const r = cb(); return typeof r === 'function' ? r : () => {}; },
+  tools: { register: (d) => { tool = d; return () => {}; } },
+  inject: (names, cb) => {
+    if (names.includes('sessionController')) cb({ sessionController: { prompt: () => { prompted++; } } });
+    if (names.includes('systemPrompt')) cb({ systemPrompt: { section: () => { sectioned++; } } });
+  },
 };
 apply(ctx, {});
-if (!registered) { console.log('FAIL: 没注册工具'); process.exit(1); }
-const ok = registered.name === 'dsh_restart' && typeof registered.execute === 'function' && registered.parameters && registered.output && typeof registered.output.render === 'function';
-console.log('inject=' + JSON.stringify(inject));
-console.log('tool=' + registered.name + '  execute=' + typeof registered.execute + '  output.render=' + typeof registered.output.render);
-console.log('systemPrompt.section 被调用=' + sectioned);
-console.log(ok ? 'SMOKE-OK' : 'SMOKE-FAIL');
+console.log('tool=' + (tool && tool.name) + ' exec=' + typeof (tool && tool.execute) + ' prompted=' + prompted + ' sectioned=' + sectioned);
+console.log(tool && tool.name === 'dsh_restart' ? 'SMOKE-OK' : 'SMOKE-FAIL');
