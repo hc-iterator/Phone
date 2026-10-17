@@ -43,21 +43,27 @@ const DOER_PS1 = [
   '$pluginOk = $false; $accts = 0',
   'for ($k = 0; $k -lt 20; $k++) { Start-Sleep -Seconds 3; try { $st = Invoke-RestMethod -Uri "http://127.0.0.1:3080/.dsh-wechat-plugin/status" -TimeoutSec 5 -ErrorAction Stop; $pluginOk = [bool]$st.enabled; $accts = ($st.accounts | Measure-Object).Count; if ($pluginOk) { break } } catch { } }',
   '$result = [ordered]@{ at = (Get-Date -Format "yyyy-MM-dd HH:mm:ss"); up = $up; oldPid = $oldPid; newPid = $newPid; pluginEnabled = $pluginOk; accounts = $accts; ok = ($up -and $pluginOk) }',
-  '($result | ConvertTo-Json -Compress) | Set-Content -LiteralPath $RES -Encoding UTF8',
+  '[System.IO.File]::WriteAllText($RES, ($result | ConvertTo-Json -Compress), (New-Object System.Text.UTF8Encoding($false)))',
   'W ("RESULT " + ($result | ConvertTo-Json -Compress))',
   'W "doer done"'
 ].join('\r\n');
 
-const cmdText = (delay) => [
-  '@echo off',
-  'echo task ran %DATE% %TIME% > ' + MARKER,
-  '"' + PWSH + '" -NoProfile -ExecutionPolicy Bypass -File "' + DOER + '" -Delay ' + String(delay) + ' >> ' + TMP + '\\dsh_restart_stdout.txt 2>&1',
-  'echo task end %DATE% %TIME% >> ' + MARKER
+// 计划任务绝不能跑 .cmd：以登录用户身份运行的任务会显示控制台窗口（用户实测被弹窗多次）。
+// VBScript 的 Run(cmd, 0, False) 用窗口样式 0 ⇒ 完全不创建窗口。
+const vbsText = (delay) => [
+  'Set sh = CreateObject("WScript.Shell")',
+  'sh.Run """' + PWSH + '"" -NoProfile -ExecutionPolicy Bypass -File ""' + DOER + '"" -Delay ' + String(delay) + '", 0, False',
+  'CreateObject("Scripting.FileSystemObject").CreateTextFile("' + MARKER + '", True).WriteLine "task ran " & Now'
 ].join('\r\n');
 
 const PLOG = TMP + '\\dsh_restart_plugin.log';
 function plog(m) { try { nodeFs.appendFileSync(PLOG, new Date().toISOString() + ' ' + m + '\n', 'utf8'); } catch (e) { } }
-function readJson(p) { try { return JSON.parse(nodeFs.readFileSync(p, 'utf8')); } catch (e) { return null; } }
+function readJson(p) {
+  try {
+    // PowerShell 5.1 的 Set-Content -Encoding UTF8 会写 BOM；JSON.parse 会抛 ⇒ 必须先剥掉（2026-10-17 实测根因）
+    return JSON.parse(String(nodeFs.readFileSync(p, 'utf8')).replace(/^\uFEFF/, ''));
+  } catch (e) { return null; }
+}
 function recent(at, ms) { const t = Date.parse(String(at || '').replace(' ', 'T')); return Number.isFinite(t) && Date.now() - t <= ms; }
 
 export function apply(ctx, config) {
