@@ -162,6 +162,28 @@ export function apply(ctx, config) {
   } catch (e) { }
 
 
+  // ---- 仅用户命令：/restartdsh ----------------------------------------------
+  // 用户 2026-10-18 要求：/killdsh 只杀不拉；再给一个「停 + 拉起」的仅用户命令。
+  // 实现上直接复用 dsh_restart 工具那条【已实测】的排定路径（不另写一套，避免新风险）。
+  try {
+    ctx.inject(['commands'], (commandCtx) => {
+      try {
+        commandCtx.commands.register({
+          name: 'restartdsh',
+          description: '重启 DSH（仅用户可输入；约 20 秒后停 3080 → 自动拉起 → 探活）',
+          handler: async () => {
+            try {
+              const r = await definition.execute({ delaySeconds: 20 }, {});
+              const base = r && r.text ? String(r.text) : '已排定重启 ✓';
+              return base + '\n（页面会短暂断连，约 20 秒后自动回来 ✓；结果也会写进 %TEMP%\\dsh_restart_result.json ✓）';
+            } catch (e) {
+              return '排定重启失败：' + (e && e.message ? e.message : String(e));
+            }
+          }
+        });
+      } catch (e) { }
+    });
+  } catch (e) { }
   try {
     ctx.inject(['sessionController'], (sc) => {
       plog('inject sessionController resolved');
