@@ -167,7 +167,8 @@
               #   native = 每个工具以原生 schema 呈现（没有 run_code）
               #   ptc    = 只呈现 run_code + 生成 SDK，所有工具在程序里调用（功能一个不少）
               # 台架工具（pico_*）在 ptc 下依然可调：await tools.pico_status({...}) 等。
-              mode: ptc          - id: present
+              mode: ptc
+          - id: present
             name: '@deepseek-ai/dsh-tool-present'
           - id: tool-plugin-manager
             name: '@deepseek-ai/dsh-plugin-manager/tools'
