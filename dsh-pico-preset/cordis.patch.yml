@@ -167,7 +167,10 @@
               #   native = 每个工具以原生 schema 呈现（没有 run_code）
               #   ptc    = 只呈现 run_code + 生成 SDK，所有工具在程序里调用（功能一个不少）
               # 台架工具（pico_*）在 ptc 下依然可调：await tools.pico_status({...}) 等。
-              mode: ptc
+              # 2026-10-18 回退：PTC 面在【本 provider】上被上游拒（"tools: at least one tool must have
+              #   defer_loading=false"），因为 PTC 呈现会把所有工具声明成 deferLoading:true。
+              #   ⇒ 先回到 native 保证可用；想要 PTC 面需上游/provider 支持（让 run_code 保持非 deferred）。
+              mode: native
           - id: present
             name: '@deepseek-ai/dsh-tool-present'
           - id: tool-plugin-manager
