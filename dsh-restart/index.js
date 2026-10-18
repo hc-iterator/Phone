@@ -76,32 +76,6 @@ export function apply(ctx, config) {
     catch (e) { return false; }
   };
 
-  // ---- 目标交接（2026-10-18 用户提案）-----------------------------------
-  // 为什么要有：子 Agent 会话里 create_goal 工具不可用，但【宿主侧】ctx.goals.create()
-  // 没有那条限制（dsh-goal 的 GoalService: create(agent, { objective, maxGoalRounds? })）。
-  // 用法：重启前把 {"objective":"...","maxGoalRounds":20} 写进 HANDOFF ⇒
-  //       本工具在【重启前】把它登记成正式目标（写进会话日志，跨重启存活），然后改名 .used-<ts>（仅一次）。
-  // 重启后目标是【解除武装】状态 ⇒ 需要 agent 自己调 update_goal {action:"resume"} 继续（显式、可见）。
-  const HANDOFF = TMP + '\\dsh_goal_handoff.json';
-  function createHandoffGoal(ctx, agent) {
-    try {
-      if (!agent) return { created: false, why: '本次调用拿不到 agent' };
-      if (!nodeFs.existsSync(HANDOFF)) return { created: false, why: '没有交接文件（不是错误）' };
-      const goals = typeof ctx.get === 'function' ? ctx.get('goals') : null;
-      if (!goals || typeof goals.create !== 'function') return { created: false, why: '当前部署没有 goals 服务' };
-      const req = readJson(HANDOFF);
-      const objective = req && typeof req.objective === 'string' ? req.objective.trim() : '';
-      if (!objective) return { created: false, why: '交接文件里 objective 为空' };
-      const safe = Number.isSafeInteger(req.maxGoalRounds) && req.maxGoalRounds > 0 ? req.maxGoalRounds : undefined;
-      const view = goals.create(agent, safe ? { objective: objective, maxGoalRounds: safe } : { objective: objective });
-      try { nodeFs.renameSync(HANDOFF, HANDOFF + '.used-' + Date.now()); } catch (e) { }
-      plog('handoff goal created id=' + (view && view.id) + ' rounds=' + String(safe));
-      return { created: true, id: view && view.id, maxGoalRounds: safe };
-    } catch (e) {
-      plog('handoff goal FAILED: ' + (e && e.message ? e.message : String(e)));
-      return { created: false, why: (e && e.message ? e.message : String(e)) };
-    }
-  }
   const definition = {
     name: 'dsh_restart',
     description:
@@ -124,7 +98,6 @@ export function apply(ctx, config) {
       const a = args ?? {};
       const delay = typeof a.delaySeconds === 'number' && a.delaySeconds >= 0 ? Math.floor(a.delaySeconds) : 25;
       const sessionId = (exec && exec.agent && exec.agent.id) || (exec && exec.sessionId) || '';
-      const hg = createHandoffGoal(ctx, exec && exec.agent);
       if (!ensureFiles(delay)) return { ok: false, text: '无法写入重启脚本到 ' + TMP };
       const { execFileSync } = await import('node:child_process');
       if (a.dryRun) {
@@ -145,8 +118,7 @@ export function apply(ctx, config) {
         execFileSync('schtasks', ['/run', '/tn', 'dsh_restart_once'], { encoding: 'utf8', timeout: 30000, windowsHide: true });
       } catch (e) { return { ok: false, text: '排定重启任务失败：' + (e && e.message ? e.message : String(e)) }; }
       return { ok: true, scheduled: true, delaySeconds: delay, sessionId, resultPath: RES, logPath: LOG,
-        goal: hg,
-        text: '已排定重启：约 ' + delay + ' 秒后重启。完成后插件会把结果作为一条消息推给本会话（发给 Agent），并在 systemPrompt 里保留 10 分钟。' + (hg.created ? ('【目标已登记 id=' + hg.id + '】重启后如需继续，请调用 update_goal {action:' + String.fromCharCode(34) + 'resume' + String.fromCharCode(34) + '}。') : '') };
+        text: '已排定重启：约 ' + delay + ' 秒后重启。完成后插件会把结果作为一条消息推给本会话（发给 Agent），并在 systemPrompt 里保留 10 分钟。' };
     }
   };
 
@@ -199,9 +171,9 @@ export function apply(ctx, config) {
         commandCtx.commands.register({
           name: 'restartdsh',
           description: '重启 DSH（仅用户可输入；约 20 秒后停 3080 → 自动拉起 → 探活）',
-          handler: async (invocation) => {
+          handler: async () => {
             try {
-              const r = await definition.execute({ delaySeconds: 20 }, { agent: invocation && invocation.agent });
+              const r = await definition.execute({ delaySeconds: 20 }, {});
               const base = r && r.text ? String(r.text) : '已排定重启 ✓';
               return { kind: 'success', text: base + '\n（页面会短暂断连，约 20 秒后自动回来 ✓；结果也会写进 %TEMP%\\dsh_restart_result.json ✓）' };
             } catch (e) {
