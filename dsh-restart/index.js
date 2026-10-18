@@ -21,6 +21,8 @@ const REQ = TMP + '\\dsh_restart_request.json';
 const MARKER = TMP + '\\dsh_restart_marker.txt';
 const VBS = TMP + '\\dsh_restart_silent.vbs';
 const DOER = TMP + '\\dsh_restart_doer.ps1';
+const KILL_PS1_PATH = TMP + '\\dsh_killdsh.ps1';
+const KILL_VBS_PATH = TMP + '\\dsh_killdsh.vbs';
 const NODE = 'C:\\Program Files\\nodejs\\node.exe';
 const BIN = 'C:\\Users\\Chen\\AppData\\Roaming\\npm\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js';
 const PWSH = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
@@ -121,6 +123,44 @@ export function apply(ctx, config) {
   };
 
   ctx.effect(() => ctx.tools.register(definition), 'dsh-restart: dsh_restart');
+
+  // ---- 仅用户命令：/killdsh -------------------------------------------------
+  // 用户 2026-10-18 要求：插件起的 DSH 是隐藏进程，用户关不掉 ⇒ 给一个人能输入的开关。
+  // 斜杠命令天生只能由人输入（Agent 无法触发），所以它天然就是「仅用户工具」。
+  const KILL_PS1 = [
+    'Start-Sleep -Seconds 3',
+    '$LOG = ' + JSON.stringify(LOG),
+    'function W($m) { ((Get-Date -Format "yyyy-MM-dd HH:mm:ss") + " " + $m) | Add-Content -LiteralPath $LOG -Encoding UTF8 }',
+    'W "killdsh: requested by user"',
+    '$l = (netstat -ano | Select-String ":3080 .*LISTENING" | Select-Object -First 1)',
+    'if ($l) { $p = [int](($l -replace "\s+"," ").Trim().Split(" ")[-1]); try { Stop-Process -Id $p -Force -ErrorAction Stop; W ("killdsh: killed pid=" + $p) } catch { W ("killdsh: failed " + $_.Exception.Message) } } else { W "killdsh: no listener on 3080" }'
+  ].join('\r\n');
+  const KILL_VBS = [
+    'Set sh = CreateObject("WScript.Shell")',
+    'sh.Run """' + PWSH + '"" -NoProfile -ExecutionPolicy Bypass -File ""' + KILL_PS1_PATH + '""", 0, False'
+  ].join('\r\n');
+  try {
+    ctx.inject(['commands'], (commandCtx) => {
+      try {
+        commandCtx.commands.register({
+          name: 'killdsh',
+          description: '关闭 DSH（仅用户可输入；3 秒后杀掉 3080 监听进程）',
+          handler: async () => {
+            try {
+              nodeFs.writeFileSync(KILL_PS1_PATH, KILL_PS1, 'utf8');
+              nodeFs.writeFileSync(KILL_VBS_PATH, KILL_VBS, 'utf8');
+              const { execFileSync } = await import('node:child_process');
+              execFileSync('wscript.exe', ['//B', '//Nologo', KILL_VBS_PATH], { timeout: 30000, windowsHide: true });
+              return '正在关闭 DSH ✓ —— 约 3 秒后进程结束 ✓。\n重新启动：双击桌面「启动 DSH」或运行 dsh web --no-open ✓。';
+            } catch (e) {
+              return '关闭失败：' + (e && e.message ? e.message : String(e));
+            }
+          }
+        });
+      } catch (e) { }
+    });
+  } catch (e) { }
+
 
   try {
     ctx.inject(['sessionController'], (sc) => {
