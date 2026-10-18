@@ -178,3 +178,5 @@
             name: dsh-picophone
             config:
               profileName: web
+              # 2026-10-18：让 pico_git 用工作区内那份 token（沙箱里读不到  外的东西更方便）
+              gitTokenFile: C:\Users\Chen\Desktop\Pico\PicoPhone\dsh-plugins\.certs\git-token
