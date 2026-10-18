@@ -151,9 +151,9 @@ export function apply(ctx, config) {
               nodeFs.writeFileSync(KILL_VBS_PATH, KILL_VBS, 'utf8');
               const { execFileSync } = await import('node:child_process');
               execFileSync('wscript.exe', ['//B', '//Nologo', KILL_VBS_PATH], { timeout: 30000, windowsHide: true });
-              return '正在关闭 DSH ✓ —— 约 3 秒后进程结束 ✓。\n重新启动：双击桌面「启动 DSH」或运行 dsh web --no-open ✓。';
+              return { kind: 'success', text: '正在关闭 DSH ✓ —— 约 3 秒后进程结束 ✓。\n重新启动：双击桌面「启动 DSH」或运行 dsh web --no-open ✓。' };
             } catch (e) {
-              return '关闭失败：' + (e && e.message ? e.message : String(e));
+              return { kind: 'error', text: '关闭失败：' + (e && e.message ? e.message : String(e)) };
             }
           }
         });
@@ -175,9 +175,9 @@ export function apply(ctx, config) {
             try {
               const r = await definition.execute({ delaySeconds: 20 }, {});
               const base = r && r.text ? String(r.text) : '已排定重启 ✓';
-              return base + '\n（页面会短暂断连，约 20 秒后自动回来 ✓；结果也会写进 %TEMP%\\dsh_restart_result.json ✓）';
+              return { kind: 'success', text: base + '\n（页面会短暂断连，约 20 秒后自动回来 ✓；结果也会写进 %TEMP%\\dsh_restart_result.json ✓）' };
             } catch (e) {
-              return '排定重启失败：' + (e && e.message ? e.message : String(e));
+              return { kind: 'error', text: '排定重启失败：' + (e && e.message ? e.message : String(e)) };
             }
           }
         });
