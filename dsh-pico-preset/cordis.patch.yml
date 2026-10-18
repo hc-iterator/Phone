@@ -163,7 +163,9 @@
           - id: tool-presentation
             name: '@deepseek-ai/dsh-agent-tool-presentation'
             config:
-              mode: both
+              # 2026-10-18 修：schema 只接受 native|ptc（z.union(["native","ptc"])），没有 both。
+              # 选 native：原生 schema 全在；run_code 由宿主侧 ptc-runtime 提供，仍可用。
+              mode: native
           - id: present
             name: '@deepseek-ai/dsh-tool-present'
           - id: tool-plugin-manager
