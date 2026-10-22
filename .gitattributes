@@ -1,0 +1,6 @@
+# 统一行尾：入库与工作区都用 LF。
+# 例外：.cmd/.bat 必须 CRLF —— cmd.exe 的解析器对行尾敏感（历史坑）。
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=lf
