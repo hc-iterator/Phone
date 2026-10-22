@@ -98,6 +98,21 @@ def main():
         # 收缩边界再羽化，避免把 detail 的纸边/手指带进来
         mw = cv2.erode(mw, np.ones((9, 9), np.uint8), iterations=2)
         mw = cv2.GaussianBlur(mw, (0, 0), 12)
+        # 曝光/白平衡对齐：把每块局部近拍的整体亮度拉到底图同一基准上。
+        # 羽化只能抹平几何接缝，抹不掉各张照片曝光不同造成的"亮度台阶"。
+        # 基准用未改动的 canvas（不是 acc），这样每块都对齐到同一个底，不会链式漂移。
+        core = mw > 127
+        if int(core.sum()) > 2000:
+            gains = []
+            for c in range(3):
+                s_mean = float(warped[..., c][core].mean())
+                d_mean = float(canvas[..., c][core].mean())
+                if s_mean > 1.0 and d_mean > 1.0:
+                    gain = float(np.clip(d_mean / s_mean, 0.5, 2.0))
+                    warped[..., c] = np.clip(warped[..., c].astype(np.float32) * gain, 0, 255)
+                    gains.append(f"{gain:.3f}")
+            if gains:
+                print(f"   亮度增益 BGR = {' '.join(gains)}")
         a = (mw.astype(np.float32) / 255.0)[..., None]
         acc = acc * (1 - a) + warped.astype(np.float32) * a
         wsum = wsum * (1 - a[..., 0]) + a[..., 0]
