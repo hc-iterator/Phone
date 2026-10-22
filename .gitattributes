@@ -1,0 +1,8 @@
+# 统一行尾：入库与工作区都用 LF。
+#
+# 例外：.cmd / .bat 必须 CRLF —— cmd.exe 的解析器对行尾敏感（历史坑）。
+# .ps1 也用 LF —— 受管脚本的 sha256 会随之改变，由 trusted-scripts.json
+#            同步更新来吸收（用户 2026-10-22 授权直接改记录）。
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
