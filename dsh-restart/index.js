@@ -210,42 +210,60 @@ export function apply(ctx, config) {
       } catch (e) { }
     });
   } catch (e) { }
+  // ---- 结果回送：走 Agent 层，不走 sessionController.prompt ------------------
+  // 2026-10-25：sessionController.prompt() 是"冒充用户发消息"的远端 API，它自己重建
+  // source（dsh-api-session-controller: kind:"user"），调用方传的 source 会被整段丢掉
+  // ⇒ 这条重启通知在会话里等同于人类输入（实测可借此在工具来源下建立持久目标）。
+  // 官方插件（dsh-subagent / dsh-tool-goal）都走 Agent 层并自带 source：
+  //   agent.followup({ role:'user', content, source:{kind:'tool'} })
+  // 消息对象与 @deepseek-ai/dsh-llm 的 createUserMessage 等价（它只补 id + role）。
+  const resultText = (res) => '【DSH 重启完成】' + String(res.at) + '：3080 监听=' + res.up + '，pid ' + res.oldPid + ' → ' + res.newPid +
+    '，微信插件=' + (res.pluginEnabled ? 'OK' : 'FAIL') + '，账号=' + res.accounts + '。本次重启由该会话的工具调用触发。';
+  const deliver = (ag, text) => {
+    ag.followup({
+      id: randomUUID(),
+      role: 'user',
+      content: [{ type: 'text', text }],
+      source: { kind: 'tool', callId: 'dsh-restart-' + randomUUID() }
+    });
+  };
+  // 返回被送达的 sid；会话还没被 Agent 恢复时返回 null，让轮询继续等。
+  const tryDeliver = (agents) => {
+    const req = readJson(REQ);
+    if (!req || !req.sessionId) return null;
+    const res = readJson(RES);
+    if (!res || !recent(res.at, 10 * 60000)) return null;
+    for (const sid of [req.sessionId].concat(req.altIds || [])) {
+      if (!sid) continue;
+      const ag = agents.get(sid);
+      if (!ag || typeof ag.followup !== 'function') continue;
+      deliver(ag, resultText(res));
+      return sid;
+    }
+    return null;
+  };
   try {
-    ctx.inject(['sessionController'], (sc) => {
-      plog('inject sessionController resolved');
+    ctx.inject(['agents'], (ac) => {
+      plog('inject agents resolved');
+      let tries = 0; let timer = null;
+      const finish = (sid) => {
+        if (timer) { clearInterval(timer); timer = null; }
+        plog('delivered sid=' + sid);
+        try { nodeFs.unlinkSync(REQ); } catch (e) { }
+      };
       /*
-       * 关键：结果文件是【重启之后】才写的，而本插件是在【重启过程中】挂载的 ⇒
-       * 只在挂载时读一次永远赶不上（实测：用户一直看不到通知）。
-       * 所以挂载后轮询最多 3 分钟，看到结果就推给会话，然后删掉请求文件。
+       * 结果文件是【重启之后】才写的，而本插件是【重启过程中】挂载的 ⇒ 只读一次赶不上。
+       * 轮询最多 3 分钟：既等结果文件出现，也等那个会话的 Agent 被恢复（懒加载）。
        */
-      let tries = 0;
-      const timer = setInterval(() => {
+      timer = setInterval(() => {
         tries += 1;
         if (tries <= 2 || tries % 20 === 0) plog('tick ' + tries + ' req=' + (nodeFs.existsSync(REQ) ? 'y' : 'n') + ' res=' + (nodeFs.existsSync(RES) ? 'y' : 'n'));
-        if (tries > 60) { clearInterval(timer); return; }
-        try {
-          const req = readJson(REQ); const res = readJson(RES);
-          if (!req || !res || !recent(res.at, 10 * 60000) || !req.sessionId) return;
-          clearInterval(timer);
-          const text0 = '【DSH 重启完成】' + String(res.at) + '：3080 监听=' + res.up + '，pid ' + res.oldPid + ' → ' + res.newPid +
-            '，微信插件=' + (res.pluginEnabled ? 'OK' : 'FAIL') + '，账号=' + res.accounts + '。本次重启由该会话的工具调用触发。';
-          let done = false;
-          for (const sid of [req.sessionId].concat(req.altIds || [])) {
-            if (done || !sid) continue;
-            try { sc.sessionController.prompt({ requestId: 'dsh-restart-' + randomUUID(), sessionId: sid, mode: 'queue', content: [{ type: 'text', text: text0 }], source: { kind: 'tool', callId: 'dsh-restart-' + randomUUID() } }, new AbortController().signal); plog('prompt ok sid=' + sid); done = true; } catch (e) { plog('prompt FAILED sid=' + sid + ' :: ' + (e && e.message ? e.message : String(e))); }
-          }
-          try { nodeFs.unlinkSync(REQ); } catch (e) { }
-        } catch (e) { }
+        if (tries > 60) { clearInterval(timer); timer = null; return; }
+        try { const sid = tryDeliver(ac.agents); if (sid) finish(sid); } catch (e) { }
       }, 3000);
       try { if (timer && typeof timer.unref === 'function') timer.unref(); } catch (e) { }
-      try {
-        const req = readJson(REQ); const res = readJson(RES);
-        if (!req || !res || !recent(res.at, 10 * 60000) || !req.sessionId) return;
-        const text = '【DSH 重启完成】' + String(res.at) + '：3080 监听=' + res.up + '，pid ' + res.oldPid + ' → ' + res.newPid +
-          '，微信插件=' + (res.pluginEnabled ? 'OK' : 'FAIL') + '，账号=' + res.accounts + '。本次重启由该会话的工具调用触发。';
-        try { sc.sessionController.prompt({ requestId: 'dsh-restart-' + randomUUID(), sessionId: req.sessionId, mode: 'queue', content: [{ type: 'text', text }], source: { kind: 'tool', callId: 'dsh-restart-' + randomUUID() } }, new AbortController().signal); } catch (e) { }
-        try { nodeFs.unlinkSync(REQ); } catch (e) { }
-      } catch (e) { }
+      // 挂载时先试一次：多数情况下重启回来时会话已经恢复，不必等第一个 tick。
+      try { const sid = tryDeliver(ac.agents); if (sid) finish(sid); } catch (e) { }
     });
   } catch (e) { }
 
