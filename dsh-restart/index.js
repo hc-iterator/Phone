@@ -35,10 +35,11 @@ const KILL_VBS_PATH = TMP + '\\dsh_killdsh.vbs';
 // 2026-10-25 去硬编码：node 用当前进程的可执行文件；dsh 入口用"谁加载了我们"反推
 // （本插件就是被 <dsh>\lib\bin.js 拉起来的）。换机自适配，不用改源码；
 // 若 argv[1] 不是 bin.js（比如被测试宿主 import），退回旧路径，行为不劣化。
-const NODE = process.execPath || 'C:\\Program Files\\nodejs\\node.exe';
+const NODE = process.execPath || 'node';
 const BIN = (typeof process.argv[1] === 'string' && process.argv[1].endsWith('bin.js'))
   ? process.argv[1]
-  : 'C:\\Users\\Rain\\AppData\\Roaming\\npm\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js';
+  // 退回"全局 npm 安装"的常见位置：从 APPDATA 推导，不带任何用户名
+  : path.join(process.env.APPDATA || '', 'npm', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js');
 const PWSH = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
 
 const DOER_PS1 = [
