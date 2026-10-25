@@ -4,15 +4,26 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { state } from './state.js';
 
+// 2026-10-25 去硬编码：默认值全部从"当前在哪"推导，换机不用改源码。
+// 优先级：环境变量 > 推导值。目录布局固定为 <workspace>/dsh-plugins/dsh-picophone/lib
+// ⇒ 从本文件上三级就是 workspace（原来的写死值就是它）。
+const PKG_DIR = path.dirname(fileURLToPath(import.meta.url));
+const DERIVED_ROOT = path.resolve(PKG_DIR, '..', '..', '..');
+// pwsh 在 Windows 上装在 %LOCALAPPDATA%\Programs\PowerShell7；没有则退回系统 powershell。
+const DERIVED_PWSH = process.env.LOCALAPPDATA
+  ? path.join(process.env.LOCALAPPDATA, 'Programs', 'PowerShell7', 'pwsh.exe')
+  : 'powershell';
+
 export const DEFAULTS = {
-  root: 'C:\\Users\\Rain\\AppData\\Local\\Temp\\PicoPhone',
+  root: process.env.DSH_PICOPHONE_ROOT || DERIVED_ROOT,
   repo: null,
   tempRoot: null,
   python: 'python',
-  powershell: 'C:\\Users\\Rain\\AppData\\Local\\Programs\\PowerShell7\\pwsh.exe',
+  powershell: process.env.DSH_POWERSHELL || DERIVED_PWSH,
   timeoutMs: 900000,
   shortTimeoutMs: 120000,
   maxOutputChars: 14000,
