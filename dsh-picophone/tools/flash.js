@@ -150,9 +150,9 @@ export function register(ctx, deps) {
           method: {
             type: 'string',
             enum: ['backdoor', 'bootsel', 'picotool', 'list', 'auto'],
-            description: '`backdoor` (default) uses the firmware serial backdoor, `bootsel` uses tools/flash_bootsel.ps1, `picotool` uses picotool load -x, `list` only enumerates boards and drives, `auto` tries backdoor then picotool and says plainly when a human must press BOOTSEL.',
+            description: '`backdoor` (default), `bootsel`, `picotool`, `list`, or `auto` (backdoor then picotool).',
           },
-          force: { type: 'boolean', description: 'Flash even though the BOOTSEL volume identity does not match the intended board. Off by default: the DUT and the probe expose near-identical boot volumes, and a wrong write is expensive on a rig with no reset pin.' },
+          force: { type: 'boolean', description: 'Flash even if the BOOTSEL volume identity does not match. Off by default; a wrong write is expensive.' },
           skipVolumeCheck: { type: 'boolean', description: 'Skip the boot-volume identity check entirely (dry runs and non-volume methods).' },
           dryRun: { type: 'boolean', description: 'Resolve and print the exact commands plus the volume check result without touching hardware.' },
           timeoutMs: { type: 'number', description: 'Hard timeout, default 120000 ms.' },

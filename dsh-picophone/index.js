@@ -68,7 +68,7 @@ const RIG_PROMPT = [
   '三条最要命的硬规矩：BOOTSEL 按钮是唯一救砖手段；串口与烧写互斥（同一把台架锁）；沙箱外的受管脚本走信任门/审批，不许绕过。',
   '先把 pico_status 跑起来看台架状态，是本模式的第一步。',
   '',
-  '- 子智能体：优先复用已有 Agent（看 _agents\ 与 PicoPhone\子Agent须知.md），不要随手新建；复用前先跑 tools\sync_agent_spaces.ps1 同步它的空间，确需新建要写明为什么不能复用。',
+  '- 子智能体：优先复用已有 Agent（看 _agents\\ 与 PicoPhone\\子Agent须知.md），不要随手新建；复用前先跑 tools\\sync_agent_spaces.ps1 同步它的空间，确需新建要写明为什么不能复用。',
 ].join('\n');
 
 export async function apply(ctx, rawConfig) {

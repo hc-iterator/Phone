@@ -137,7 +137,7 @@ export function register(ctx, deps) {
         type: 'object',
         additionalProperties: false,
         properties: {
-          probeSerial: { type: 'boolean', description: 'Also sample the board serial for a couple of seconds. This is the fastest way to notice that the board is not running the firmware a handover note claims.' },
+          probeSerial: { type: 'boolean', description: 'Also sample the board serial for a couple of seconds; the fastest check for stale firmware.' },
           probeSeconds: { type: 'number', description: 'Sampling window for probeSerial; default 2 s.' },
           probeTarget: { type: 'string', enum: BOARD_ENUM, description: 'Which board probeSerial reads; default `dut`.' },
         },

@@ -12,6 +12,8 @@
   },
   "files": [
     "index.js",
+    "lib",
+    "tools",
     "serial-session.ps1",
     "icon.svg",
     "locale/*.json",

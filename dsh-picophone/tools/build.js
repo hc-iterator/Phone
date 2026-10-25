@@ -96,15 +96,15 @@ export function register(ctx, deps) {
         properties: {
           target: {
             type: 'string',
-            description: '`root` for the main firmware, `host-test` for the PC-side kernel self-tests, or a subproject name such as `wboard_dvi`, `core1_monitor`, `probe_rp2040`.',
+            description: '`root`, `host-test`, or a subproject name such as `wboard_dvi` / `core1_monitor` / `probe_rp2040`.',
           },
           buildSub: {
             type: 'string',
-            description: 'Subproject build directory, default `build`. Use a separate one (for example `build_slow`) so an experiment never overwrites the full-speed artifact.',
+            description: 'Subproject build dir, default `build`. Use a separate one (e.g. `build_slow`) to keep the full-speed artifact intact.',
           },
           noUf2: {
             type: 'boolean',
-            description: 'Subprojects only: skip the extra elf→uf2 conversion step. The uf2 still appears, because every subproject CMakeLists calls pico_add_extra_outputs() and ninja emits it — this flag only avoids a redundant conversion.',
+            description: 'Subprojects only: skip the redundant elf→uf2 conversion. The uf2 still appears via pico_add_extra_outputs().',
           },
           cacheArgs: {
             type: 'array',

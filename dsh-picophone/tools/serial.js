@@ -141,7 +141,7 @@ export function register(ctx, deps) {
           seconds: { type: 'number', description: 'Capture window, default 5 s.' },
           send: { type: 'string', description: 'Text written after opening. The probe backdoor needs a CR terminator.' },
           escapes: { type: 'boolean', description: 'Interpret send as a PowerShell escape sequence, so `` `r `` becomes CR.' },
-          outFile: { type: 'string', description: 'Where to save the capture. Always lands under %TEMP%: a relative path resolves there, and an absolute path outside it is re-fenced into it (reported as 围栏). Defaults to a timestamped file in %TEMP%, whose contents are echoed back either way.' },
+          outFile: { type: 'string', description: 'Where to save the capture; always forced under %TEMP% (an outside absolute path is re-fenced). Default: a timestamped file in %TEMP%.' },
           list: { type: 'boolean', description: 'Only enumerate ports and their VID/PID.' },
           timeoutMs: { type: 'number', description: 'Hard timeout, default 120000 ms.' },
         },
