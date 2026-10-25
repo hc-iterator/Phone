@@ -10,6 +10,7 @@
  *   · 同时用 systemPrompt 片段兜底（10 分钟内）
  */
 import * as nodeFs from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 
 export const inject = ['tools'];
@@ -71,6 +72,13 @@ function recent(at, ms) { const t = Date.parse(String(at || '').replace(' ', 'T'
 
 export function apply(ctx, config) {
   plog('apply entered');
+  // 2026-10-25：重启任务只该活到"被 /run 一次"为止。新 Host 一启动就把它删掉 ——
+  // 此刻本次任务早已跑完、wscript 已退出，删它不可能掐断正在进行的重启。
+  // 旧代码缺了这一下，一次性任务会一直留在计划任务里。
+  try {
+    execFileSync('schtasks', ['/delete', '/tn', 'dsh_restart_once', '/f'], { stdio: 'ignore', timeout: 15000, windowsHide: true });
+    plog('cleanup: removed leftover dsh_restart_once');
+  } catch (e) { }
   const ensureFiles = (delay) => {
     try { nodeFs.writeFileSync(DOER, DOER_PS1, 'utf8'); nodeFs.writeFileSync(VBS, vbsText(delay), 'utf8'); return true; }
     catch (e) { return false; }
@@ -99,7 +107,6 @@ export function apply(ctx, config) {
       const delay = typeof a.delaySeconds === 'number' && a.delaySeconds >= 0 ? Math.floor(a.delaySeconds) : 25;
       const sessionId = (exec && exec.agent && exec.agent.id) || (exec && exec.sessionId) || '';
       if (!ensureFiles(delay)) return { ok: false, text: '无法写入重启脚本到 ' + TMP };
-      const { execFileSync } = await import('node:child_process');
       if (a.dryRun) {
         try { execFileSync(PWSH, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', DOER, '-Delay', '0', '-DryRun'], { encoding: 'utf8', timeout: 60000, windowsHide: true });
           return { ok: true, dryRun: true, text: '干跑完成（未重启）日志：' + LOG }; }
@@ -111,14 +118,33 @@ export function apply(ctx, config) {
       try { nodeFs.writeFileSync(REQ, JSON.stringify({ sessionId, altIds, at: new Date().toISOString(), delay }), 'utf8'); } catch (e) { }
       try { nodeFs.unlinkSync(RES); } catch (e) { }
       try { execFileSync('schtasks', ['/delete', '/tn', 'dsh_restart_once', '/f'], { encoding: 'utf8', timeout: 30000, windowsHide: true }); } catch (e) { }
-      try {
-        const st = new Date(Date.now() + 5 * 60000);
-        const hhmm = String(st.getHours()).padStart(2, '0') + ':' + String(st.getMinutes()).padStart(2, '0');
-        execFileSync('schtasks', ['/create', '/tn', 'dsh_restart_once', '/tr', 'wscript.exe //B //Nologo ' + VBS, '/sc', 'once', '/st', hhmm, '/f'], { encoding: 'utf8', timeout: 30000, windowsHide: true });
-        execFileSync('schtasks', ['/run', '/tn', 'dsh_restart_once'], { encoding: 'utf8', timeout: 30000, windowsHide: true });
-      } catch (e) { return { ok: false, text: '排定重启任务失败：' + (e && e.message ? e.message : String(e)) }; }
-      return { ok: true, scheduled: true, delaySeconds: delay, sessionId, resultPath: RES, logPath: LOG,
-        text: '已排定重启：约 ' + delay + ' 秒后重启。完成后插件会把结果作为一条消息推给本会话（发给 Agent），并在 systemPrompt 里保留 10 分钟。' };
+      // 2026-10-25：原实现 /st 取"现在+5分钟"，只是为了给 /SC ONCE 凑一个合法的"将来"时刻；
+      // 但 /run 只是提前跑一遍，并不消掉触发器 ⇒ 5 分钟后任务自己再响一次，
+      // 拿当时 VBS 里的延时又杀一遍 3080（实测：12:52 排的重启在 12:57 又跑了一遍）。
+      // 现在把 /st 钉在 9999 年，触发器永远到不了；真正执行只靠 /run。
+      const SCT = { encoding: 'utf8', timeout: 30000, windowsHide: true };
+      // /SC ONCE 强制要 /ST，且必须是"将来"；日期写法随系统区域，按几种写法依次试。
+      const pad2 = (n) => String(n).padStart(2, '0');
+      const nowD = new Date();
+      const ymdDash = nowD.getFullYear() + '-' + pad2(nowD.getMonth() + 1) + '-' + pad2(nowD.getDate());
+      const ymdSlash = nowD.getFullYear() + '/' + pad2(nowD.getMonth() + 1) + '/' + pad2(nowD.getDate());
+      const schedules = [
+        ['9999-12-31', '23:59'], ['9999/12/31', '23:59'], ['12/31/9999', '23:59'],
+        [ymdDash, '23:59'], [ymdSlash, '23:59']
+      ];
+      let used = null, lastErr = null;
+      for (const [sd, st] of schedules) {
+        try {
+          execFileSync('schtasks', ['/create', '/tn', 'dsh_restart_once', '/tr', 'wscript.exe //B //Nologo ' + VBS, '/sc', 'once', '/sd', sd, '/st', st, '/f'], SCT);
+          used = sd + ' ' + st;
+          break;
+        } catch (e) { lastErr = e; }
+      }
+      if (!used) return { ok: false, text: '排定重启任务失败（/create 所有日期写法都被拒）：' + (lastErr && lastErr.message ? lastErr.message : String(lastErr)) };
+      try { execFileSync('schtasks', ['/run', '/tn', 'dsh_restart_once'], SCT); }
+      catch (e) { return { ok: false, text: '排定重启任务失败（/run）：' + (e && e.message ? e.message : String(e)) }; }
+      return { ok: true, scheduled: true, delaySeconds: delay, sessionId, taskStart: used, resultPath: RES, logPath: LOG,
+        text: '已排定重启：约 ' + delay + ' 秒后重启（任务触发器 ' + used + '，不会自己再响；新 Host 启动后会删掉该任务）。完成后插件会把结果作为一条消息推给本会话（发给 Agent），并在 systemPrompt 里保留 10 分钟。' };
     }
   };
 
