@@ -134,12 +134,29 @@ export function apply(ctx, config) {
       // 旧代码：任务排在 now+5min，然后立刻 /run ⇒ 5 分钟后又自己跑一次，
       // 把刚起来的 DSH 再杀一遍（用户实测：20:23 请求 → 20:28 第二次重启）。
       // 新做法（用户 2026-10-30 定的"9999"方案）：把任务排到 2099-12-31 23:59，
-      // 它**永远不会自己触发**；只靠下面这次 /run 跑一次；跑完由 doer 自己删任务。
-      execFileSync('schtasks', ['/create', '/tn', 'dsh_restart_once',
-        '/tr', 'wscript.exe //B //Nologo ' + VBS,
-        '/sc', 'once', '/sd', '12/31/2099', '/st', '23:59', '/f'],
-        { encoding: 'utf8', timeout: 30000, windowsHide: true });
-      execFileSync('schtasks', ['/run', '/tn', 'dsh_restart_once'], { encoding: 'utf8', timeout: 30000, windowsHide: true });
+      // 它**永远不会自己触发**；只靠下面那次 /run 跑一次；跑完由 doer 自己删任务。
+      //
+      // 2026-10-30 第二修：/sd 的日期格式跟系统区域走 —— 中文环境下 '12/31/2099'
+      // 会被 schtasks 直接拒（"无效的起始日期，格式应为 yyyy/mm/dd"），
+      // 而 en-US 又只认 MM/dd/yyyy。所以按顺序试两种格式，
+      // 全失败就**不排任务**、直接把 doer 拉起来（少一层依赖，绝不会因此不重启）。
+      const createRun = (sd) => {
+        execFileSync('schtasks', ['/create', '/tn', 'dsh_restart_once',
+          '/tr', 'wscript.exe //B //Nologo ' + VBS,
+          '/sc', 'once', '/sd', sd, '/st', '23:59', '/f'],
+          { encoding: 'utf8', timeout: 30000, windowsHide: true });
+        execFileSync('schtasks', ['/run', '/tn', 'dsh_restart_once'], { encoding: 'utf8', timeout: 30000, windowsHide: true });
+      };
+      let scheduled = false;
+      let lastErr = null;
+      for (const sd of ['2099/12/31', '12/31/2099']) {
+        try { createRun(sd); scheduled = true; break; } catch (e) { lastErr = e; }
+      }
+      if (!scheduled) {
+        // 兜底：wscript 起的 doer 是独立进程，父进程被 Stop-Process 杀掉也不会跟着死
+        plog('schtasks schedule failed (' + (lastErr && lastErr.message ? lastErr.message : 'unknown') + '); fallback to direct wscript');
+        execFileSync('wscript.exe', ['//B', '//Nologo', VBS], { timeout: 30000, windowsHide: true, stdio: 'ignore' });
+      }
     } catch (e) { return { ok: false, text: '排定重启任务失败：' + (e && e.message ? e.message : String(e)) }; }
     return { ok: true, scheduled: true, delaySeconds: delay, sessionId, resultPath: RES, logPath: LOG };
   };
