@@ -207,10 +207,11 @@ export function apply(ctx) {
     if (!agent) return { ok: false, error: '目标会话没有存活 Agent' };
     const msg = {
       id: randomUUID(),
-      // 2026-10-31 用户指出：Agent 注入的消息，role 必须是 'agent'。
-      // 原来这里没有 role ⇒ 组给模型时 messages[N] 缺 role，整个请求 400，
-      // 那个会话就再也发不出去（实测报错 messages[393]: missing field `role`）。
-      role: 'agent',
+      // 2026-10-31：会话校验器只接受 role === 'user'
+      //   （实测：session event at seq 1773 message must have role "user" ⇒ 会话被判 corrupt）
+      // ⇒ role 写 'user'；"这是 Agent 消息"由下面的 source.kind 表达，不靠 role。
+      //   完全不写 role 时，组给模型会 400：messages[N]: missing field `role`。
+      role: 'user',
       content: [{ type: 'text', text: '【Agent 消息·' + kind + '】from ' + senderId + '\n' + body }],
       source: { kind: 'agent-message', form: 'relay', senderSessionId: senderId },
     };
