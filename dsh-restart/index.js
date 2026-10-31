@@ -454,10 +454,17 @@ export function apply(ctx) {
       schema: { type: 'object', additionalProperties: true },
       render: (_a, v) => [{ type: 'text', text: typeof (v && v.text) === 'string' ? v.text : JSON.stringify(v) }],
     },
-    async execute(args) {
+    async execute(args, exec) {
       const st = readState();
       const gate = canCommit(st, args && args.token);
       if (!gate.ok) return { ok: false, text: gate.error };
+      // 只认发起者：A 申请、B 提交 这条路必须堵死（2026-10-31 事故：另一个会话
+      // 为加载自己的工具而重启，把正在对话的用户一起断开）。
+      const caller0 = senderOf(exec);
+      if (st.requester && caller0 && caller0 !== st.requester) {
+        log('commit 被拒：调用者 ' + caller0 + ' ≠ 发起者 ' + st.requester);
+        return { ok: false, text: '只有发起本次重启请求的会话才能执行它（当前调用者不是发起者）。' };
+      }
       const next = Object.assign({}, st, { phase: 'committed', tokenUsed: true, pendingNotify: st.targets.concat(st.requester).filter(Boolean) });
       writeState(next);
       const r = scheduleRestart();
