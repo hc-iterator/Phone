@@ -162,6 +162,14 @@ export function apply(ctx, config) {
   };
 
   // ── 通知：给每个被通知的 Agent 发一条消息（走 sessionController.prompt）────
+  // ★ 2026-10-31 改：通知不再排队等回合边界。
+  //   旧实现用 mode:'queue'，消息要等目标 Agent 的下一个回合边界才投递，
+  //   于是"请求"和"取消"会隔好几个回合才先后冒出来，内容早已过期，
+  //   而且在聊天里长得像用户自己说的话。
+  //   现在：优先 mode:'steer'（插队，立刻进入目标当前回合）；目标空闲时 steer 会失败，
+  //   再退回 queue。文本统一加【系统通知】前缀，和用户发言区分开。
+  //   注意：SessionPromptRequest 只有 requestId/sessionId/mode/content/clientTimeZone，
+  //   旧代码里的 source 字段根本不在协议里，属于无效字段（已删）。
   const notifySessions = (ids, text) => {
     let sc = null;
     try { sc = ctx.get ? ctx.get('sessionController') : undefined; } catch (e) { sc = null; }
@@ -169,16 +177,16 @@ export function apply(ctx, config) {
     let n = 0;
     for (const sid of ids) {
       if (!sid) continue;
-      try {
-        sc.prompt({
-          requestId: 'dsh-restart-vote-' + randomUUID(),
-          sessionId: sid,
-          mode: 'queue',
-          content: [{ type: 'text', text }],
-          source: { kind: 'tool', callId: 'dsh-restart-vote-' + randomUUID() }
-        }, new AbortController().signal);
-        n += 1;
-      } catch (e) { plog('prompt FAILED sid=' + sid + ' :: ' + (e && e.message ? e.message : String(e))); }
+      const body = '【系统通知·DSH 重启】' + text;
+      const base = { requestId: 'dsh-restart-vote-' + randomUUID(), sessionId: sid, content: [{ type: 'text', text: body }] };
+      let sent = false;
+      try { sc.prompt({ ...base, mode: 'steer' }, new AbortController().signal); sent = true; plog('steer ok sid=' + sid); }
+      catch (e) { plog('steer failed sid=' + sid + ' :: ' + (e && e.message ? e.message : String(e))); }
+      if (!sent) {
+        try { sc.prompt({ ...base, mode: 'queue' }, new AbortController().signal); sent = true; plog('queue fallback ok sid=' + sid); }
+        catch (e) { plog('prompt FAILED sid=' + sid + ' :: ' + (e && e.message ? e.message : String(e))); }
+      }
+      if (sent) n += 1;
     }
     return n;
   };
@@ -231,20 +239,10 @@ export function apply(ctx, config) {
         return { ok: false, text: '拿不到 agents.list()，无法确定要通知哪些 Agent ⇒ 不发起重启。' };
       }
 
-      // ── 2026-10-31 修：只有一个 Agent 时表决是空转 ────────────────────────
-      // 旧代码把发起者自己也放进 targets，然后给自己 prompt 一条"重启请求"。
-      // 那条 prompt 会以**用户消息**的形态落进聊天（用户实测：莫名其妙多出一条
-      // 像是自己发的"请求重启 DSH"），而真正的重启还得等自己去 allow。
-      // 只有自己时没有别人可征询 ⇒ 直接放行，不再造这条噪音。
+      // 2026-10-31：表决机制保留（用户明确要求）。即便只有发起者自己，
+      // 也要走"建表决 → 自己 allow → 才重启"这两步，不允许静默跳过。
+      // 只是通知不再发给发起者（它从工具返回值里已经知道了），避免聊天里多出假用户消息。
       const others = targets.filter((t) => t !== sessionId);
-      if (others.length === 0) {
-        const r = scheduleRestart(0, sessionId, []);
-        if (!r.ok) return { ok: false, phase: 'approved', restart: r, text: '没有其它正在运行的 Agent，但排定重启失败：' + (r.text || '') };
-        return {
-          ok: true, phase: 'approved', restart: r,
-          text: '没有其它正在运行的 Agent，无需表决 ⇒ 立即重启（无延时）。结果会写 ' + RES + '。'
-        };
-      }
 
       const v = { phase: 'voting', at: new Date().toISOString(), requester: sessionId, targets, votes: {}, delay: 0 };
       writeVote(v);
@@ -262,9 +260,12 @@ export function apply(ctx, config) {
       return {
         ok: true, phase: 'voting', requester: sessionId, targets, notified,
         votePath: VOTE,
-        text: '已发起重启表决（不是重启）：通知了 ' + notified + '/' + others.length + ' 个其它 Agent。\n' +
-          '等待它们调用 allowdshrestarting；任一调用 stopdshfromrestarting（或用户输入 /stopdshfromrestarting）即取消。\n' +
-          '全部放行后才会真正重启。'
+        text: (others.length === 0
+          ? '已发起重启表决：当前没有其它正在运行的 Agent，被通知者只有你自己（' + sessionId + '）。\n' +
+            '调用 allowdshrestarting 放行后立即重启；调用 stopdshfromrestarting 取消。'
+          : '已发起重启表决（不是重启）：通知了 ' + notified + '/' + others.length + ' 个其它 Agent。\n' +
+            '等待它们调用 allowdshrestarting；任一调用 stopdshfromrestarting（或用户输入 /stopdshfromrestarting）即取消。\n' +
+            '全部放行后才会真正重启。')
       };
     }
   };
