@@ -2327,6 +2327,7 @@ async function opGuiCapture(cfg, args = {}) {
   const out = args.outFile ? path.resolve(String(args.outFile)) : guiOutPath('png');
   const argv = [hwnd, out];
   if (Number.isFinite(args.maxWidth) && args.maxWidth > 0) argv.push('-MaxWidth', String(args.maxWidth));
+  if (args.raise === true) argv.push('-Raise');
   try {
     const raw = runGuiScript(cfg, 'capture-window.ps1', argv, 60000);
     return { ok: true, exitCode: 0, path: out, text: `${raw.trim()}\n图片：${out}` };
@@ -2458,6 +2459,7 @@ function buildToolDefinitions(cfg) {
           hwnd: { type: 'string', description: 'Window handle from gui_windows: decimal (`133728`) or hex (`0x20A60`).' },
           outFile: { type: 'string', description: 'Optional absolute output path; default is a timestamped file under %TEMP%\\dsh_gui.' },
           maxWidth: { type: 'number', description: 'Downscale so width does not exceed this (keeps aspect ratio). The model input cap is about 0.8 MP, so 900-1280 is a sane value.' },
+          raise: { type: 'boolean', description: 'When PrintWindow returns black, force the window to the foreground and capture from screen instead. This steals focus from the user — only use it when the caller is alone. Without it the tool refuses rather than returning a wrong image.' },
         },
       },
       'gui_capture',
@@ -2938,3 +2940,4 @@ export async function apply(ctx, rawConfig) {
     ctx.logger.info(`dsh-picophone: 已挂载 ${definitions.length} 个工具 + 1 个命令（root=${cfg.root}）`);
   }
 }
+
