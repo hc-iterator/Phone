@@ -2351,8 +2351,72 @@ async function opGuiZoom(cfg, args = {}) {
   }
 }
 
+// ── 图形化：启动到虚拟屏 / 挪窗口 / 虚拟显示器 / 浏览器 CDP ────────────────
+async function opGuiLaunch(cfg, args = {}) {
+  const file = String(args.file ?? '').trim();
+  if (file === '') return { ok: false, exitCode: null, text: 'file 必填（例如 notepad.exe）' };
+  const argv = ['-File', guiScriptPath(cfg, 'launch-on-vd.ps1'), file];
+  if (Array.isArray(args.args) && args.args.length > 0) argv.push('-Args', ...args.args.map(String));
+  if (Number.isFinite(args.waitSeconds)) argv.push('-WaitSeconds', String(args.waitSeconds));
+  try {
+    const raw = execFileSync('pwsh', ['-NoProfile', '-NonInteractive', ...argv], { encoding: 'utf8', windowsHide: true, timeout: 60000 });
+    return { ok: true, exitCode: 0, text: raw.trim() };
+  } catch (error) {
+    return { ok: false, exitCode: null, text: `启动失败：${error instanceof Error ? error.message : String(error)}` };
+  }
+}
+
+async function opGuiPlace(cfg, args = {}) {
+  const hwnd = String(args.hwnd ?? '').trim();
+  if (hwnd === '') return { ok: false, exitCode: null, text: 'hwnd 必填' };
+  const argv = ['-File', guiScriptPath(cfg, 'place-window.ps1'), hwnd];
+  if (args.virtual !== false) argv.push('-Virtual');
+  if (Number.isFinite(args.x)) argv.push('-X', String(args.x));
+  if (Number.isFinite(args.y)) argv.push('-Y', String(args.y));
+  try {
+    const raw = execFileSync('pwsh', ['-NoProfile', '-NonInteractive', ...argv], { encoding: 'utf8', windowsHide: true, timeout: 30000 });
+    return { ok: true, exitCode: 0, text: raw.trim() };
+  } catch (error) {
+    return { ok: false, exitCode: null, text: `挪动失败：${error instanceof Error ? error.message : String(error)}` };
+  }
+}
+
+async function opGuiVdd(cfg, args = {}) {
+  const action = String(args.action ?? 'status');
+  const argv = ['-File', guiScriptPath(cfg, 'vdd.ps1')];
+  if (action === 'add') argv.push('-Add');
+  else if (action === 'remove') { argv.push('-Remove', String(Number.isFinite(args.index) ? args.index : 0)); }
+  else argv.push('-Status');
+  try {
+    const raw = execFileSync('pwsh', ['-NoProfile', '-NonInteractive', ...argv], { encoding: 'utf8', windowsHide: true, timeout: 60000 });
+    return { ok: true, exitCode: 0, text: raw.trim() };
+  } catch (error) {
+    return { ok: false, exitCode: null, text: `VDD 操作失败：${error instanceof Error ? error.message : String(error)}` };
+  }
+}
+
+async function opGuiBrowser(cfg, args = {}) {
+  const cmd = String(args.cmd ?? 'tree');
+  if (!['list', 'tree', 'click', 'type', 'eval'].includes(cmd)) return { ok: false, exitCode: null, text: `cmd 必须是 list/tree/click/type/eval` };
+  const script = path.join(cfg.repo, 'tools', 'gui', 'cdp.mjs');
+  if (!existsSync(script)) return { ok: false, exitCode: null, text: `找不到 ${script}` };
+  const argv = [script, cmd, '--port', String(Number.isFinite(args.port) ? args.port : 9333)];
+  for (const [key, flag] of [['target', 'target'], ['selector', 'selector'], ['text', 'text'], ['script', 'script'], ['limit', 'limit']]) {
+    if (args[key] !== undefined && args[key] !== '') argv.push('--' + flag, String(args[key]));
+  }
+  try {
+    const raw = execFileSync(process.execPath, argv, { encoding: 'utf8', windowsHide: true, timeout: 60000 });
+    return { ok: true, exitCode: 0, text: raw.trim() };
+  } catch (error) {
+    return { ok: false, exitCode: null, text: `CDP 失败：${error instanceof Error ? error.message : String(error)}\n（浏览器要用 --remote-debugging-port 启动；Win10 上可直接用 gui_launch 配 args）` };
+  }
+}
 const OPS = {  status: opStatus,
   gui_windows: opGuiWindows,
+  gui_launch: opGuiLaunch,
+  gui_place: opGuiPlace,
+  gui_vdd: opGuiVdd,
+  gui_browser: opGuiBrowser,
   gui_capture: opGuiCapture,
   gui_zoom: opGuiZoom,
   github: opGithub,
@@ -2481,6 +2545,72 @@ function buildToolDefinitions(cfg) {
         },
       },
       'gui_zoom',
+    ),
+    tool(
+      cfg,
+      'gui_launch',
+      'Start a program and place its window on the virtual display, so the user never sees it. Uses SetWindowPos with SWP_NOACTIVATE: focus is not stolen. Prefer this over starting programs yourself, otherwise the window lands on the user primary screen.',
+      {
+        type: 'object',
+        additionalProperties: false,
+        required: ['file'],
+        properties: {
+          file: { type: 'string', description: 'Executable: `notepad.exe`, `msedge.exe`, or an absolute path.' },
+          args: { type: 'array', items: { type: 'string' }, description: 'Arguments for the program.' },
+          waitSeconds: { type: 'number', description: 'How long to wait for the window to appear; default 15.' },
+        },
+      },
+      'gui_launch',
+    ),
+    tool(
+      cfg,
+      'gui_place',
+      'Move one window to the virtual display (or explicit coordinates) without activating it. Use when a window was started by something else and is sitting on the user screen.',
+      {
+        type: 'object',
+        additionalProperties: false,
+        required: ['hwnd'],
+        properties: {
+          hwnd: { type: 'string', description: 'Window handle from gui_windows.' },
+          virtual: { type: 'boolean', description: 'Put it on the non-primary (virtual) screen. Default true.' },
+          x: { type: 'number', description: 'Explicit left coordinate.' },
+          y: { type: 'number', description: 'Explicit top coordinate.' },
+        },
+      },
+      'gui_place',
+    ),
+    tool(
+      cfg,
+      'gui_vdd',
+      'Manage the Parsec virtual display: `status` (device + screen list), `add` (plug a virtual monitor), `remove` (unplug by index). A keeper process pings the driver every 50 ms; without it the display is unplugged about a second after being added.',
+      {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          action: { type: 'string', enum: ['status', 'add', 'remove'], description: 'Operation; default status.' },
+          index: { type: 'number', description: 'Display index to remove (as returned by add).' },
+        },
+      },
+      'gui_vdd',
+    ),
+    tool(
+      cfg,
+      'gui_browser',
+      'Talk to a Chromium browser or Electron app over CDP: `tree` returns clickable elements with exact rects, text and CSS selectors; `click` triggers a real click by selector; `type` sets an input value; `list` shows targets; `eval` runs one expression. This never moves the real mouse, so it works on the virtual display without focus.',
+      {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          cmd: { type: 'string', enum: ['list', 'tree', 'click', 'type', 'eval'], description: 'Operation; default tree.' },
+          port: { type: 'number', description: 'CDP port, default 9333 (launch the browser with --remote-debugging-port=9333).' },
+          target: { type: 'string', description: 'Target id prefix; default the first page target.' },
+          selector: { type: 'string', description: 'CSS selector for click/type.' },
+          text: { type: 'string', description: 'Text for type.' },
+          script: { type: 'string', description: 'Expression for eval.' },
+          limit: { type: 'number', description: 'Max rows printed for tree; default 200.' },
+        },
+      },
+      'gui_browser',
     ),
     tool(
       cfg,
@@ -2940,4 +3070,5 @@ export async function apply(ctx, rawConfig) {
     ctx.logger.info(`dsh-picophone: 已挂载 ${definitions.length} 个工具 + 1 个命令（root=${cfg.root}）`);
   }
 }
+
 
