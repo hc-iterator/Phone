@@ -220,7 +220,35 @@ export function apply(ctx) {
         String(x.id).replace(/^session-/, '') === bare));
     };
     const agent = lookup(toId);
-    if (!agent) { log('relay FAILED: 没有存活 Agent for ' + toId); return { ok: false, error: '目标会话没有存活 Agent' }; }
+    const text = '【Agent 消息·' + kind + '】from ' + senderId + '\n' + body;
+    // 2026-10-31：目标会话可能根本没加载（"找不到活动会话"）。这时并不等于送不到 ——
+    // harness 有唤醒入口：sessionController.prompt({sessionId,...})，会让该会话 open() 并收下这条。
+    // ⇒ 三级投递：在线用 inbox/followup；不在线用 prompt 唤起；都不行才报错。
+    const viaPrompt = () => {
+      let sc = null;
+      try { sc = ctx.get ? ctx.get('sessionController') : undefined; } catch { sc = null; }
+      if (!sc || typeof sc.prompt !== 'function') return { ok: false, error: '没有 sessionController.prompt' };
+      try {
+        sc.prompt({
+          requestId: 'dsh-restart-relay-' + randomUUID(),
+          sessionId: toId,
+          mode: 'queue',
+          content: [{ type: 'text', text }],
+          source: { kind: 'agent-message', form: 'relay', senderSessionId: senderId },
+        }, new AbortController().signal);
+        log('relay ok(prompt/wake) → ' + toId);
+        return { ok: true, via: 'prompt' };
+      } catch (e) {
+        log('relay prompt THREW → ' + toId + ' :: ' + (e && e.message ? e.message : String(e)));
+        return { ok: false, error: e && e.message ? e.message : String(e) };
+      }
+    };
+    if (!agent) {
+      const w = viaPrompt();
+      if (w.ok) return w;
+      log('relay FAILED: 没有存活 Agent 且无法唤起 for ' + toId);
+      return { ok: false, error: '目标会话没有存活 Agent，且唤起失败：' + (w.error || '') };
+    }
     const msg = {
       id: randomUUID(),
       // 2026-10-31：会话校验器只接受 role === 'user'
@@ -228,7 +256,7 @@ export function apply(ctx) {
       // ⇒ role 写 'user'；"这是 Agent 消息"由下面的 source.kind 表达，不靠 role。
       //   完全不写 role 时，组给模型会 400：messages[N]: missing field `role`。
       role: 'user',
-      content: [{ type: 'text', text: '【Agent 消息·' + kind + '】from ' + senderId + '\n' + body }],
+      content: [{ type: 'text', text }],
       source: { kind: 'agent-message', form: 'relay', senderSessionId: senderId },
     };
     try {
@@ -353,8 +381,7 @@ export function apply(ctx) {
     },
   };
 
-  const defStatus = {
-    name: 'dsh_restart_status',
+  const defStatus = {    name: 'dsh_restart_status',
     description: 'Show the current restart request: phase, votes, pending peers, denial reasons, token state.',
     parameters: { type: 'object', additionalProperties: false, properties: {} },
     output: {
