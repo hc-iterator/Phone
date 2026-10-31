@@ -294,9 +294,37 @@ export function apply(ctx) {
     return { ok: false, error: '目标会话没有存活 Agent，且没有可用的唤起接口' };
   };
 
+  /**
+   * 最近 windowMs 内有写入的会话（按 `session.v4.jsonl.zstd` 的 mtime）。
+   *
+   * 为什么需要：这台机器上 `sessionController.list()` 恒为 0 项，于是"正在跑的对话"
+   * 完全不会出现在重启目标里（实测：PicoMode (1) 在跑，但没被征求同意）。
+   * 会话只要在干活就一定会写这个文件，所以文件时间是最可靠的"忙"信号。
+   */
+  const sessionsRecentlyWritten = (windowMs) => {
+    const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+    const root = path.join(home, 'sessions');
+    const cutoff = Date.now() - windowMs;
+    const found = [];
+    let workspaces = [];
+    try { workspaces = fs.readdirSync(root, { withFileTypes: true }); } catch { return found; }
+    for (const ws of workspaces) {
+      if (!ws.isDirectory()) continue;
+      let sessions = [];
+      try { sessions = fs.readdirSync(path.join(root, ws.name), { withFileTypes: true }); } catch { continue; }
+      for (const s of sessions) {
+        if (!s.isDirectory() || !s.name.startsWith('session-')) continue;
+        const file = path.join(root, ws.name, s.name, 'session.v4.jsonl.zstd');
+        try {
+          if (fs.statSync(file).mtimeMs >= cutoff) found.push(s.name);
+        } catch { /* 没有这个文件就不是活跃会话 */ }
+      }
+    }
+    return found;
+  };
+
   /** 除发起者外，正在干活的会话：本轮在跑 / 有子 Agent 在跑 / 我们唤醒过且仍加载。 */
-  const busySessions = (requester) => {
-    const union = new Set();
+  const busySessions = (requester) => {    const union = new Set();
     let items = [];
     // 2026-10-31 实测：三轮重启请求都报"目标=0"，而目标会话当时明明在跑子 agent。
     // 原实现把 list() 整段包在 try/catch 里并静默返回空数组 ⇒ 任何异常都变成"没人忙"，
@@ -319,8 +347,21 @@ export function apply(ctx) {
       if (s.running) union.add(String(s.sessionId));
       if (s.running && s.parentSessionId) union.add(String(s.parentSessionId));
     }
-    // 兜底：经 resolveAgent 唤醒过、且此刻仍持有 Agent 的会话 —— 这类会话不保证出现在 list() 里，
-    // 但它们正在跑任务时同样应该收到"要重启了"的通知。
+    // 兜底 1（最可靠）：按**会话文件的写入时间**判断是否在干活。
+    // 2026-10-31 实测：这台机器上 list() 恒为 0 项，导致"PicoMode (1) 正在运行"时
+    // 重启请求没把它列为目标、也就没征求它同意。会话只要在跑，磁盘上一定有近期写入，
+    // 这条与 sessionController 无关，90 秒内写过就算忙。
+    try {
+      const recent = sessionsRecentlyWritten(90 * 1000);
+      for (const id of recent) {
+        if (id === requester) continue;
+        union.add(id);
+      }
+      log('busySessions: 文件活跃会话 ' + recent.length + ' 个 → ' + recent.join(','));
+    } catch (e) {
+      log('busySessions: 扫描会话文件失败 :: ' + (e && e.message ? e.message : String(e)));
+    }
+    // 兜底 2：经 resolveAgent 唤醒过、且此刻仍持有 Agent 的会话。
     const WOKEN_TTL_MS = 10 * 60_000;
     for (const [id, at] of woken) {
       if (Date.now() - at > WOKEN_TTL_MS) { woken.delete(id); continue; }
