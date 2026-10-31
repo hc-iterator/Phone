@@ -75,3 +75,10 @@ test('canCommit：状态、token、一次性', () => {
   const used = { ...approved, tokenUsed: true };
   assert.equal(canCommit(used, approved.token).ok, false);
 });
+
+test('批准的 token 超过 10 分钟失效', () => {
+  const s = fresh();
+  const approved = recordVote(recordVote(s, 'session-a', 'allow', undefined, T0).state, 'session-b', 'allow', undefined, T0).state;
+  assert.equal(canCommit(approved, approved.token, T0 + 60_000).ok, true);
+  assert.equal(canCommit(approved, approved.token, T0 + 11 * 60_000).ok, false);
+});

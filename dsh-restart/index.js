@@ -83,6 +83,7 @@ export function recordVote(state, sid, decision, reason, now = Date.now()) {
   if (next.targets.every((t) => next.votes[t])) {
     next.phase = 'approved';
     next.token = randomUUID();
+    next.approvedAt = new Date(now).toISOString();
     return { state: next, transition: 'approved' };
   }
   return { state: next, transition: null };
@@ -99,8 +100,9 @@ export function tick(state, now = Date.now()) {
 }
 
 /** ② 的准入判定。 */
-export function canCommit(state, token) {
+export function canCommit(state, token, now = Date.now()) {
   if (!state) return { ok: false, error: '没有重启请求' };
+  if (state.approvedAt && now - Date.parse(state.approvedAt) > EXPIRE_MS) return { ok: false, error: '凭证已过期（批准后超过 10 分钟）' };
   if (state.phase !== 'approved') return { ok: false, error: '当前状态是 ' + state.phase + '，不能执行重启' };
   if (state.tokenUsed) return { ok: false, error: '该凭证已用过，不能重复重启' };
   if (!state.token || token !== state.token) return { ok: false, error: '凭证不匹配' };
@@ -261,7 +263,10 @@ export function apply(ctx) {
       const requester = senderOf(exec);
       const cur = readState();
       if (cur && (cur.phase === 'collecting' || cur.phase === 'approved')) {
-        return { ok: false, text: '已有进行中的请求（' + cur.phase + '，id=' + cur.id + '）：用 dsh_restart_status 查看。' };
+        const stale = cur.phase === 'approved' && cur.approvedAt && Date.now() - Date.parse(cur.approvedAt) > EXPIRE_MS;
+        if (!stale) return { ok: false, text: '已有进行中的请求（' + cur.phase + '，id=' + cur.id + '）：用 dsh_restart_status 查看。' };
+        writeState(Object.assign({}, cur, { phase: 'expired' }));
+        log('previous approved request expired: ' + cur.id);
       }
 
       const targets = busySessions(requester);
