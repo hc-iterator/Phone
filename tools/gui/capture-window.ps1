@@ -25,7 +25,8 @@ param(
   [Parameter(Mandatory = $true, Position = 0)][string]$Hwnd,
   [Parameter(Mandatory = $true, Position = 1)][string]$OutFile,
   [int]$MaxWidth = 0,
-  [switch]$Raise
+  [switch]$Raise,
+  [switch]$PreferScreen
 )
 
 $ErrorActionPreference = 'Stop'
@@ -113,19 +114,34 @@ $w = $r.Right - $r.Left; $h = $r.Bottom - $r.Top
 if ($w -le 0 -or $h -le 0) { [Console]::Error.WriteLine("[capture] 窗口尺寸非法 ${w}x${h}"); exit 2 }
 
 $bmp = New-Object System.Drawing.Bitmap($w, $h, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+$bmp = New-Object System.Drawing.Bitmap($w, $h, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
 $g = [System.Drawing.Graphics]::FromImage($bmp)
-$hdc = $g.GetHdc()
-$ok = $false
-try { $ok = [GuiWinCapture]::PrintWindow($handle, $hdc, [GuiWinCapture]::PW_RENDERFULLCONTENT) }
-finally { $g.ReleaseHdc($hdc); }
+$method = 'printwindow'
 
-$allBlack = $false
-if (-not $ok) {
-  # 有些程序不响应 PW_RENDERFULLCONTENT，退回到 0
-  $hdc2 = $g.GetHdc()
-  try { $ok = [GuiWinCapture]::PrintWindow($handle, $hdc2, 0) } finally { $g.ReleaseHdc($hdc2) }
+# WinUI3 / XAML 程序常常对 PrintWindow 返回**旧帧**：画面还是上一次的，看起来"没变化"，
+# 于是"动作是否生效"会被误判。 -PreferScreen 改为直接抓屏幕上的窗口矩形，拿真实像素；
+# 代价是窗口被遮挡时会抓到遮挡物，所以先检查它是不是前台，不是就明确警告（不静默）。
+if ($PreferScreen) {
+  $fg = [GuiWinCapture]::GetForegroundWindow()
+  if ($fg -ne $handle) {
+    [Console]::Error.WriteLine('[capture] -PreferScreen 但该窗口不是前台：可能抓到遮挡物，结论请谨慎。')
+  }
+  $g.CopyFromScreen($r.Left, $r.Top, 0, 0, (New-Object System.Drawing.Size($w, $h)), [System.Drawing.CopyPixelOperation]::SourceCopy)
+  $ok = $true
+  $method = 'screen-direct'
+} else {
+  $hdc = $g.GetHdc()
+  $ok = $false
+  try { $ok = [GuiWinCapture]::PrintWindow($handle, $hdc, [GuiWinCapture]::PW_RENDERFULLCONTENT) }
+  finally { $g.ReleaseHdc($hdc) }
+  if (-not $ok) {
+    # 有些程序不响应 PW_RENDERFULLCONTENT，退回到 0
+    $hdc2 = $g.GetHdc()
+    try { $ok = [GuiWinCapture]::PrintWindow($handle, $hdc2, 0) } finally { $g.ReleaseHdc($hdc2) }
+  }
 }
 
+# 抽查几个点，判断是不是全黑（DRM/不支持的常见表现）
 # 抽查几个点，判断是不是全黑（DRM/不支持的常见表现）
 $samples = @(
   @( [int]($w / 2), [int]($h / 2) ),
@@ -138,10 +154,8 @@ foreach ($s in $samples) {
 }
 $allBlack = ($nonBlack -eq 0)
 
-# ── 二级降级：UWP（计算器/设置/画图）用 PrintWindow 常拿到全黑，
-#    因为它走 DirectComposition。此时改用"屏幕截取该窗口矩形"。
+# ── 二级降级：PrintWindow 拿到全黑（UWP / DirectComposition 常见）时改用屏幕截取。
 #    代价：只对可见像素有效；被遮挡时会截到遮挡物（所以 -Raise 可先把它推到前台）。
-$method = 'printwindow'
 if ($allBlack) {
   if ($Raise) {
     [void][GuiWinCapture]::ShowWindow($handle, 9)   # SW_RESTORE

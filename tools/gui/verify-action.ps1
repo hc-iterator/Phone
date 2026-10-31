@@ -44,8 +44,25 @@ $cap = Join-Path $dir 'capture-window.ps1'
 
 function ShotPath($tag) { Join-Path $env:TEMP ("verify-$tag-" + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.png') }
 
+# 旧帧问题：WinUI3/XAML 对 PrintWindow 会返回上一次的画面，于是"已经生效"会被判成"没变化"。
+# 所以只要窗口是前台（说明它在屏幕上真的可见），就用屏幕截取拿真实像素。
+if (-not ('FgProbe' -as [type])) {
+  Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class FgProbe { [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); }
+"@
+}
+$prefer = $false
+try {
+  $h2 = if ($Hwnd -match '^0x') { [IntPtr]([Convert]::ToInt64($Hwnd, 16)) } else { [IntPtr][int64]$Hwnd }
+  $prefer = ([FgProbe]::GetForegroundWindow() -eq $h2)
+} catch { $prefer = $false }
+$capArgs = @()
+if ($prefer) { $capArgs += '-PreferScreen' }
+
 $before = ShotPath 'before'
-& pwsh -NoProfile -File $cap $Hwnd $before 2>$null | Out-Null
+& pwsh -NoProfile -File $cap $Hwnd $before @capArgs 2>$null | Out-Null
 if (-not (Test-Path $before)) {
   [Console]::Error.WriteLine('[verify] 抓不到"动作前"的图，无法判断（不猜）')
   exit 3
@@ -54,7 +71,7 @@ if (-not (Test-Path $before)) {
 # 基线：连续两张"什么都不做"的图，差异就是光标闪烁/动画的噪声。
 # 没有这一步，"点空白处"会因为光标闪烁被判成 changed（实测 1.75%）。
 $before2 = ShotPath 'base'
-& pwsh -NoProfile -File $cap $Hwnd $before2 2>$null | Out-Null
+& pwsh -NoProfile -File $cap $Hwnd $before2 @capArgs 2>$null | Out-Null
 $baseRatio = 0
 if (Test-Path $before2) {
   $b1 = [System.Drawing.Bitmap]::FromFile($before)
@@ -82,7 +99,7 @@ $sw.Stop()
 
 Start-Sleep -Milliseconds $SettleMs
 $after = ShotPath 'after'
-& pwsh -NoProfile -File $cap $Hwnd $after 2>$null | Out-Null
+& pwsh -NoProfile -File $cap $Hwnd $after @capArgs 2>$null | Out-Null
 if (-not (Test-Path $after)) {
   [Console]::Error.WriteLine('[verify] 抓不到"动作后"的图 ⇒ 窗口可能已关闭/崩溃')
   exit 3
@@ -117,5 +134,6 @@ $verdict = if ($ratio -ge $effective) { 'changed' } else { 'unchanged' }
 if ($verdict -eq 'unchanged') {
   [Console]::Error.WriteLine('[verify] 界面完全没变化 ⇒ 可能没点中、控件被禁用，或点在空白处。不要假设成功。')
 }
+
 
 
