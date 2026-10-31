@@ -295,7 +295,8 @@ export function apply(ctx, config) {
         v.phase = 'approved';
         writeVote(v);
         const r = scheduleRestart(0, v.requester, []);
-        notifySessions(v.targets, '【DSH 重启已放行】全部 Agent 已同意，重启开始（无延时）。重启完成后会通知各会话。');
+        // 不再通知发起者：它马上就会被重启打断，这条只会以假用户消息的形式留在它聊天里。
+        notifySessions(v.targets.filter((t) => t !== v.requester), '【DSH 重启已放行】全部 Agent 已同意，重启开始（无延时）。重启完成后会通知各会话。');
         clearVote();
         return {
           ok: true, phase: 'approved', restart: r,
@@ -330,7 +331,7 @@ export function apply(ctx, config) {
       v.cancelledBy = sid;
       v.cancelledAt = new Date().toISOString();
       writeVote(v);
-      notifySessions(v.targets, '【DSH 重启已取消】由 ' + sid + ' 阻止，不会重启。');
+      notifySessions(v.targets.filter((t) => t !== v.requester), '【DSH 重启已取消】由 ' + sid + ' 阻止，不会重启。');
       clearVote();
       return { ok: true, phase: 'cancelled', text: '已阻止本次重启（' + sid + '）。' };
     }
@@ -412,7 +413,7 @@ export function apply(ctx, config) {
               v.cancelledBy = 'user';
               v.cancelledAt = new Date().toISOString();
               writeVote(v);
-              notifySessions(v.targets, '【DSH 重启已取消】用户执行了 /stopdshfromrestarting，重启停止。');
+              notifySessions(v.targets.filter((t) => t !== v.requester), '【DSH 重启已取消】用户执行了 /stopdshfromrestarting，重启停止。');
               clearVote();
               return { kind: 'success', text: '已取消待表决的重启（user）。' };
             } catch (e) {
