@@ -48,6 +48,12 @@ const WAIT_BLOCK_MS = 3 * 60_000;
 const NUDGE_MS = 5 * 60_000;
 const EXPIRE_MS = 10 * 60_000;
 
+/**
+ * 常驻审批岗：任何重启都必须通知这个对话并取得它的同意（用户 2026-10-31 要求）。
+ * 写死 session id —— 对话标题是「重启审批员」。它不在线时靠 resolveAgent 唤醒。
+ */
+const APPROVAL_SESSION = 'session-6c3e7938-e76f-4e5b-b8d0-47b29c22a1c2';
+
 const PWSH = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
 const NODE = 'C:\\Program Files\\nodejs\\node.exe';
 const BIN = 'C:\\Users\\Chen\\AppData\\Roaming\\npm\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js';
@@ -215,7 +221,7 @@ export function apply(ctx) {
    * 用来补 list() 的漏：2026-10-31 实测，经 resolveAgent 唤醒的会话不会出现在
    * `sessionController.list()` 的 running 名单里，于是重启广播根本不发 —— 目标数恒为 0。
    */
-  const woken = new Set();
+  const woken = new Map();
 
   /** 该会话当前是否仍持有 Agent（用于判断 woken 里的旧 id 是否还有效）。 */
   const hasAgent = (id) => {
@@ -279,7 +285,7 @@ export function apply(ctx) {
       Promise.resolve(c.resolveAgent(toId)).then((r) => {
         const a = r && (r.agent || r.value || null);
         if (!a) { log('wake FAILED: resolveAgent 未返回 Agent → ' + toId + ' :: ' + JSON.stringify(r || null).slice(0, 200)); return; }
-        woken.add(String(toId));
+        woken.set(String(toId), Date.now());
         if (deliver(a, 'wake')) log('wake ok → ' + toId);
       }).catch((e) => log('wake THREW → ' + toId + ' :: ' + (e && e.message ? e.message : String(e))));
       return { ok: true, via: 'wake' };
@@ -315,10 +321,14 @@ export function apply(ctx) {
     }
     // 兜底：经 resolveAgent 唤醒过、且此刻仍持有 Agent 的会话 —— 这类会话不保证出现在 list() 里，
     // 但它们正在跑任务时同样应该收到"要重启了"的通知。
-    for (const id of woken) {
+    const WOKEN_TTL_MS = 10 * 60_000;
+    for (const [id, at] of woken) {
+      if (Date.now() - at > WOKEN_TTL_MS) { woken.delete(id); continue; }
       if (id === requester) continue;
       if (hasAgent(id)) union.add(id);
     }
+    // 常驻审批岗：无条件加入（不管它忙不忙），任何重启都必须经它投一票。
+    if (requester !== APPROVAL_SESSION) union.add(APPROVAL_SESSION);
     union.delete(requester);
     log('busySessions: 最终目标 ' + union.size + ' 个 → ' + [...union].join(','));
     return [...union];
@@ -562,4 +572,6 @@ export function apply(ctx) {
     });
   } catch (e) { log('inject commands failed: ' + (e && e.message)); }
 }
+
+
 
