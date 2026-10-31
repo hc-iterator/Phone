@@ -24,7 +24,8 @@
 param(
   [Parameter(Mandatory = $true, Position = 0)][string]$Hwnd,
   [Parameter(Mandatory = $true, Position = 1)][string]$OutFile,
-  [int]$MaxWidth = 0
+  [int]$MaxWidth = 0,
+  [switch]$Raise
 )
 
 $ErrorActionPreference = 'Stop'
@@ -45,6 +46,37 @@ public class GuiWinCapture {
   [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
   [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out RECT r, int size);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int val, int size);
+  public const int DWMWA_CLOAKED = 14;
+  public static int Cloaked(IntPtr h) { int v; return DwmGetWindowAttribute(h, DWMWA_CLOAKED, out v, sizeof(int)) == 0 ? v : -1; }
+  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+  /// 前台锁定（Windows 的前台保护）会让 SetForegroundWindow 静默失败。
+  /// 标准解法：先模拟一次 ALT 键，系统就把"下一个 SetForegroundWindow"当作用户意图放行。
+  [DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr h, bool altTab);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, IntPtr pid);
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint attach, uint attachTo, bool fAttach);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+  /// 强力前台化：ALT 轻点 → SwitchToThisWindow → AttachThreadInput 后 SetForegroundWindow。
+  public static bool ForceForeground(IntPtr h) {
+    AltTap();
+    SwitchToThisWindow(h, true);
+    IntPtr fg = GetForegroundWindow();
+    if (fg == h) return true;
+    uint fgThread = GetWindowThreadProcessId(fg, IntPtr.Zero);
+    uint me = GetCurrentThreadId();
+    bool attached = AttachThreadInput(me, fgThread, true);
+    bool ok = SetForegroundWindow(h);
+    if (attached) AttachThreadInput(me, fgThread, false);
+    return ok || GetForegroundWindow() == h;
+  }
+  public static void AltTap() {
+    keybd_event(0x12, 0, 0, UIntPtr.Zero);
+    keybd_event(0x12, 0, 2, UIntPtr.Zero);
+  }
 
   public const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
   public const uint PW_RENDERFULLCONTENT = 2;
@@ -61,6 +93,12 @@ public class GuiWinCapture {
 
 $handle = if ($Hwnd -match '^0x') { [IntPtr]([Convert]::ToInt64($Hwnd, 16)) } else { [IntPtr][int64]$Hwnd }
 
+$cloaked = [GuiWinCapture]::Cloaked($handle)
+if ($cloaked -ne 0) {
+  [Console]::Error.WriteLine("[capture] 该窗口已被系统 cloaked（值=$cloaked）：它在别的虚拟桌面或已挂起，当前桌面没有它的像素。")
+  [Console]::Error.WriteLine("[capture] 换个桌面/把它调回本桌面再抓；这不是抓屏失败。")
+  exit 6
+}
 if ([GuiWinCapture]::IsIconic($handle)) {
   [Console]::Error.WriteLine('[capture] 窗口已最小化：DWM 停止合成，通常拿不到内容。先还原再抓。')
   exit 3
@@ -100,6 +138,48 @@ foreach ($s in $samples) {
 }
 $allBlack = ($nonBlack -eq 0)
 
+# ── 二级降级：UWP（计算器/设置/画图）用 PrintWindow 常拿到全黑，
+#    因为它走 DirectComposition。此时改用"屏幕截取该窗口矩形"。
+#    代价：只对可见像素有效；被遮挡时会截到遮挡物（所以 -Raise 可先把它推到前台）。
+$method = 'printwindow'
+if ($allBlack) {
+  if ($Raise) {
+    [void][GuiWinCapture]::ShowWindow($handle, 9)   # SW_RESTORE
+    [void][GuiWinCapture]::BringWindowToTop($handle)
+    [void][GuiWinCapture]::ForceForeground($handle)
+    Start-Sleep -Milliseconds 300
+    $fgAfter = [GuiWinCapture]::GetForegroundWindow()
+    if ($fgAfter -ne $handle) { [Console]::Error.WriteLine("[capture] 已尝试前台化，但系统没给它前台（前台锁定）。请手动点一下该窗口再抓。"); exit 5 }
+  }
+  # 关键纪律：屏幕截取只对"屏幕上真的看得到这个窗口"有效。
+  # 如果它不是前台窗口，截到的会是它位置上别的窗口/桌面 —— 那就是一张**假图**，
+  # 比失败更糟（Agent 会据此点错地方）。所以不是前台就拒绝，不返回假图。
+  $fg = [GuiWinCapture]::GetForegroundWindow()
+  if ($fg -ne $handle) {
+    [Console]::Error.WriteLine("[capture] PrintWindow 拿到全黑（UWP/DirectComposition 常见），而该窗口当前不是前台窗口。")
+    [Console]::Error.WriteLine("[capture] 此时屏幕截取会抓到别的东西 —— 拒绝返回假图。")
+    [Console]::Error.WriteLine("[capture] 解决：加 -Raise（会抢焦点）重试，或改用 UIA 控件树读取内容。")
+    exit 4
+  }
+
+  try {
+    $g3 = [System.Drawing.Graphics]::FromImage($bmp)
+    $g3.CopyFromScreen($r.Left, $r.Top, 0, 0, (New-Object System.Drawing.Size($w, $h)), [System.Drawing.CopyPixelOperation]::SourceCopy)
+    $g3.Dispose()
+    $method = if ($Raise) { 'screen-raised' } else { 'screen-fallback' }
+
+    # 重新抽查：屏幕截取之后是否还是有内容
+    $nb = 0
+    foreach ($s in $samples) {
+      try { $c = $bmp.GetPixel($s[0], $s[1]); if ($c.R -or $c.G -or $c.B) { $nb++ } } catch {}
+    }
+    $allBlack = ($nb -eq 0)
+  }
+  catch {
+    [Console]::Error.WriteLine("[capture] 屏幕截取也失败：$($_.Exception.Message)")
+  }
+}
+
 if ($MaxWidth -gt 0 -and $w -gt $MaxWidth) {
   $scale = $MaxWidth / $w
   $nw = [int]($w * $scale); $nh = [int]($h * $scale)
@@ -119,7 +199,13 @@ $bmp.Save($OutFile, [System.Drawing.Imaging.ImageFormat]::Png)
 $bmp.Dispose(); $g.Dispose()
 
 $bytes = (Get-Item $OutFile).Length
-"captured hwnd=$($handle.ToInt64()) ${w}x${h} printWindow=$ok allBlack=$allBlack bytes=$bytes -> $OutFile"
+"captured hwnd=$($handle.ToInt64()) ${w}x${h} method=$method printWindow=$ok allBlack=$allBlack bytes=$bytes -> $OutFile"
 if ($allBlack) { [Console]::Error.WriteLine('[capture] 抓到的图全黑：多半是 DRM/独占全屏/不支持的窗口。') }
 exit 0
+
+
+
+
+
+
 

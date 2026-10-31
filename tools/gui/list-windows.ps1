@@ -50,6 +50,9 @@ public class GuiWinEnum {
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int val, int size);
+  public const int DWMWA_CLOAKED = 14;
+  public static int Cloaked(IntPtr h) { int v; return DwmGetWindowAttribute(h, DWMWA_CLOAKED, out v, sizeof(int)) == 0 ? v : -1; }
 
   public static List<IntPtr> All() {
     var list = new List<IntPtr>();
@@ -82,6 +85,7 @@ foreach ($h in [GuiWinEnum]::All()) {
   if (-not $All) {
     if (-not [GuiWinEnum]::IsWindowVisible($h)) { continue }
     if ([GuiWinEnum]::IsIconic($h)) { continue }
+    if ([GuiWinEnum]::Cloaked($h) -ne 0) { continue }   # 别的虚拟桌面/挂起的窗口：不在当前桌面，抓不到
     if ($w -lt 80 -or $ht -lt 60) { continue }
     if ($title -match '^(GDI\+ Window|DWM Notification Window|Task Host Window|Program Manager|Window|Form|.NotificationWindowHelper|WxTrayIconMessageWindow)') { continue }
   }
@@ -93,6 +97,7 @@ foreach ($h in [GuiWinEnum]::All()) {
     pid       = $procId
     process   = $procName
     rect      = [pscustomobject]@{ x = $r.Left; y = $r.Top; w = $w; h = $ht }
+    cloaked   = [GuiWinEnum]::Cloaked($h)
     minimized = [GuiWinEnum]::IsIconic($h)
     visible   = [GuiWinEnum]::IsWindowVisible($h)
   }
@@ -109,6 +114,7 @@ $rows | Sort-Object { $_.process } | Format-Table -AutoSize @(
   @{ n = '最小化'; e = { $_.minimized } },
   @{ n = '标题'; e = { if ($_.title.Length -gt 42) { $_.title.Substring(0, 42) + '…' } else { $_.title } } }
 ) | Out-String | Write-Output
+
 
 
 
