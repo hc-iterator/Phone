@@ -39,6 +39,9 @@ const LOG = path.join(DIR, 'restart.log');
 const RESULT = path.join(DIR, 'result.json');
 const DOER = path.join(DIR, 'doer.ps1');
 const VBS = path.join(DIR, 'silent.vbs');
+// 2026-10-31：拉起 DSH 的 stdout/stderr 落盘，便于事后判断"为什么起来了又没了"
+const LAUNCH_OUT = path.join(DIR, 'launch.out');
+const LAUNCH_ERR = path.join(DIR, 'launch.err');
 const TASK = 'dsh_restart_once';
 
 const WAIT_BLOCK_MS = 3 * 60_000;
@@ -146,9 +149,16 @@ const DOER_PS1 = [
   'if ($DryRun) { W "dry-run: no kill, no launch"; exit 0 }',
   'if ($old -gt 0) { try { Stop-Process -Id $old -Force -ErrorAction Stop; W ("stopped " + $old) } catch { W ("stop failed: " + $_.Exception.Message) } }',
   'Start-Sleep -Seconds 8',
-  '$i = 0; while ($i -lt 3) { try { Start-Process -FilePath $NODE -ArgumentList @($BIN, "web", "--no-open") -WindowStyle Hidden; W "launched"; break } catch { $i++; W ("launch failed: " + $_.Exception.Message); Start-Sleep -Seconds 3 } }',
+  // 2026-10-31：把子进程的输出落到文件。之前 13:06:34 doer 报告 up=true（pid 7164 在听 3080），
+  // 但那个进程随后消失了，Windows 日志里既没有崩溃也没有 OOM ⇒ 无法判断原因。
+  // 现在 node 的 stdout/stderr 直接写进 launch.out / launch.err，下次能看见它为什么退。
+  "$OUT = '" + LAUNCH_OUT + "'", "$ERR = '" + LAUNCH_ERR + "'",
+  '$lp = 0',
+  '$i = 0; while ($i -lt 3) { try { $p = Start-Process -FilePath $NODE -ArgumentList @($BIN, "web", "--no-open") -WindowStyle Hidden -RedirectStandardOutput $OUT -RedirectStandardError $ERR -PassThru; $lp = $p.Id; W ("launched pid=" + $lp); break } catch { $i++; W ("launch failed: " + $_.Exception.Message); Start-Sleep -Seconds 3 } }',
   '$new = 0; for ($i = 0; $i -lt 40; $i++) { Start-Sleep -Seconds 2; $new = ListenerPid; if ($new -gt 0) { break } }',
   'W ("new pid=" + $new)',
+  // 复检：起来 15 秒后还活着吗？不活就再拉一次（这一条就是针对"报告成功但其实没活"）
+  'if ($new -gt 0) { Start-Sleep -Seconds 15; $alive = $false; try { $null = Get-Process -Id $new -ErrorAction Stop; $alive = $true } catch { $alive = $false }; W ("liveness check pid=" + $new + " alive=" + $alive); if (-not $alive) { try { $p2 = Start-Process -FilePath $NODE -ArgumentList @($BIN, "web", "--no-open") -WindowStyle Hidden -RedirectStandardOutput $OUT -RedirectStandardError $ERR -PassThru; W ("relaunch pid=" + $p2.Id) } catch { W ("relaunch failed: " + $_.Exception.Message) }; for ($i = 0; $i -lt 25; $i++) { Start-Sleep -Seconds 2; $new = ListenerPid; if ($new -gt 0) { break } }; W ("new pid after relaunch=" + $new) } }',
   'try { schtasks /delete /tn "' + TASK + '" /f 2>$null | Out-Null; W "task deleted" } catch { }',
   '$r = [ordered]@{ at = (Get-Date -Format "yyyy-MM-dd HH:mm:ss"); oldPid = $old; newPid = $new; up = ($new -gt 0) }',
   '[IO.File]::WriteAllText($RES, ($r | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding($false)))',
