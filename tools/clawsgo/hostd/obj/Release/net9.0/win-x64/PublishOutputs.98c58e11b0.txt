@@ -1,0 +1,2 @@
+C:\Users\Chen\Desktop\Pico\PicoPhone\DeepSeekCode\tools\clawsgo\hostd\out\hostd.pdb
+C:\Users\Chen\Desktop\Pico\PicoPhone\DeepSeekCode\tools\clawsgo\hostd\out\hostd.exe

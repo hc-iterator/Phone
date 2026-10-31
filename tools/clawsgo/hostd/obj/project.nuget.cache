@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "dgSpecHash": "IsUwb8Bm4F8=",
+  "success": true,
+  "projectFilePath": "C:\\Users\\Chen\\Desktop\\Pico\\PicoPhone\\DeepSeekCode\\tools\\clawsgo\\hostd\\hostd.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\Chen\\.nuget\\packages\\microsoft.net.illink.tasks\\9.0.19\\microsoft.net.illink.tasks.9.0.19.nupkg.sha512"
+  ],
+  "logs": []
+}

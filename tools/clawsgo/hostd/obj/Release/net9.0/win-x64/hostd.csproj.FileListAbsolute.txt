@@ -1,0 +1,15 @@
+C:\Users\Chen\Desktop\Pico\PicoPhone\DeepSeekCode\tools\clawsgo\hostd\bin\Release\net9.0\win-x64\hostd.exe
+C:\Users\Chen\Desktop\Pico\PicoPhone\DeepSeekCode\tools\clawsgo\hostd\bin\Release\net9.0\win-x64\hostd.deps.json
+C:\Users\Chen\Desktop\Pico\PicoPhone\DeepSeekCode\tools\clawsgo\hostd\bin\Release\net9.0\win-x64\hostd.runtimeconfig.json
+C:\Users\Chen\Desktop\Pico\PicoPhone\DeepSeekCode\tools\clawsgo\hostd\bin\Release\net9.0\win-x64\hostd.dll
+C:\Users\Chen\Desktop\Pico\PicoPhone\DeepSeekCode\tools\clawsgo\hostd\bin\Release\net9.0\win-x64\hostd.pdb
+C:\Users\Chen\Desktop\Pico\PicoPhone\DeepSeekCode\tools\clawsgo\hostd\obj\Release\net9.0\win-x64\hostd.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\Chen\Desktop\Pico\PicoPhone\DeepSeekCode\tools\clawsgo\hostd\obj\Release\net9.0\win-x64\hostd.AssemblyInfoInputs.cache
+C:\Users\Chen\Desktop\Pico\PicoPhone\DeepSeekCode\tools\clawsgo\hostd\obj\Release\net9.0\win-x64\hostd.AssemblyInfo.cs
+C:\Users\Chen\Desktop\Pico\PicoPhone\DeepSeekCode\tools\clawsgo\hostd\obj\Release\net9.0\win-x64\hostd.csproj.CoreCompileInputs.cache
+C:\Users\Chen\Desktop\Pico\PicoPhone\DeepSeekCode\tools\clawsgo\hostd\obj\Release\net9.0\win-x64\hostd.sourcelink.json
+C:\Users\Chen\Desktop\Pico\PicoPhone\DeepSeekCode\tools\clawsgo\hostd\obj\Release\net9.0\win-x64\hostd.dll
+C:\Users\Chen\Desktop\Pico\PicoPhone\DeepSeekCode\tools\clawsgo\hostd\obj\Release\net9.0\win-x64\refint\hostd.dll
+C:\Users\Chen\Desktop\Pico\PicoPhone\DeepSeekCode\tools\clawsgo\hostd\obj\Release\net9.0\win-x64\hostd.pdb
+C:\Users\Chen\Desktop\Pico\PicoPhone\DeepSeekCode\tools\clawsgo\hostd\obj\Release\net9.0\win-x64\hostd.genruntimeconfig.cache
+C:\Users\Chen\Desktop\Pico\PicoPhone\DeepSeekCode\tools\clawsgo\hostd\obj\Release\net9.0\win-x64\ref\hostd.dll
