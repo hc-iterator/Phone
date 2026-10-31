@@ -1,0 +1,4 @@
+- insert:
+    - id: agent-bus
+      name: '@local/dsh-agent-bus'
+      config: {}

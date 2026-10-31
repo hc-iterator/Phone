@@ -1,484 +1,433 @@
 /**
- * dsh-restart —— 重启 DSH，带【表决】收敛
- * ==========================================================================
- * 依据：手稿 2026-10-21 纸2 §7「重启」原文：
+ * dsh-restart v2 —— 两段式重启（重写版，旧实现作废）
+ * ===========================================================================
+ * 协议（2026-10-31 与用户确定）：
  *
- *   「现在的 Agent 个个都能重启 DSH，弄得鸡犬不宁。」（红笔原话）
- *   - 重启接口必须收敛，这是个好接口，但不好拿捏。
- *   - **用户的重启接口延时不要了。**
- *   - Agent 的重启接口调用后并不立刻重启，而是通知**所有正在运行或有任务
- *     （所有）正在运行或有子 Agent 正在运行的 Agent**。所有被通知的 Agent
- *     都能调用以下 2 个功能：
- *       1. stopdshfromrestarting
- *       2. allowdshrestarting
- *   - 1 号功能不用多说；当所有被通知的 Agent 调用 **2 号**功能后，重启才会开始。
- *     重启后，所有刚被通知的 Agent 都会被通知。
- *   - 同时，用户也要被通知。重启接口被调用后，用户随时在任意对话输入
- *     `/stopdshfromrestarting`，重启即停止。
+ *   ① dsh_restart({note})        发起表决，可捎一句话
+ *        候选 = 除发起者外「正在干活」的会话（本轮在跑 / 有子 Agent 在跑）
+ *        给它们投递【Agent 消息】（source.kind='agent-message'，不是用户消息）
+ *        阻塞等待，最长 3 分钟：
+ *          全员同意 → 返回 { phase:'approved', token }
+ *          任一拒绝 → 返回 { phase:'denied', reasons }
+ *          没齐     → 返回 { phase:'collecting' }，转后台
+ *        后台：5 分钟催未决者，10 分钟作废（phase:'expired'）
  *
- * 于是本插件分两条路：
- *   · **用户**：/restartdsh —— 延时 0，直接重启（手稿明确"延时不要了"）
- *   · **Agent**：dsh_restart —— 只发起表决，不重启；所有被通知者 allow 后才执行
+ *   ② dsh_restart_commit({token})
+ *        只有 phase='approved' 且 token 未用过才生效；用掉即作废，只能一次。
+ *        这一步才真正排定重启——① 绝不重启。
  *
- * 底层重启机制沿用原来那套【已实测】的路径（schtasks + VBS 隐藏窗口 + doer 杀 3080
- * → 拉起 → 探活 → 写结果），没有另写一套，避免引入新风险。
+ *   表决：allowdshrestarting（同意）/ stopdshfromrestarting（拒绝，必须写理由）
+ *   重启完成后：通知所有被通知者 + 发起者（启动时回放 pendingNotify）。
+ *
+ * 关于「5 分钟 bug」：旧代码把任务排到 now+5min 又立刻 /run，5 分钟后任务自己
+ * 再跑一次，把刚起来的 DSH 又杀一遍。本实现按构造消除：任务只排在 2099 年
+ * （永不自触发），只 /run 一次，doer 跑完自删。
  */
-import * as nodeFs from 'node:fs';
+
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
+export const name = '@local/dsh-restart';
 export const inject = ['tools'];
 
-const TMP = 'C:\\Users\\Chen\\AppData\\Local\\Temp';
-const LOG = TMP + '\\dsh_restart_log.txt';
-const RES = TMP + '\\dsh_restart_result.json';
-const REQ = TMP + '\\dsh_restart_request.json';
-const VOTE = TMP + '\\dsh_restart_vote.json';
-const MARKER = TMP + '\\dsh_restart_marker.txt';
-const VBS = TMP + '\\dsh_restart_silent.vbs';
-const DOER = TMP + '\\dsh_restart_doer.ps1';
-const KILL_PS1_PATH = TMP + '\\dsh_killdsh.ps1';
-const KILL_VBS_PATH = TMP + '\\dsh_killdsh.vbs';
+const DIR = path.join(os.tmpdir(), 'dsh_restart');
+const STATE = path.join(DIR, 'state.json');
+const LOG = path.join(DIR, 'restart.log');
+const RESULT = path.join(DIR, 'result.json');
+const DOER = path.join(DIR, 'doer.ps1');
+const VBS = path.join(DIR, 'silent.vbs');
+const TASK = 'dsh_restart_once';
+
+const WAIT_BLOCK_MS = 3 * 60_000;
+const NUDGE_MS = 5 * 60_000;
+const EXPIRE_MS = 10 * 60_000;
+
+const PWSH = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
 const NODE = 'C:\\Program Files\\nodejs\\node.exe';
 const BIN = 'C:\\Users\\Chen\\AppData\\Roaming\\npm\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js';
-const PWSH = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
 
-// 表决有效期：2 分钟没人齐就作废（避免一条永远挂着的"待表决"把后续请求挡掉）
-const VOTE_TTL = 2 * 60000;
+// ── 纯函数（可单测） ────────────────────────────────────────────────────
 
+/** 新建一次请求的状态对象。 */
+export function newState({ id, requester, note, targets, now = Date.now() }) {
+  return {
+    id,
+    phase: 'collecting',
+    at: new Date(now).toISOString(),
+    requester: String(requester ?? ''),
+    note: String(note ?? ''),
+    targets: [...new Set(targets)].filter((t) => t && t !== requester),
+    votes: {},
+    token: null,
+    tokenUsed: false,
+    nudged: false,
+    pendingNotify: [],
+  };
+}
+
+/** 记一票；返回 { state, transition }，transition ∈ null|'approved'|'denied'。 */
+export function recordVote(state, sid, decision, reason, now = Date.now()) {
+  if (!state || state.phase !== 'collecting') return { state, transition: null, error: '当前没有待表决的请求' };
+  if (!state.targets.includes(sid)) return { state, transition: null, error: '你不是本次被通知的对象' };
+  if (state.votes[sid]) return { state, transition: null, error: '你已经表决过了' };
+  if (decision === 'deny' && !String(reason ?? '').trim()) return { state, transition: null, error: '拒绝必须附上理由' };
+
+  const next = {
+    ...state,
+    votes: { ...state.votes, [sid]: { decision, reason: String(reason ?? '').trim(), at: new Date(now).toISOString() } },
+  };
+  if (decision === 'deny') { next.phase = 'denied'; return { state: next, transition: 'denied' }; }
+  if (next.targets.every((t) => next.votes[t])) {
+    next.phase = 'approved';
+    next.token = randomUUID();
+    return { state: next, transition: 'approved' };
+  }
+  return { state: next, transition: null };
+}
+
+/** 按时间推进后台阶段。返回 { state, nudge }。 */
+export function tick(state, now = Date.now()) {
+  if (!state || state.phase !== 'collecting') return { state, nudge: false };
+  const at = Date.parse(state.at);
+  if (!Number.isFinite(at)) return { state, nudge: false };
+  if (now - at >= EXPIRE_MS) return { state: { ...state, phase: 'expired' }, nudge: false };
+  if (now - at >= NUDGE_MS && !state.nudged) return { state: { ...state, nudged: true }, nudge: true };
+  return { state, nudge: false };
+}
+
+/** ② 的准入判定。 */
+export function canCommit(state, token) {
+  if (!state) return { ok: false, error: '没有重启请求' };
+  if (state.phase !== 'approved') return { ok: false, error: '当前状态是 ' + state.phase + '，不能执行重启' };
+  if (state.tokenUsed) return { ok: false, error: '该凭证已用过，不能重复重启' };
+  if (!state.token || token !== state.token) return { ok: false, error: '凭证不匹配' };
+  return { ok: true };
+}
+
+/** 未表决者。 */
+export function pendingTargets(state) {
+  if (!state) return [];
+  return state.targets.filter((t) => !state.votes[t]);
+}
+
+// ── 落盘 ────────────────────────────────────────────────────────────────
+function ensureDir() { try { fs.mkdirSync(DIR, { recursive: true }); } catch {} }
+
+export function readState() {
+  try { return JSON.parse(fs.readFileSync(STATE, 'utf8')); } catch { return null; }
+}
+function writeState(s) {
+  ensureDir();
+  try { fs.writeFileSync(STATE, JSON.stringify(s, null, 2), 'utf8'); } catch (e) { log('writeState failed: ' + e.message); }
+}
+export function log(m) {
+  try {
+    ensureDir();
+    fs.appendFileSync(LOG, new Date().toISOString() + ' ' + m + '\n', 'utf8');
+  } catch {}
+}
+
+// ── 重启执行体（沿用已实测的 schtasks + 隐藏 VBS 路径） ────────────────────
 const DOER_PS1 = [
-  'param([int]$Delay = 0, [switch]$DryRun)',
-  "$NODE = '" + NODE + "'", "$BIN = '" + BIN + "'", "$LOG = '" + LOG + "'", "$RES = '" + RES + "'",
+  'param([switch]$DryRun)',
+  "$LOG = '" + LOG + "'",
+  "$NODE = '" + NODE + "'",
+  "$BIN = '" + BIN + "'",
+  "$RES = '" + RESULT + "'",
   'function W($m) { ((Get-Date -Format "yyyy-MM-dd HH:mm:ss") + " " + $m) | Add-Content -LiteralPath $LOG -Encoding UTF8 }',
-  'function ListenerPid { $l = (netstat -ano | Select-String ":3080 .*LISTENING" | Select-Object -First 1); if ($l) { return [int](($l -replace "\s+"," ").Trim().Split(" ")[-1]) } return 0 }',
-  'W ("doer start delay=" + $Delay)',
-  'if ($Delay -gt 0) { Start-Sleep -Seconds $Delay }',
-  '$oldPid = ListenerPid',
-  'W ("current dsh pid=" + $oldPid)',
-  'if ($DryRun) { W "dryRun: skip kill/restart"; exit 0 }',
-  'if ($oldPid -gt 0) { try { Stop-Process -Id $oldPid -Force -ErrorAction Stop; W ("STOPPED pid=" + $oldPid) } catch { W ("stop failed: " + $_.Exception.Message) } }',
+  'function ListenerPid { $l = (netstat -ano | Select-String ":3080 .*LISTENING" | Select-Object -First 1); if ($l) { return [int](($l -replace "\\s+", " ").Trim().Split(" ")[-1]) } return 0 }',
+  'W "doer start"',
+  '$old = ListenerPid; W ("old pid=" + $old)',
+  'if ($DryRun) { W "dry-run: no kill, no launch"; exit 0 }',
+  'if ($old -gt 0) { try { Stop-Process -Id $old -Force -ErrorAction Stop; W ("stopped " + $old) } catch { W ("stop failed: " + $_.Exception.Message) } }',
   'Start-Sleep -Seconds 8',
-  'for ($i = 0; $i -lt 2; $i++) { try { Start-Process -FilePath $NODE -ArgumentList @($BIN, "web", "--no-open") -WindowStyle Hidden; W ("launched attempt " + ($i + 1)); break } catch { W ("launch failed: " + $_.Exception.Message); Start-Sleep -Seconds 3 } }',
-  '$up = $false; $newPid = 0',
-  'for ($i = 0; $i -lt 40; $i++) { Start-Sleep -Seconds 2; $newPid = ListenerPid; if ($newPid -gt 0) { $up = $true; break } }',
-  'W ("listening=" + $up + " pid=" + $newPid)',
-  '$pluginOk = $false; $accts = 0',
-  'for ($k = 0; $k -lt 20; $k++) { Start-Sleep -Seconds 3; try { $st = Invoke-RestMethod -Uri "http://127.0.0.1:3080/.dsh-wechat-plugin/status" -TimeoutSec 5 -ErrorAction Stop; $pluginOk = [bool]$st.enabled; $accts = ($st.accounts | Measure-Object).Count; if ($pluginOk) { break } } catch { } }',
-  '$result = [ordered]@{ at = (Get-Date -Format "yyyy-MM-dd HH:mm:ss"); up = $up; oldPid = $oldPid; newPid = $newPid; pluginEnabled = $pluginOk; accounts = $accts; ok = ($up -and $pluginOk) }',
-  '[System.IO.File]::WriteAllText($RES, ($result | ConvertTo-Json -Compress), (New-Object System.Text.UTF8Encoding($false)))',
-  'W ("RESULT " + ($result | ConvertTo-Json -Compress))',
-  // 干完活把那个计划任务删掉：它排在 2099，本不会触发，但留着是隐患（下次 /create 会先删它）
-  'try { schtasks /delete /tn dsh_restart_once /f 2>$null | Out-Null; W "task dsh_restart_once deleted" } catch { W ("task delete failed: " + $_.Exception.Message) }',
-  'W "doer done"'
+  '$i = 0; while ($i -lt 3) { try { Start-Process -FilePath $NODE -ArgumentList @($BIN, "web", "--no-open") -WindowStyle Hidden; W "launched"; break } catch { $i++; W ("launch failed: " + $_.Exception.Message); Start-Sleep -Seconds 3 } }',
+  '$new = 0; for ($i = 0; $i -lt 40; $i++) { Start-Sleep -Seconds 2; $new = ListenerPid; if ($new -gt 0) { break } }',
+  'W ("new pid=" + $new)',
+  'try { schtasks /delete /tn "' + TASK + '" /f 2>$null | Out-Null; W "task deleted" } catch { }',
+  '$r = [ordered]@{ at = (Get-Date -Format "yyyy-MM-dd HH:mm:ss"); oldPid = $old; newPid = $new; up = ($new -gt 0) }',
+  '[IO.File]::WriteAllText($RES, ($r | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding($false)))',
+  'W ("RESULT " + ($r | ConvertTo-Json -Compress))',
 ].join('\r\n');
 
-// 计划任务绝不能跑 .cmd：以登录用户身份运行的任务会显示控制台窗口（用户实测被弹窗多次）。
-// VBScript 的 Run(cmd, 0, False) 用窗口样式 0 ⇒ 完全不创建窗口。
-const vbsText = (delay) => [
+const VBS_TEXT = [
   'Set sh = CreateObject("WScript.Shell")',
-  'sh.Run """' + PWSH + '"" -NoProfile -ExecutionPolicy Bypass -File ""' + DOER + '"" -Delay ' + String(Math.max(0, Math.floor(delay))) + '", 0, False',
-  'CreateObject("Scripting.FileSystemObject").CreateTextFile("' + MARKER + '", True).WriteLine "task ran " & Now'
+  'sh.Run """' + PWSH + '"" -NoProfile -ExecutionPolicy Bypass -File ""' + DOER + '""", 0, False',
 ].join('\r\n');
 
-const PLOG = TMP + '\\dsh_restart_plugin.log';
-function plog(m) { try { nodeFs.appendFileSync(PLOG, new Date().toISOString() + ' ' + m + '\n', 'utf8'); } catch (e) { } }
-function readJson(p) {
+function scheduleRestart() {
+  ensureDir();
   try {
-    // PowerShell 5.1 的 Set-Content -Encoding UTF8 会写 BOM；JSON.parse 会抛 ⇒ 必须先剥掉（2026-10-17 实测根因）
-    return JSON.parse(String(nodeFs.readFileSync(p, 'utf8')).replace(/^\uFEFF/, ''));
-  } catch (e) { return null; }
-}
-function recent(at, ms) { const t = Date.parse(String(at || '').replace(' ', 'T')); return Number.isFinite(t) && Date.now() - t <= ms; }
-
-// ── 表决状态（手稿 §7）──────────────────────────────────────────────────────
-function readVote() {
-  const v = readJson(VOTE);
-  if (!v || !v.at || v.phase !== 'voting') return null;
-  if (!recent(v.at, VOTE_TTL)) { clearVote(); return null; }   // 过期作废，顺手清掉文件
-  return v;
-}
-function writeVote(v) { try { nodeFs.writeFileSync(VOTE, JSON.stringify(v), 'utf8'); } catch (e) { } }
-function clearVote() { try { nodeFs.unlinkSync(VOTE); } catch (e) { } }
-
-// 拿所有【活着的】Agent。手稿要求"所有正在运行或有子 Agent 正在运行的 Agent"，
-// 对应 agents service 的 list()（全部注册中的 agent，含子 agent）。
-function listLiveAgentIds(ctx) {
+    fs.writeFileSync(DOER, DOER_PS1, 'utf8');
+    fs.writeFileSync(VBS, VBS_TEXT, 'utf8');
+  } catch (e) {
+    return { ok: false, error: '写入重启脚本失败：' + e.message };
+  }
+  try { execFileSync('schtasks', ['/delete', '/tn', TASK, '/f'], { encoding: 'utf8', timeout: 20000, windowsHide: true }); } catch {}
   try {
-    const svc = ctx.get ? ctx.get('agents') : undefined;
-    if (!svc || typeof svc.list !== 'function') return [];
-    return svc.list().map((a) => String(a && a.id ? a.id : '')).filter(Boolean);
-  } catch (e) { return []; }
-}
-
-function callerId(exec) {
-  try { if (exec && exec.agent && exec.agent.id) return String(exec.agent.id); } catch (e) { }
-  try { if (exec && exec.sessionId) return String(exec.sessionId); } catch (e) { }
-  return '';
-}
-
-export function apply(ctx, config) {
-  plog('apply entered (vote mode)');
-  const ensureFiles = (delay) => {
-    try { nodeFs.writeFileSync(DOER, DOER_PS1, 'utf8'); nodeFs.writeFileSync(VBS, vbsText(delay), 'utf8'); return true; }
-    catch (e) { return false; }
-  };
-
-  // ── 底层：排定一次重启（投票通过后 / 用户直接重启 都走这里）──────────────
-  const scheduleRestart = (delay, sessionId, altIds) => {
-    if (!ensureFiles(delay)) return { ok: false, text: '无法写入重启脚本到 ' + TMP };
-    try { nodeFs.writeFileSync(REQ, JSON.stringify({ sessionId, altIds: altIds || [], at: new Date().toISOString(), delay }), 'utf8'); } catch (e) { }
-    try { nodeFs.unlinkSync(RES); } catch (e) { }
-    try { execFileSync('schtasks', ['/delete', '/tn', 'dsh_restart_once', '/f'], { encoding: 'utf8', timeout: 30000, windowsHide: true }); } catch (e) { }
+    // 只排到 2099（永不自触发），紧接着 /run 一次，doer 跑完自删 ⇒ 结构上不可能出现第二次。
+    execFileSync('schtasks', ['/create', '/tn', TASK, '/tr', 'wscript.exe //B //Nologo ' + VBS,
+      '/sc', 'once', '/sd', '2099/12/31', '/st', '23:59', '/f'], { encoding: 'utf8', timeout: 20000, windowsHide: true });
+    execFileSync('schtasks', ['/run', '/tn', TASK], { encoding: 'utf8', timeout: 20000, windowsHide: true });
+    log('scheduled: schtasks 2099 + run once');
+    return { ok: true };
+  } catch (e) {
     try {
-      // ── 2026-10-30 修掉"重启两次"的 bug ──────────────────────────────────
-      // 旧代码：任务排在 now+5min，然后立刻 /run ⇒ 5 分钟后又自己跑一次，
-      // 把刚起来的 DSH 再杀一遍（用户实测：20:23 请求 → 20:28 第二次重启）。
-      // 新做法（用户 2026-10-30 定的"9999"方案）：把任务排到 2099-12-31 23:59，
-      // 它**永远不会自己触发**；只靠下面那次 /run 跑一次；跑完由 doer 自己删任务。
-      //
-      // 2026-10-30 第二修：/sd 的日期格式跟系统区域走 —— 中文环境下 '12/31/2099'
-      // 会被 schtasks 直接拒（"无效的起始日期，格式应为 yyyy/mm/dd"），
-      // 而 en-US 又只认 MM/dd/yyyy。所以按顺序试两种格式，
-      // 全失败就**不排任务**、直接把 doer 拉起来（少一层依赖，绝不会因此不重启）。
-      const createRun = (sd) => {
-        execFileSync('schtasks', ['/create', '/tn', 'dsh_restart_once',
-          '/tr', 'wscript.exe //B //Nologo ' + VBS,
-          '/sc', 'once', '/sd', sd, '/st', '23:59', '/f'],
-          { encoding: 'utf8', timeout: 30000, windowsHide: true });
-        execFileSync('schtasks', ['/run', '/tn', 'dsh_restart_once'], { encoding: 'utf8', timeout: 30000, windowsHide: true });
-      };
-      let scheduled = false;
-      let lastErr = null;
-      for (const sd of ['2099/12/31', '12/31/2099']) {
-        try { createRun(sd); scheduled = true; break; } catch (e) { lastErr = e; }
-      }
-      if (!scheduled) {
-        // 兜底：wscript 起的 doer 是独立进程，父进程被 Stop-Process 杀掉也不会跟着死
-        plog('schtasks schedule failed (' + (lastErr && lastErr.message ? lastErr.message : 'unknown') + '); fallback to direct wscript');
-        execFileSync('wscript.exe', ['//B', '//Nologo', VBS], { timeout: 30000, windowsHide: true, stdio: 'ignore' });
-      }
-    } catch (e) { return { ok: false, text: '排定重启任务失败：' + (e && e.message ? e.message : String(e)) }; }
-    return { ok: true, scheduled: true, delaySeconds: delay, sessionId, resultPath: RES, logPath: LOG };
-  };
-
-  // ── 通知：给每个被通知的 Agent 发一条消息（走 sessionController.prompt）────
-  // ★ 2026-10-31 改：通知不再排队等回合边界。
-  //   旧实现用 mode:'queue'，消息要等目标 Agent 的下一个回合边界才投递，
-  //   于是"请求"和"取消"会隔好几个回合才先后冒出来，内容早已过期，
-  //   而且在聊天里长得像用户自己说的话。
-  //   现在：优先 mode:'steer'（插队，立刻进入目标当前回合）；目标空闲时 steer 会失败，
-  //   再退回 queue。文本统一加【系统通知】前缀，和用户发言区分开。
-  //   注意：SessionPromptRequest 只有 requestId/sessionId/mode/content/clientTimeZone，
-  //   旧代码里的 source 字段根本不在协议里，属于无效字段（已删）。
-  const notifySessions = (ids, text) => {
-    let sc = null;
-    try { sc = ctx.get ? ctx.get('sessionController') : undefined; } catch (e) { sc = null; }
-    if (!sc || typeof sc.prompt !== 'function') { plog('notify skipped: no sessionController'); return 0; }
-    let n = 0;
-    for (const sid of ids) {
-      if (!sid) continue;
-      const body = '【系统通知·DSH 重启】' + text;
-      const base = { requestId: 'dsh-restart-vote-' + randomUUID(), sessionId: sid, content: [{ type: 'text', text: body }] };
-      let sent = false;
-      try { sc.prompt({ ...base, mode: 'steer' }, new AbortController().signal); sent = true; plog('steer ok sid=' + sid); }
-      catch (e) { plog('steer failed sid=' + sid + ' :: ' + (e && e.message ? e.message : String(e))); }
-      if (!sent) {
-        try { sc.prompt({ ...base, mode: 'queue' }, new AbortController().signal); sent = true; plog('queue fallback ok sid=' + sid); }
-        catch (e) { plog('prompt FAILED sid=' + sid + ' :: ' + (e && e.message ? e.message : String(e))); }
-      }
-      if (sent) n += 1;
+      execFileSync('wscript.exe', ['//B', '//Nologo', VBS], { timeout: 20000, windowsHide: true, stdio: 'ignore' });
+      log('scheduled: direct wscript fallback (' + (e && e.message) + ')');
+      return { ok: true, fallback: true };
+    } catch (e2) {
+      return { ok: false, error: '排定重启失败：' + (e2 && e2.message ? e2.message : String(e2)) };
     }
-    return n;
+  }
+}
+
+// ── 插件主体 ────────────────────────────────────────────────────────────
+export function apply(ctx) {
+  ensureDir();
+
+  const senderOf = (exec) => {
+    try { if (exec && exec.agent && exec.agent.id) return String(exec.agent.id); } catch {}
+    try { if (exec && exec.sessionId) return String(exec.sessionId); } catch {}
+    return '';
   };
 
-  // ── 工具 1：dsh_restart —— 只发起表决，不重启 ──────────────────────────
-  const defRestart = {
+  const sc = () => { try { return ctx.get ? ctx.get('sessionController') : undefined; } catch { return undefined; } };
+
+  /** 投递一条【Agent 消息】（不是用户消息）。 */
+  const relay = (toId, kind, body, senderId) => {
+    let agents = null;
+    try { agents = ctx.get ? ctx.get('agents') : undefined; } catch { agents = null; }
+    const agent = agents && typeof agents.get === 'function' ? agents.get(toId) : undefined;
+    if (!agent) return { ok: false, error: '目标会话没有存活 Agent' };
+    const msg = {
+      id: randomUUID(),
+      content: [{ type: 'text', text: '【Agent 消息·' + kind + '】from ' + senderId + '\n' + body }],
+      source: { kind: 'agent-message', form: 'relay', senderSessionId: senderId },
+    };
+    try {
+      if (typeof agent.followup === 'function') { agent.followup(msg); return { ok: true }; }
+      if (agent.inbox && typeof agent.inbox.send === 'function') { agent.inbox.send(msg, 'turn', true); return { ok: true }; }
+      return { ok: false, error: '该 Agent 没有可用的投递接口' };
+    } catch (e) {
+      return { ok: false, error: e && e.message ? e.message : String(e) };
+    }
+  };
+
+  /** 除发起者外，正在干活的会话：本轮在跑 / 有子 Agent 在跑。 */
+  const busySessions = (requester) => {
+    let items = [];
+    try {
+      const r = sc() ? sc().list({}) : null;
+      items = (r && r.items) || [];
+    } catch { items = []; }
+    const union = new Set();
+    for (const s of items) {
+      if (!s) continue;
+      if (s.running) union.add(String(s.sessionId));
+      if (s.running && s.parentSessionId) union.add(String(s.parentSessionId));
+    }
+    union.delete(requester);
+    return [...union];
+  };
+
+  const notifyTargets = (targets, kind, body, senderId) => {
+    const okIds = [];
+    for (const t of targets) {
+      const r = relay(t, kind, body, senderId);
+      if (r.ok) okIds.push(t); else log('relay failed to ' + t + ': ' + r.error);
+    }
+    return okIds;
+  };
+
+  const defRequest = {
     name: 'dsh_restart',
     description:
-      'Request a DSH restart. This does NOT restart immediately: it notifies every live Agent (including sub-agents) ' +
-      'and waits until all of them call allowdshrestarting; any of them (or the user via /stopdshfromrestarting) can ' +
-      'cancel it. Per the manuscript, the user-side restart has no delay; this agent-side path is deliberately a vote. ' +
-      'Use dryRun to validate paths and the target pid without scheduling anything.',
+      'Request a DSH restart. Notifies every OTHER busy conversation with an Agent message, then waits up to 3 minutes until all agree. ' +
+      'It never restarts by itself: on approval it returns a one-shot token, and only dsh_restart_commit with that token restarts.',
     parameters: {
       type: 'object', additionalProperties: false,
-      properties: {
-        dryRun: { type: 'boolean', description: 'Only validate paths and the target pid; do not start a vote.' }
-      }
+      properties: { note: { type: 'string', description: 'Optional one-line reason shown to the peers.' } },
     },
     output: {
       schema: { type: 'object', additionalProperties: true },
-      render: (_args, value) => [{ type: 'text', text: typeof value?.text === 'string' ? value.text : JSON.stringify(value) }]
+      render: (_a, v) => [{ type: 'text', text: typeof (v && v.text) === 'string' ? v.text : JSON.stringify(v) }],
     },
+    timeoutMs: WAIT_BLOCK_MS + 20000,
     async execute(args, exec) {
-      const a = args ?? {};
-      const sessionId = callerId(exec);
-
-      if (a.dryRun) {
-        if (!ensureFiles(0)) return { ok: false, text: '无法写入重启脚本到 ' + TMP };
-        try {
-          execFileSync(PWSH, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', DOER, '-Delay', '0', '-DryRun'], { encoding: 'utf8', timeout: 60000, windowsHide: true });
-          return { ok: true, dryRun: true, text: '干跑完成（未重启）日志：' + LOG };
-        } catch (e) { return { ok: false, dryRun: true, text: '干跑失败：' + (e && e.message ? e.message : String(e)) }; }
+      const requester = senderOf(exec);
+      const cur = readState();
+      if (cur && (cur.phase === 'collecting' || cur.phase === 'approved')) {
+        return { ok: false, text: '已有进行中的请求（' + cur.phase + '，id=' + cur.id + '）：用 dsh_restart_status 查看。' };
       }
 
-      // 已经有待表决的？直接提示，不重复发起
-      const existing = readVote();
-      if (existing) {
-        const pending = existing.targets.filter((t) => !existing.votes[t]);
-        return {
-          ok: true, phase: 'voting', targets: existing.targets,
-          text: '已有一个待表决的重启请求（' + (existing.at || '') + '，还等 ' + pending.length + ' 个：' +
-            pending.join(', ') + '）。表决用 allowdshrestarting / stopdshfromrestarting。'
-        };
-      }
+      const targets = busySessions(requester);
+      const st = newState({ id: randomUUID(), requester, note: args && args.note, targets });
+      writeState(st);
 
-      const live = listLiveAgentIds(ctx);
-      const targets = live.includes(sessionId) || !sessionId ? live : [sessionId].concat(live);
       if (targets.length === 0) {
-        // 拿不到 agents 服务：不猜，直接拒绝（fail-closed）
-        return { ok: false, text: '拿不到 agents.list()，无法确定要通知哪些 Agent ⇒ 不发起重启。' };
+        st.phase = 'approved';
+        st.token = randomUUID();
+        writeState(st);
+        return { ok: true, phase: 'approved', token: st.token, targets: [], text: '没有其它正在干活的会话，表决为空 ⇒ 已批准。用 dsh_restart_commit 执行（token 只能用一次）。' };
       }
 
-      // 2026-10-31：表决机制保留（用户明确要求）。即便只有发起者自己，
-      // 也要走"建表决 → 自己 allow → 才重启"这两步，不允许静默跳过。
-      // 只是通知不再发给发起者（它从工具返回值里已经知道了），避免聊天里多出假用户消息。
-      const others = targets.filter((t) => t !== sessionId);
+      const notified = notifyTargets(targets, 'request',
+        '请求重启 DSH' + (st.note ? '：' + st.note : '') + '。\n同意请调用 allowdshrestarting；拒绝请调用 stopdshfromrestarting 并附理由。',
+        requester);
+      writeState(st);
 
-      const v = { phase: 'voting', at: new Date().toISOString(), requester: sessionId, targets, votes: {}, delay: 0 };
-      writeVote(v);
-
-      const notice = '【DSH 重启请求】' + sessionId + ' 请求重启 DSH。\n' +
-        '按手稿要求，Agent 发起的重启不立刻执行，必须**所有被通知的 Agent**都放行。\n' +
-        '你可以：\n' +
-        '  · 调用 allowdshrestarting 放行（全部放行后才重启）\n' +
-        '  · 调用 stopdshfromrestarting 立即取消\n' +
-        '用户也可以在任意对话输入 /stopdshfromrestarting 取消。';
-      // 只通知【其它】Agent：发起者已经从工具返回值里知道了，再给它 prompt 一条
-      // 只会在它自己的聊天里多一条假"用户消息"。
-      const notified = notifySessions(others, notice);
-
-      return {
-        ok: true, phase: 'voting', requester: sessionId, targets, notified,
-        votePath: VOTE,
-        text: (others.length === 0
-          ? '已发起重启表决：当前没有其它正在运行的 Agent，被通知者只有你自己（' + sessionId + '）。\n' +
-            '调用 allowdshrestarting 放行后立即重启；调用 stopdshfromrestarting 取消。'
-          : '已发起重启表决（不是重启）：通知了 ' + notified + '/' + others.length + ' 个其它 Agent。\n' +
-            '等待它们调用 allowdshrestarting；任一调用 stopdshfromrestarting（或用户输入 /stopdshfromrestarting）即取消。\n' +
-            '全部放行后才会真正重启。')
-      };
-    }
+      const deadline = Date.now() + WAIT_BLOCK_MS;
+      while (Date.now() < deadline) {
+        const s = readState();
+        if (!s || s.id !== st.id) return { ok: false, text: '请求状态被外部清理，表决中止' };
+        if (s.phase === 'approved') {
+          return { ok: true, phase: 'approved', token: s.token, targets: s.targets, text: '全员同意（' + s.targets.length + '/' + s.targets.length + '）⇒ 已批准。调用 dsh_restart_commit 执行。' };
+        }
+        if (s.phase === 'denied') {
+          const reasons = Object.entries(s.votes).filter((kv) => kv[1].decision === 'deny').map((kv) => kv[0] + '：' + kv[1].reason);
+          return { ok: false, phase: 'denied', reasons, text: '被拒绝：\n' + reasons.join('\n') };
+        }
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      const s2 = readState();
+      const voted = s2 ? Object.keys(s2.votes || {}).length : 0;
+      return { ok: true, phase: 'collecting', targets: st.targets, notified, text: '3 分钟内未收齐（' + voted + '/' + st.targets.length + '）。已转后台：5 分钟催未决者，10 分钟作废；用 dsh_restart_status 查看。' };
+    },
   };
 
-  // ── 工具 2：allowdshrestarting ─────────────────────────────────────────
-  const defAllow = {
-    name: 'allowdshrestarting',
-    description:
-      'Allow the pending DSH restart. When every notified Agent has called this, the restart runs immediately ' +
-      '(no delay). Returns the remaining agents if others have not voted yet.',
+  const defCommit = {
+    name: 'dsh_restart_commit',
+    description: 'Execute an approved DSH restart with the one-shot token returned by dsh_restart. The token is consumed.',
+    parameters: {
+      type: 'object', additionalProperties: false,
+      properties: { token: { type: 'string' } }, required: ['token'],
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_a, v) => [{ type: 'text', text: typeof (v && v.text) === 'string' ? v.text : JSON.stringify(v) }],
+    },
+    async execute(args) {
+      const st = readState();
+      const gate = canCommit(st, args && args.token);
+      if (!gate.ok) return { ok: false, text: gate.error };
+      const next = Object.assign({}, st, { phase: 'committed', tokenUsed: true, pendingNotify: st.targets.concat(st.requester).filter(Boolean) });
+      writeState(next);
+      const r = scheduleRestart();
+      if (!r.ok) {
+        writeState(Object.assign({}, st, { tokenUsed: false, phase: 'approved' }));
+        return { ok: false, text: r.error };
+      }
+      return { ok: true, text: '已排定重启（只排一次：2099 任务 + 单次触发 + 自删）。约 20 秒后回来。' };
+    },
+  };
+
+  const defStatus = {
+    name: 'dsh_restart_status',
+    description: 'Show the current restart request: phase, votes, pending peers, denial reasons, token state.',
     parameters: { type: 'object', additionalProperties: false, properties: {} },
     output: {
       schema: { type: 'object', additionalProperties: true },
-      render: (_args, value) => [{ type: 'text', text: typeof value?.text === 'string' ? value.text : JSON.stringify(value) }]
+      render: (_a, v) => [{ type: 'text', text: typeof (v && v.text) === 'string' ? v.text : JSON.stringify(v) }],
     },
-    async execute(args, exec) {
-      const sid = callerId(exec);
-      const v = readVote();
-      if (!v) return { ok: false, text: '当前没有待表决的重启请求（可能已取消、已执行或已过期）。' };
-      if (!v.targets.includes(sid)) return { ok: false, text: '你不是本次通知的对象（' + sid + ' 不在 [' + v.targets.join(', ') + '] 里）。' };
-
-      v.votes[sid] = 'allow';
-      writeVote(v);
-      const pending = v.targets.filter((t) => !v.votes[t]);
-      const done = Object.keys(v.votes).length;
-
-      if (pending.length === 0) {
-        v.phase = 'approved';
-        writeVote(v);
-        const r = scheduleRestart(0, v.requester, []);
-        // 不再通知发起者：它马上就会被重启打断，这条只会以假用户消息的形式留在它聊天里。
-        notifySessions(v.targets.filter((t) => t !== v.requester), '【DSH 重启已放行】全部 Agent 已同意，重启开始（无延时）。重启完成后会通知各会话。');
-        clearVote();
-        return {
-          ok: true, phase: 'approved', restart: r,
-          text: '全部放行（' + done + '/' + v.targets.length + '）⇒ 正在重启（无延时）。\n' + (r.text || '') +
-            '\n完成后结果会推到发起会话。'
-        };
-      }
-
+    async execute() {
+      const st = readState();
+      if (!st) return { ok: true, phase: 'none', text: '没有重启请求。' };
+      const pending = pendingTargets(st);
+      const denies = Object.entries(st.votes).filter((kv) => kv[1].decision === 'deny').map((kv) => kv[0] + '：' + kv[1].reason);
       return {
-        ok: true, phase: 'voting', votes: done, total: v.targets.length, pending,
-        text: '已放行（' + done + '/' + v.targets.length + '）。还等：' + pending.join(', ') + '。'
+        ok: true, id: st.id, phase: st.phase, requester: st.requester, note: st.note,
+        targets: st.targets, votes: st.votes, pending,
+        text: [
+          'id=' + st.id + ' phase=' + st.phase,
+          '发起者=' + st.requester + (st.note ? ' 备注=' + st.note : ''),
+          '目标=' + st.targets.length + ' 已表决=' + Object.keys(st.votes).length + ' 未决=' + (pending.join(',') || '无'),
+          denies.length ? '拒绝理由：\n' + denies.join('\n') : '',
+          st.phase === 'approved' ? '已批准：用 dsh_restart_commit 执行（token 一次性）' : '',
+        ].filter(Boolean).join('\n'),
       };
-    }
+    },
   };
 
-  // ── 工具 3：stopdshfromrestarting ──────────────────────────────────────
-  const defStop = {
-    name: 'stopdshfromrestarting',
-    description:
-      'Cancel the pending DSH restart immediately. Any notified Agent may call this; the user can also type ' +
-      '/stopdshfromrestarting in any conversation.',
-    parameters: { type: 'object', additionalProperties: false, properties: {} },
+  const voteTool = (decision, toolName, description) => ({
+    name: toolName,
+    description,
+    parameters: {
+      type: 'object', additionalProperties: false,
+      properties: decision === 'deny' ? { reason: { type: 'string', description: 'Why you refuse (required).' } } : {},
+    },
     output: {
       schema: { type: 'object', additionalProperties: true },
-      render: (_args, value) => [{ type: 'text', text: typeof value?.text === 'string' ? value.text : JSON.stringify(value) }]
+      render: (_a, v) => [{ type: 'text', text: typeof (v && v.text) === 'string' ? v.text : JSON.stringify(v) }],
     },
     async execute(args, exec) {
-      const sid = callerId(exec);
-      const v = readVote();
-      if (!v) return { ok: false, text: '当前没有待表决的重启请求。' };
-      v.phase = 'cancelled';
-      v.cancelledBy = sid;
-      v.cancelledAt = new Date().toISOString();
-      writeVote(v);
-      notifySessions(v.targets.filter((t) => t !== v.requester), '【DSH 重启已取消】由 ' + sid + ' 阻止，不会重启。');
-      clearVote();
-      return { ok: true, phase: 'cancelled', text: '已阻止本次重启（' + sid + '）。' };
+      const sid = senderOf(exec);
+      const st = readState();
+      const r = recordVote(st, sid, decision, args && args.reason);
+      if (r.error) return { ok: false, text: r.error };
+      writeState(r.state);
+      if (r.transition === 'approved') {
+        notifyTargets(r.state.targets, 'notice', '全员已同意，重启进入待执行（由发起者提交）。', sid);
+        return { ok: true, phase: 'approved', text: '已同意（最后一票）⇒ 已批准；等待发起者提交执行。' };
+      }
+      if (r.transition === 'denied') {
+        notifyTargets(r.state.targets.concat(r.state.requester), 'notice', '已拒绝重启：' + String((args && args.reason) || ''), sid);
+        return { ok: true, phase: 'denied', text: '已拒绝，理由已记录并通知发起者。' };
+      }
+      return { ok: true, phase: 'collecting', text: '已同意，还剩 ' + pendingTargets(r.state).length + ' 个未决。' };
+    },
+  });
+
+  ctx.effect(() => ctx.tools.register(defRequest), 'dsh-restart: dsh_restart');
+  ctx.effect(() => ctx.tools.register(defCommit), 'dsh-restart: dsh_restart_commit');
+  ctx.effect(() => ctx.tools.register(defStatus), 'dsh-restart: dsh_restart_status');
+  ctx.effect(() => ctx.tools.register(voteTool('allow', 'allowdshrestarting', 'Agree to the pending DSH restart.')), 'dsh-restart: allow');
+  ctx.effect(() => ctx.tools.register(voteTool('deny', 'stopdshfromrestarting', 'Refuse the pending DSH restart; a reason is required.')), 'dsh-restart: deny');
+
+  // 后台推进：5 分钟催、10 分钟作废（每 30 秒检查；重启后按时间戳继续）
+  const timer = setInterval(() => {
+    const st = readState();
+    if (!st) return;
+    const out = tick(st);
+    if (out.state !== st) writeState(out.state);
+    if (out.nudge) {
+      const pending = pendingTargets(out.state);
+      notifyTargets(pending, 'notice', '重启表决还在等你：同意请 allowdshrestarting；拒绝请 stopdshfromrestarting 并附理由。', out.state.requester);
+      log('nudged ' + pending.join(','));
     }
-  };
+  }, 30000);
+  try { timer.unref(); } catch {}
 
-  ctx.effect(() => ctx.tools.register(defRestart), 'dsh-restart: dsh_restart (vote)');
-  ctx.effect(() => ctx.tools.register(defAllow), 'dsh-restart: allowdshrestarting');
-  ctx.effect(() => ctx.tools.register(defStop), 'dsh-restart: stopdshfromrestarting');
+  // 重启后回放：把「重启完成」告诉所有被通知者 + 发起者
+  const replayTimer = setTimeout(() => {
+    const st = readState();
+    if (!st || st.phase !== 'committed' || !Array.isArray(st.pendingNotify) || st.pendingNotify.length === 0) return;
+    let res = null;
+    try { res = JSON.parse(fs.readFileSync(RESULT, 'utf8')); } catch (e) { res = null; }
+    const summary = res ? '重启完成：旧 pid ' + res.oldPid + ' → 新 pid ' + res.newPid + '，监听=' + res.up : '重启完成（未读到结果文件）';
+    for (const sid of st.pendingNotify) relay(sid, 'notice', summary, st.requester);
+    writeState(Object.assign({}, st, { phase: 'done', pendingNotify: [] }));
+    log('replayed notifications to ' + st.pendingNotify.join(','));
+  }, 5000);
+  try { replayTimer.unref(); } catch {}
 
-  // ---- 仅用户命令：/killdsh -------------------------------------------------
-  const KILL_PS1 = [
-    'Start-Sleep -Seconds 3',
-    '$LOG = ' + JSON.stringify(LOG),
-    'function W($m) { ((Get-Date -Format "yyyy-MM-dd HH:mm:ss") + " " + $m) | Add-Content -LiteralPath $LOG -Encoding UTF8 }',
-    'W "killdsh: requested by user"',
-    '$l = (netstat -ano | Select-String ":3080 .*LISTENING" | Select-Object -First 1)',
-    'if ($l) { $p = [int](($l -replace "\\s+"," ").Trim().Split(" ")[-1]); try { Stop-Process -Id $p -Force -ErrorAction Stop; W ("killdsh: killed pid=" + $p) } catch { W ("killdsh: failed " + $_.Exception.Message) } } else { W "killdsh: no listener on 3080" }'
-  ].join('\r\n');
-  const KILL_VBS = [
-    'Set sh = CreateObject("WScript.Shell")',
-    'sh.Run """' + PWSH + '"" -NoProfile -ExecutionPolicy Bypass -File ""' + KILL_PS1_PATH + '""", 0, False'
-  ].join('\r\n');
+  // 用户命令：/restartdsh（0 延时、不走表决）
   try {
-    ctx.inject(['commands'], (commandCtx) => {
+    ctx.inject(['commands'], (c) => {
       try {
-        commandCtx.commands.register({
-          name: 'killdsh',
-          description: '关闭 DSH（仅用户可输入；3 秒后杀掉 3080 监听进程）',
-          handler: async () => {
-            try {
-              nodeFs.writeFileSync(KILL_PS1_PATH, KILL_PS1, 'utf8');
-              nodeFs.writeFileSync(KILL_VBS_PATH, KILL_VBS, 'utf8');
-              execFileSync('wscript.exe', ['//B', '//Nologo', KILL_VBS_PATH], { timeout: 30000, windowsHide: true });
-              return { kind: 'success', text: '正在关闭 DSH ✓ —— 约 3 秒后进程结束 ✓。\n重新启动：双击桌面「启动 DSH」或运行 dsh web --no-open ✓。' };
-            } catch (e) {
-              return { kind: 'error', text: '关闭失败：' + (e && e.message ? e.message : String(e)) };
-            }
-          }
-        });
-      } catch (e) { plog('swallowed: ' + (e && e.message ? e.message : String(e))); }
-    });
-  } catch (e) { plog('swallowed: ' + (e && e.message ? e.message : String(e))); }
-
-  // ---- 仅用户命令：/restartdsh（延时 0 —— 手稿："用户的重启接口延时不要了"）----
-  try {
-    ctx.inject(['commands'], (commandCtx) => {
-      try {
-        commandCtx.commands.register({
+        c.commands.register({
           name: 'restartdsh',
-          description: '重启 DSH（仅用户可输入；无延时，立即停 3080 → 自动拉起 → 探活）',
+          description: '立即重启 DSH（仅用户；不走表决，无延时）',
           handler: async () => {
-            try {
-              // 用户重启不走表决，且延时为 0（手稿明确要求）
-              clearVote();
-              const r = scheduleRestart(0, '', []);
-              if (!r.ok) return { kind: 'error', text: r.text || '排定重启失败' };
-              return { kind: 'success', text: '已立即重启（无延时）。页面会短暂断连，约 20 秒后自动回来。\n结果写入 %TEMP%\\dsh_restart_result.json。' };
-            } catch (e) {
-              return { kind: 'error', text: '重启失败：' + (e && e.message ? e.message : String(e)) };
-            }
-          }
+            const r = scheduleRestart();
+            return r.ok ? { kind: 'success', text: '已排定重启（无延时）。约 20 秒后回来。' }
+                        : { kind: 'error', text: r.error };
+          },
         });
-      } catch (e) { plog('swallowed: ' + (e && e.message ? e.message : String(e))); }
+      } catch (e) { log('register /restartdsh failed: ' + (e && e.message)); }
     });
-  } catch (e) { plog('swallowed: ' + (e && e.message ? e.message : String(e))); }
-
-  // ---- 仅用户命令：/stopdshfromrestarting（手稿要求）-----------------------
-  try {
-    ctx.inject(['commands'], (commandCtx) => {
-      try {
-        commandCtx.commands.register({
-          name: 'stopdshfromrestarting',
-          description: '取消待表决的 DSH 重启（仅用户可输入，任何对话都能用）',
-          handler: async () => {
-            try {
-              const v = readVote();
-              if (!v) return { kind: 'success', text: '当前没有待表决的重启请求，无需取消。' };
-              v.phase = 'cancelled';
-              v.cancelledBy = 'user';
-              v.cancelledAt = new Date().toISOString();
-              writeVote(v);
-              notifySessions(v.targets.filter((t) => t !== v.requester), '【DSH 重启已取消】用户执行了 /stopdshfromrestarting，重启停止。');
-              clearVote();
-              return { kind: 'success', text: '已取消待表决的重启（user）。' };
-            } catch (e) {
-              return { kind: 'error', text: '取消失败：' + (e && e.message ? e.message : String(e)) };
-            }
-          }
-        });
-      } catch (e) { plog('swallowed: ' + (e && e.message ? e.message : String(e))); }
-    });
-  } catch (e) { plog('swallowed: ' + (e && e.message ? e.message : String(e))); }
-
-  try {
-    ctx.inject(['sessionController'], (sc) => {
-      plog('inject sessionController resolved');
-      /*
-       * 结果文件是【重启之后】才写的，而本插件是在【重启过程中】挂载的 ⇒
-       * 只在挂载时读一次永远赶不上（实测：用户一直看不到通知）。
-       * 所以挂载后轮询最多 3 分钟，看到结果就推给会话，然后删掉请求文件。
-       */
-      let tries = 0;
-      const timer = setInterval(() => {
-        tries += 1;
-        if (tries <= 2 || tries % 20 === 0) plog('tick ' + tries + ' req=' + (nodeFs.existsSync(REQ) ? 'y' : 'n') + ' res=' + (nodeFs.existsSync(RES) ? 'y' : 'n'));
-        if (tries > 60) { clearInterval(timer); return; }
-        try {
-          const req = readJson(REQ); const res = readJson(RES);
-          if (!req || !res || !recent(res.at, 10 * 60000) || !req.sessionId) return;
-          clearInterval(timer);
-          const text0 = '【DSH 重启完成】' + String(res.at) + '：3080 监听=' + res.up + '，pid ' + res.oldPid + ' → ' + res.newPid +
-            '，微信插件=' + (res.pluginEnabled ? 'OK' : 'FAIL') + '，账号=' + res.accounts + '。本次重启由该会话的工具调用触发。';
-          let done = false;
-          for (const sid of [req.sessionId].concat(req.altIds || [])) {
-            if (done || !sid) continue;
-            try { sc.sessionController.prompt({ requestId: 'dsh-restart-' + randomUUID(), sessionId: sid, mode: 'queue', content: [{ type: 'text', text: text0 }], source: { kind: 'tool', callId: 'dsh-restart-' + randomUUID() } }, new AbortController().signal); plog('prompt ok sid=' + sid); done = true; } catch (e) { plog('prompt FAILED sid=' + sid + ' :: ' + (e && e.message ? e.message : String(e))); }
-          }
-          try { nodeFs.unlinkSync(REQ); } catch (e) { }
-        } catch (e) { plog('swallowed: ' + (e && e.message ? e.message : String(e))); }
-      }, 3000);
-      try { if (timer && typeof timer.unref === 'function') timer.unref(); } catch (e) { }
-      try {
-        const req = readJson(REQ); const res = readJson(RES);
-        if (!req || !res || !recent(res.at, 10 * 60000) || !req.sessionId) return;
-        const text = '【DSH 重启完成】' + String(res.at) + '：3080 监听=' + res.up + '，pid ' + res.oldPid + ' → ' + res.newPid +
-          '，微信插件=' + (res.pluginEnabled ? 'OK' : 'FAIL') + '，账号=' + res.accounts + '。本次重启由该会话的工具调用触发。';
-        try { sc.sessionController.prompt({ requestId: 'dsh-restart-' + randomUUID(), sessionId: req.sessionId, mode: 'queue', content: [{ type: 'text', text }], source: { kind: 'tool', callId: 'dsh-restart-' + randomUUID() } }, new AbortController().signal); } catch (e) { }
-        try { nodeFs.unlinkSync(REQ); } catch (e) { }
-      } catch (e) { plog('swallowed: ' + (e && e.message ? e.message : String(e))); }
-    });
-  } catch (e) { plog('swallowed: ' + (e && e.message ? e.message : String(e))); }
-
-  try {
-    ctx.inject(['systemPrompt'], (promptCtx) => {
-      try {
-        promptCtx.systemPrompt.section({
-          id: 'dsh-restart-result',
-          text: () => {
-            try {
-              const r = readJson(RES);
-              if (!r || !recent(r.at, 10 * 60000)) return '';
-              return '【DSH 上次重启完成】' + String(r.at) + '：3080=' + r.up + '，pid ' + r.oldPid + ' → ' + r.newPid + '，微信插件=' + (r.pluginEnabled ? 'OK' : 'FAIL') + '，账号=' + r.accounts;
-            } catch (e) { return ''; }
-          }
-        });
-      } catch (e) { plog('swallowed: ' + (e && e.message ? e.message : String(e))); }
-    });
-  } catch (e) { plog('swallowed: ' + (e && e.message ? e.message : String(e))); }
+  } catch (e) { log('inject commands failed: ' + (e && e.message)); }
 }

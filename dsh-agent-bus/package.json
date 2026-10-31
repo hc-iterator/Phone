@@ -1,0 +1,16 @@
+{
+  "name": "@local/dsh-agent-bus",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Agent-to-agent message bus: typed envelopes, secret screening, loop limits, JSONL audit.",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
