@@ -398,7 +398,7 @@ export function apply(ctx) {
       render: (_a, v) => [{ type: 'text', text: typeof (v && v.text) === 'string' ? v.text : JSON.stringify(v) }],
     },
     async execute(args, exec) {
-      const self = callerId(exec);
+      const self = senderOf(exec);
       const to = (args && args.to) || self;
       if (!to) return { ok: false, text: '拿不到目标会话 id' };
       const r = relay(to, 'notice', (args && args.text) || 'wake 测试', self || to);
