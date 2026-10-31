@@ -43,8 +43,8 @@ const NODE = 'C:\\Program Files\\nodejs\\node.exe';
 const BIN = 'C:\\Users\\Chen\\AppData\\Roaming\\npm\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js';
 const PWSH = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
 
-// 表决有效期：10 分钟没人齐就作废（避免一条永远挂着的"待表决"）
-const VOTE_TTL = 10 * 60000;
+// 表决有效期：2 分钟没人齐就作废（避免一条永远挂着的"待表决"把后续请求挡掉）
+const VOTE_TTL = 2 * 60000;
 
 const DOER_PS1 = [
   'param([int]$Delay = 0, [switch]$DryRun)',
@@ -94,7 +94,7 @@ function recent(at, ms) { const t = Date.parse(String(at || '').replace(' ', 'T'
 function readVote() {
   const v = readJson(VOTE);
   if (!v || !v.at || v.phase !== 'voting') return null;
-  if (!recent(v.at, VOTE_TTL)) return null;   // 过期作废
+  if (!recent(v.at, VOTE_TTL)) { clearVote(); return null; }   // 过期作废，顺手清掉文件
   return v;
 }
 function writeVote(v) { try { nodeFs.writeFileSync(VOTE, JSON.stringify(v), 'utf8'); } catch (e) { } }
@@ -231,6 +231,21 @@ export function apply(ctx, config) {
         return { ok: false, text: '拿不到 agents.list()，无法确定要通知哪些 Agent ⇒ 不发起重启。' };
       }
 
+      // ── 2026-10-31 修：只有一个 Agent 时表决是空转 ────────────────────────
+      // 旧代码把发起者自己也放进 targets，然后给自己 prompt 一条"重启请求"。
+      // 那条 prompt 会以**用户消息**的形态落进聊天（用户实测：莫名其妙多出一条
+      // 像是自己发的"请求重启 DSH"），而真正的重启还得等自己去 allow。
+      // 只有自己时没有别人可征询 ⇒ 直接放行，不再造这条噪音。
+      const others = targets.filter((t) => t !== sessionId);
+      if (others.length === 0) {
+        const r = scheduleRestart(0, sessionId, []);
+        if (!r.ok) return { ok: false, phase: 'approved', restart: r, text: '没有其它正在运行的 Agent，但排定重启失败：' + (r.text || '') };
+        return {
+          ok: true, phase: 'approved', restart: r,
+          text: '没有其它正在运行的 Agent，无需表决 ⇒ 立即重启（无延时）。结果会写 ' + RES + '。'
+        };
+      }
+
       const v = { phase: 'voting', at: new Date().toISOString(), requester: sessionId, targets, votes: {}, delay: 0 };
       writeVote(v);
 
@@ -240,12 +255,14 @@ export function apply(ctx, config) {
         '  · 调用 allowdshrestarting 放行（全部放行后才重启）\n' +
         '  · 调用 stopdshfromrestarting 立即取消\n' +
         '用户也可以在任意对话输入 /stopdshfromrestarting 取消。';
-      const notified = notifySessions(targets, notice);
+      // 只通知【其它】Agent：发起者已经从工具返回值里知道了，再给它 prompt 一条
+      // 只会在它自己的聊天里多一条假"用户消息"。
+      const notified = notifySessions(others, notice);
 
       return {
         ok: true, phase: 'voting', requester: sessionId, targets, notified,
         votePath: VOTE,
-        text: '已发起重启表决（不是重启）：通知了 ' + notified + '/' + targets.length + ' 个 Agent。\n' +
+        text: '已发起重启表决（不是重启）：通知了 ' + notified + '/' + others.length + ' 个其它 Agent。\n' +
           '等待它们调用 allowdshrestarting；任一调用 stopdshfromrestarting（或用户输入 /stopdshfromrestarting）即取消。\n' +
           '全部放行后才会真正重启。'
       };
@@ -353,9 +370,9 @@ export function apply(ctx, config) {
             }
           }
         });
-      } catch (e) { }
+      } catch (e) { plog('swallowed: ' + (e && e.message ? e.message : String(e))); }
     });
-  } catch (e) { }
+  } catch (e) { plog('swallowed: ' + (e && e.message ? e.message : String(e))); }
 
   // ---- 仅用户命令：/restartdsh（延时 0 —— 手稿："用户的重启接口延时不要了"）----
   try {
@@ -376,9 +393,9 @@ export function apply(ctx, config) {
             }
           }
         });
-      } catch (e) { }
+      } catch (e) { plog('swallowed: ' + (e && e.message ? e.message : String(e))); }
     });
-  } catch (e) { }
+  } catch (e) { plog('swallowed: ' + (e && e.message ? e.message : String(e))); }
 
   // ---- 仅用户命令：/stopdshfromrestarting（手稿要求）-----------------------
   try {
@@ -403,9 +420,9 @@ export function apply(ctx, config) {
             }
           }
         });
-      } catch (e) { }
+      } catch (e) { plog('swallowed: ' + (e && e.message ? e.message : String(e))); }
     });
-  } catch (e) { }
+  } catch (e) { plog('swallowed: ' + (e && e.message ? e.message : String(e))); }
 
   try {
     ctx.inject(['sessionController'], (sc) => {
@@ -432,7 +449,7 @@ export function apply(ctx, config) {
             try { sc.sessionController.prompt({ requestId: 'dsh-restart-' + randomUUID(), sessionId: sid, mode: 'queue', content: [{ type: 'text', text: text0 }], source: { kind: 'tool', callId: 'dsh-restart-' + randomUUID() } }, new AbortController().signal); plog('prompt ok sid=' + sid); done = true; } catch (e) { plog('prompt FAILED sid=' + sid + ' :: ' + (e && e.message ? e.message : String(e))); }
           }
           try { nodeFs.unlinkSync(REQ); } catch (e) { }
-        } catch (e) { }
+        } catch (e) { plog('swallowed: ' + (e && e.message ? e.message : String(e))); }
       }, 3000);
       try { if (timer && typeof timer.unref === 'function') timer.unref(); } catch (e) { }
       try {
@@ -442,9 +459,9 @@ export function apply(ctx, config) {
           '，微信插件=' + (res.pluginEnabled ? 'OK' : 'FAIL') + '，账号=' + res.accounts + '。本次重启由该会话的工具调用触发。';
         try { sc.sessionController.prompt({ requestId: 'dsh-restart-' + randomUUID(), sessionId: req.sessionId, mode: 'queue', content: [{ type: 'text', text }], source: { kind: 'tool', callId: 'dsh-restart-' + randomUUID() } }, new AbortController().signal); } catch (e) { }
         try { nodeFs.unlinkSync(REQ); } catch (e) { }
-      } catch (e) { }
+      } catch (e) { plog('swallowed: ' + (e && e.message ? e.message : String(e))); }
     });
-  } catch (e) { }
+  } catch (e) { plog('swallowed: ' + (e && e.message ? e.message : String(e))); }
 
   try {
     ctx.inject(['systemPrompt'], (promptCtx) => {
@@ -459,7 +476,7 @@ export function apply(ctx, config) {
             } catch (e) { return ''; }
           }
         });
-      } catch (e) { }
+      } catch (e) { plog('swallowed: ' + (e && e.message ? e.message : String(e))); }
     });
-  } catch (e) { }
+  } catch (e) { plog('swallowed: ' + (e && e.message ? e.message : String(e))); }
 }
