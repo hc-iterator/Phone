@@ -203,8 +203,24 @@ export function apply(ctx) {
   const relay = (toId, kind, body, senderId) => {
     let agents = null;
     try { agents = ctx.get ? ctx.get('agents') : undefined; } catch { agents = null; }
-    const agent = agents && typeof agents.get === 'function' ? agents.get(toId) : undefined;
-    if (!agent) return { ok: false, error: '目标会话没有存活 Agent' };
+    const lookup = (id) => {
+      if (!agents) return undefined;
+      let a = typeof agents.get === 'function' ? agents.get(id) : undefined;
+      if (a) return a;
+      // 2026-10-31：传进来的常常是 session-id（session-xxxx），而 agents.get 只认 agent id。
+      // 之前查不到就静默返回，导致「重启完成」通知永远送不到（用户实测：消息没收到）。
+      // ⇒ 先按 list() 模糊匹配一次，再按去掉 session- 前缀匹配一次。
+      if (typeof agents.list !== 'function') return undefined;
+      let all = [];
+      try { all = agents.list() || []; } catch { all = []; }
+      const bare = String(id).replace(/^session-/, '');
+      return all.find((x) => x && (
+        x.id === id ||
+        (Array.isArray(x.altIds) && x.altIds.includes(id)) ||
+        String(x.id).replace(/^session-/, '') === bare));
+    };
+    const agent = lookup(toId);
+    if (!agent) { log('relay FAILED: 没有存活 Agent for ' + toId); return { ok: false, error: '目标会话没有存活 Agent' }; }
     const msg = {
       id: randomUUID(),
       // 2026-10-31：会话校验器只接受 role === 'user'
@@ -216,10 +232,12 @@ export function apply(ctx) {
       source: { kind: 'agent-message', form: 'relay', senderSessionId: senderId },
     };
     try {
-      if (typeof agent.followup === 'function') { agent.followup(msg); return { ok: true }; }
-      if (agent.inbox && typeof agent.inbox.send === 'function') { agent.inbox.send(msg, 'turn', true); return { ok: true }; }
+      if (agent.inbox && typeof agent.inbox.send === 'function') { agent.inbox.send(msg, 'turn', true); log('relay ok(inbox) → ' + toId); return { ok: true }; }
+      if (typeof agent.followup === 'function') { agent.followup(msg); log('relay ok(followup) → ' + toId); return { ok: true }; }
+      log('relay FAILED: 该 Agent 没有投递接口 → ' + toId);
       return { ok: false, error: '该 Agent 没有可用的投递接口' };
     } catch (e) {
+      log('relay THREW → ' + toId + ' :: ' + (e && e.message ? e.message : String(e)));
       return { ok: false, error: e && e.message ? e.message : String(e) };
     }
   };
@@ -412,16 +430,29 @@ export function apply(ctx) {
   try { timer.unref(); } catch {}
 
   // 重启后回放：把「重启完成」告诉所有被通知者 + 发起者
-  const replayTimer = setTimeout(() => {
+  // 2026-10-31：原来只在挂载后 5 秒试一次。实测重启完成时各会话可能还没「活」过来，
+  // relay 查不到 Agent ⇒ 通知永远送不到（用户："看来消息没有送达啊"）。
+  // ⇒ 改成 5s / 20s / 45s 三次重试，**送成功了才清 pendingNotify**，失败留着下次再试。
+  const replay = (attempt) => {
     const st = readState();
     if (!st || st.phase !== 'committed' || !Array.isArray(st.pendingNotify) || st.pendingNotify.length === 0) return;
     let res = null;
     try { res = JSON.parse(fs.readFileSync(RESULT, 'utf8')); } catch (e) { res = null; }
     const summary = res ? '重启完成：旧 pid ' + res.oldPid + ' → 新 pid ' + res.newPid + '，监听=' + res.up : '重启完成（未读到结果文件）';
-    for (const sid of st.pendingNotify) relay(sid, 'notice', summary, st.requester);
-    writeState(Object.assign({}, st, { phase: 'done', pendingNotify: [] }));
-    log('replayed notifications to ' + st.pendingNotify.join(','));
-  }, 5000);
+    const still = [];
+    for (const sid of st.pendingNotify) {
+      const r = relay(sid, 'notice', summary, st.requester);
+      if (!r.ok) still.push(sid);
+    }
+    log('replay#' + attempt + ' pending=' + st.pendingNotify.length + ' 未送达=' + still.length);
+    if (still.length === 0) {
+      writeState(Object.assign({}, st, { phase: 'done', pendingNotify: [] }));
+    } else if (attempt < 3) {
+      const t = setTimeout(() => replay(attempt + 1), attempt === 1 ? 15000 : 25000);
+      try { t.unref(); } catch {}
+    }
+  };
+  const replayTimer = setTimeout(() => replay(1), 5000);
   try { replayTimer.unref(); } catch {}
 
   // 用户命令：/restartdsh（0 延时、不走表决）
