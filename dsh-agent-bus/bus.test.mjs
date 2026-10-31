@@ -50,4 +50,7 @@ test('buildAgentMessage 的来源是 agent-message / relay，不是 user', () =>
   assert.equal(m.source.senderSessionId, 'session-sender');
   assert.equal(m.content[0].text, 'hi');
   assert.ok(m.id);
+  // 2026-10-31：必须是 user/message 语义（role==='user'），否则目标会话被判 corrupt 打不开；
+  //   "是 Agent 消息"这一点由 source.kind 表达，不靠 role。
+  assert.equal(m.role, 'user');
 });

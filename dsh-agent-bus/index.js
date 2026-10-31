@@ -99,10 +99,24 @@ export function audit(record) {
   } catch {}
 }
 
-/** 构造 Agent 消息（不是用户消息）。 */
+/**
+ * 构造 Agent 消息（**语义上不是用户消息**，但落盘时必须是 user/message）。
+ *
+ * 2026-10-31 修复（第二次踩这个坑）：
+ * - 会话校验器 `dsh-session/lib/index.js` 对事件类型做 `type → role` 一一映射：
+ *   `user/message` 的 role **只能**是 `'user'`（没有按来源开例外）。
+ * - 漏写 role 的后果不是"这条消息不可见"，而是**整段会话被判 corrupt**：
+ *   `session event at seq N message must have role "user"` ⇒ 会话打不开。
+ *   （PicoMode 会话就是这么坏的，seq 3953，已手工补齐救回。）
+ * - 完全不写 role 时，组给模型还会 400：`messages[N]: missing field \`role\``。
+ * - **"这是 Agent 消息"由 `source.kind = 'agent-message'` 表达，不靠 role**：
+ *   role 是"模型眼里的席位"（只有 user/assistant/system/tool/developer），
+ *   source.kind 是"真实来源"。两者分工，不能互相顶替。
+ */
 export function buildAgentMessage(senderSessionId, text) {
   return {
     id: randomUUID(),
+    role: 'user',
     content: [{ type: 'text', text }],
     source: { kind: 'agent-message', form: 'relay', senderSessionId },
   };
