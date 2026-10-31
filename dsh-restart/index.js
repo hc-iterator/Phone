@@ -229,55 +229,40 @@ export function apply(ctx) {
         (Array.isArray(x.altIds) && x.altIds.includes(id)) ||
         String(x.id).replace(/^session-/, '') === bare));
     };
-    const agent = lookup(toId);
     const text = '【Agent 消息·' + kind + '】from ' + senderId + '\n' + body;
-    // 2026-10-31：目标会话可能根本没加载（"找不到活动会话"）。这时并不等于送不到 ——
-    // harness 有唤醒入口：sessionController.prompt({sessionId,...})，会让该会话 open() 并收下这条。
-    // ⇒ 三级投递：在线用 inbox/followup；不在线用 prompt 唤起；都不行才报错。
-    const viaPrompt = () => {
-      let sc = null;
-      try { sc = ctx.get ? ctx.get('sessionController') : undefined; } catch { sc = null; }
-      if (!sc || typeof sc.prompt !== 'function') return { ok: false, error: '没有 sessionController.prompt' };
-      try {
-        sc.prompt({
-          requestId: 'dsh-restart-relay-' + randomUUID(),
-          sessionId: toId,
-          mode: 'queue',
-          content: [{ type: 'text', text }],
-          source: { kind: 'agent-message', form: 'relay', senderSessionId: senderId },
-        }, new AbortController().signal);
-        log('relay ok(prompt/wake) → ' + toId);
-        return { ok: true, via: 'prompt' };
-      } catch (e) {
-        log('relay prompt THREW → ' + toId + ' :: ' + (e && e.message ? e.message : String(e)));
-        return { ok: false, error: e && e.message ? e.message : String(e) };
-      }
-    };
-    if (!agent) {
-      const w = viaPrompt();
-      if (w.ok) return w;
-      log('relay FAILED: 没有存活 Agent 且无法唤起 for ' + toId);
-      return { ok: false, error: '目标会话没有存活 Agent，且唤起失败：' + (w.error || '') };
-    }
     const msg = {
       id: randomUUID(),
       // 2026-10-31：会话校验器只接受 role === 'user'
       //   （实测：session event at seq 1773 message must have role "user" ⇒ 会话被判 corrupt）
-      // ⇒ role 写 'user'；"这是 Agent 消息"由下面的 source.kind 表达，不靠 role。
+      // ⇒ role 写 'user'；"这是 Agent 消息"由 source.kind 表达，不靠 role。
       //   完全不写 role 时，组给模型会 400：messages[N]: missing field `role`。
       role: 'user',
       content: [{ type: 'text', text }],
       source: { kind: 'agent-message', form: 'relay', senderSessionId: senderId },
     };
-    try {
-      if (agent.inbox && typeof agent.inbox.send === 'function') { agent.inbox.send(msg, 'turn', true); log('relay ok(inbox) → ' + toId); return { ok: true }; }
-      if (typeof agent.followup === 'function') { agent.followup(msg); log('relay ok(followup) → ' + toId); return { ok: true }; }
-      log('relay FAILED: 该 Agent 没有投递接口 → ' + toId);
-      return { ok: false, error: '该 Agent 没有可用的投递接口' };
-    } catch (e) {
-      log('relay THREW → ' + toId + ' :: ' + (e && e.message ? e.message : String(e)));
-      return { ok: false, error: e && e.message ? e.message : String(e) };
+    const deliver = (a, how) => {
+      try {
+        if (a.inbox && typeof a.inbox.send === 'function') { a.inbox.send(msg, 'turn', true); log('relay ok(inbox/' + how + ') → ' + toId); return true; }
+        if (typeof a.followup === 'function') { a.followup(msg); log('relay ok(followup/' + how + ') → ' + toId); return true; }
+      } catch (e) { log('relay send THREW (' + how + ') → ' + toId + ' :: ' + (e && e.message ? e.message : String(e))); }
+      return false;
+    };
+    const agent = lookup(toId);
+    if (agent && deliver(agent, 'live')) return { ok: true, via: 'live' };
+    // 2026-10-31：目标没加载时，用官方入口 SessionController.resolveAgent(sessionId) 唤起。
+    // 它的注释原文就是 "Resolve or resume one ordinary Session" —— 这才是真唤醒。
+    // （之前的 sessionController.prompt 只是"接受"，实测目标会话文件根本没被写过。）
+    const c = sc();
+    if (c && typeof c.resolveAgent === 'function') {
+      Promise.resolve(c.resolveAgent(toId)).then((r) => {
+        const a = r && (r.agent || r.value || null);
+        if (!a) { log('wake FAILED: resolveAgent 未返回 Agent → ' + toId + ' :: ' + JSON.stringify(r || null).slice(0, 200)); return; }
+        if (deliver(a, 'wake')) log('wake ok → ' + toId);
+      }).catch((e) => log('wake THREW → ' + toId + ' :: ' + (e && e.message ? e.message : String(e))));
+      return { ok: true, via: 'wake' };
     }
+    log('relay FAILED: 既无存活 Agent 也无法唤起 for ' + toId);
+    return { ok: false, error: '目标会话没有存活 Agent，且没有可用的唤起接口' };
   };
 
   /** 除发起者外，正在干活的会话：本轮在跑 / 有子 Agent 在跑。 */
