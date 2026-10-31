@@ -2208,7 +2208,86 @@ async function opAmend(cfg, args = {}) {
   return { ok: verdict === '合理', exitCode: null, text: lines.join('\n') };
 }
 
+// ── GitHub 访问（走本机加速器）───────────────────────────────────────────────
+// 为什么要专门一条：hosts 把 github 域名全指到 127.0.0.1，由 Steam++.Accelerator
+// 在 0.0.0.0:443 终止 TLS 再转发。由此两个坑：
+//   1. DSH 的 web_fetch 拒绝解析到非公网 IP ⇒ 直接报错；
+//   2. 加速器证书没有吊销列表 ⇒ schannel/.NET 都报 SSL/REVOCATION 失败。
+// 所以这里用 node:https + rejectUnauthorized:false（本机加速器是设计上的 MITM），
+// 且【不经沙箱】：本工具跑在 DSH 宿主进程里，没有 pico_run 那层 workspace-write。
+function normalizeGithubUrl(value) {
+  const v = String(value ?? '').trim();
+  if (v === '') throw new Error('url 不能为空');
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(v)) return v;
+  if (v.startsWith('/')) return `https://api.github.com${v}`;
+  if (/^[^/\s]+\/[^/\s]+$/.test(v)) return `https://github.com/${v}`;
+  return `https://api.github.com/${v}`;
+}
+
+async function githubGet(url, options) {
+  const https = await import('node:https');
+  const hops = options.hops ?? 0;
+  return await new Promise((resolve, reject) => {
+    const req = https.request(url, {
+      method: 'GET',
+      rejectUnauthorized: false,
+      headers: {
+        'User-Agent': 'dsh-agent',
+        Accept: options.raw ? '*/*' : 'application/vnd.github+json',
+      },
+      timeout: options.timeoutMs,
+    }, (res) => {
+      const status = res.statusCode ?? 0;
+      const location = res.headers.location;
+      if (status >= 300 && status < 400 && typeof location === 'string' && hops < 5) {
+        res.resume();
+        githubGet(new URL(location, url).toString(), { ...options, hops: hops + 1 }).then(resolve, reject);
+        return;
+      }
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => resolve({ status, body: Buffer.concat(chunks).toString('utf8') }));
+    });
+    req.on('timeout', () => { req.destroy(new Error(`请求超时（${options.timeoutMs} ms）`)); });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+async function opGithub(cfg, args, ctx) {
+  let target;
+  try {
+    target = normalizeGithubUrl(args.url);
+  } catch (error) {
+    return { ok: false, status: null, exitCode: null, text: `url 无效：${error instanceof Error ? error.message : String(error)}` };
+  }
+  const raw = args.raw === true;
+  const timeoutMs = Number.isFinite(args.timeoutMs) ? Math.max(1000, args.timeoutMs) : 30000;
+  try {
+    const res = await githubGet(target, { raw, timeoutMs });
+    const body = res.body ?? '';
+    const head = [`GET ${target}`, `HTTP ${res.status}  ${Buffer.byteLength(body, 'utf8')} B`].join('\n');
+    return {
+      ok: res.status >= 200 && res.status < 300,
+      status: res.status,
+      exitCode: null,
+      url: target,
+      text: `${head}\n${'-'.repeat(40)}\n${body}`,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: null,
+      exitCode: null,
+      url: target,
+      text: `GET ${target}\n请求失败：${error instanceof Error ? error.message : String(error)}\n` +
+        '（加速器没启动时，hosts 把域名指到 127.0.0.1 就必然连不上；启动 Steam++ 后重试）',
+    };
+  }
+}
+
 const OPS = {  status: opStatus,
+  github: opGithub,
   build: opBuild,
   flash: opFlash,
   serial: opSerial,
@@ -2264,6 +2343,28 @@ function buildToolDefinitions(cfg) {
         },
       },
       'status',
+    ),
+    tool(
+      cfg,
+      'github',
+      'Fetch a URL from GitHub through the machine-local accelerator. The hosts file points github.com, api.github.com and raw.githubusercontent.com at 127.0.0.1, where Steam++.Accelerator terminates TLS and forwards; that breaks web_fetch (non-public IP) and plain TLS clients (no revocation list for its certificate). This tool talks to that accelerator directly and returns the status line plus the response body. Pass a full URL, a leading-slash API path such as `/rate_limit`, or `owner/repo`.',
+      {
+        type: 'object',
+        additionalProperties: false,
+        required: ['url'],
+        properties: {
+          url: {
+            type: 'string',
+            description: 'Full URL, a leading-slash GitHub API path such as `/rate_limit` or `/search/repositories?q=pico+w`, or `owner/repo` for the repository page.',
+          },
+          raw: {
+            type: 'boolean',
+            description: 'Send `Accept: */*` instead of the GitHub JSON accept header (use for raw files and web pages).',
+          },
+          timeoutMs: { type: 'number', description: 'Hard timeout, default 30000 ms.' },
+        },
+      },
+      'github',
     ),
     tool(
       cfg,

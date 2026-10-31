@@ -209,6 +209,28 @@ export function apply(ctx) {
 
   const sc = () => { try { return ctx.get ? ctx.get('sessionController') : undefined; } catch { return undefined; } };
 
+  /**
+   * 被我们唤醒过（resolveAgent 成功投递）的会话 id。
+   *
+   * 用来补 list() 的漏：2026-10-31 实测，经 resolveAgent 唤醒的会话不会出现在
+   * `sessionController.list()` 的 running 名单里，于是重启广播根本不发 —— 目标数恒为 0。
+   */
+  const woken = new Set();
+
+  /** 该会话当前是否仍持有 Agent（用于判断 woken 里的旧 id 是否还有效）。 */
+  const hasAgent = (id) => {
+    let agents = null;
+    try { agents = ctx.get ? ctx.get('agents') : undefined; } catch { agents = null; }
+    if (!agents) return false;
+    let a = undefined;
+    try { a = typeof agents.get === 'function' ? agents.get(id) : undefined; } catch { a = undefined; }
+    if (a) return true;
+    let all = [];
+    try { all = typeof agents.list === 'function' ? (agents.list() || []) : []; } catch { all = []; }
+    const bare = String(id).replace(/^session-/, '');
+    return all.some((x) => x && (x.id === id || String(x.id).replace(/^session-/, '') === bare));
+  };
+
   /** 投递一条【Agent 消息】（不是用户消息）。 */
   const relay = (toId, kind, body, senderId) => {
     let agents = null;
@@ -257,6 +279,7 @@ export function apply(ctx) {
       Promise.resolve(c.resolveAgent(toId)).then((r) => {
         const a = r && (r.agent || r.value || null);
         if (!a) { log('wake FAILED: resolveAgent 未返回 Agent → ' + toId + ' :: ' + JSON.stringify(r || null).slice(0, 200)); return; }
+        woken.add(String(toId));
         if (deliver(a, 'wake')) log('wake ok → ' + toId);
       }).catch((e) => log('wake THREW → ' + toId + ' :: ' + (e && e.message ? e.message : String(e))));
       return { ok: true, via: 'wake' };
@@ -265,20 +288,39 @@ export function apply(ctx) {
     return { ok: false, error: '目标会话没有存活 Agent，且没有可用的唤起接口' };
   };
 
-  /** 除发起者外，正在干活的会话：本轮在跑 / 有子 Agent 在跑。 */
+  /** 除发起者外，正在干活的会话：本轮在跑 / 有子 Agent 在跑 / 我们唤醒过且仍加载。 */
   const busySessions = (requester) => {
-    let items = [];
-    try {
-      const r = sc() ? sc().list({}) : null;
-      items = (r && r.items) || [];
-    } catch { items = []; }
     const union = new Set();
+    let items = [];
+    // 2026-10-31 实测：三轮重启请求都报"目标=0"，而目标会话当时明明在跑子 agent。
+    // 原实现把 list() 整段包在 try/catch 里并静默返回空数组 ⇒ 任何异常都变成"没人忙"，
+    // 于是直接批准、广播从未发生。现在：出错要记日志，并用第二个来源兜底。
+    try {
+      const c = sc();
+      if (!c) log('busySessions: sessionController 不可用');
+      else if (typeof c.list !== 'function') log('busySessions: list() 不存在，keys=' + Object.keys(c).slice(0, 20).join(','));
+      else {
+        const r = c.list({});
+        items = (r && r.items) || [];
+        const sample = items[0] ? Object.keys(items[0]).slice(0, 18).join(',') : '(空)';
+        log('busySessions: list() 返回 ' + items.length + ' 项；首项字段=' + sample);
+      }
+    } catch (e) {
+      log('busySessions: list() THREW :: ' + (e && e.message ? e.message : String(e)));
+    }
     for (const s of items) {
       if (!s) continue;
       if (s.running) union.add(String(s.sessionId));
       if (s.running && s.parentSessionId) union.add(String(s.parentSessionId));
     }
+    // 兜底：经 resolveAgent 唤醒过、且此刻仍持有 Agent 的会话 —— 这类会话不保证出现在 list() 里，
+    // 但它们正在跑任务时同样应该收到"要重启了"的通知。
+    for (const id of woken) {
+      if (id === requester) continue;
+      if (hasAgent(id)) union.add(id);
+    }
     union.delete(requester);
+    log('busySessions: 最终目标 ' + union.size + ' 个 → ' + [...union].join(','));
     return [...union];
   };
 
@@ -520,3 +562,4 @@ export function apply(ctx) {
     });
   } catch (e) { log('inject commands failed: ' + (e && e.message)); }
 }
+
