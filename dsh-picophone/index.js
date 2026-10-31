@@ -2286,7 +2286,74 @@ async function opGithub(cfg, args, ctx) {
   }
 }
 
+// ── 图形化能力：窗口清单 / 按窗口截图 / 放大镜 ──────────────────────────────
+// 为什么放在宿主进程：pico_run 的 workspace-write 沙箱挡住 GDI/桌面访问。
+// 实测同一脚本：沙箱里 PrintWindow=false 且全黑；pwsh 直跑 true、301 KB。
+function guiScriptPath(cfg, name) {
+  const script = path.join(cfg.repo, 'tools', 'gui', name);
+  if (!existsSync(script)) throw new Error(`找不到脚本 ${script}`);
+  return script;
+}
+
+function runGuiScript(cfg, name, argv, timeoutMs = 60000) {
+  return execFileSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', guiScriptPath(cfg, name), ...argv], {
+    encoding: 'utf8', windowsHide: true, timeout: timeoutMs,
+  });
+}
+
+function guiOutPath(ext) {
+  const dir = path.join(tmpdir(), 'dsh_gui');
+  mkdirSync(dir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  return path.join(dir, `gui-${stamp}.${ext}`);
+}
+
+async function opGuiWindows(cfg, args = {}) {
+  const argv = ['-Json'];
+  if (args.all === true) argv.push('-All');
+  try {
+    const windows = JSON.parse(runGuiScript(cfg, 'list-windows.ps1', argv, 30000));
+    const lines = [`窗口 ${windows.length} 个：hwnd / 进程 / 尺寸@位置 / 标题`];
+    for (const w of windows) lines.push(`  ${w.hwndHex}  ${w.process}  ${w.rect.w}x${w.rect.h}@${w.rect.x},${w.rect.y}  ${w.title}`);
+    return { ok: true, exitCode: 0, windows, text: lines.join('\n') };
+  } catch (error) {
+    return { ok: false, exitCode: null, text: `列窗口失败：${error instanceof Error ? error.message : String(error)}` };
+  }
+}
+
+async function opGuiCapture(cfg, args = {}) {
+  const hwnd = String(args.hwnd ?? '').trim();
+  if (hwnd === '') return { ok: false, exitCode: null, text: 'hwnd 必填（十进制或 0x 十六进制）' };
+  const out = args.outFile ? path.resolve(String(args.outFile)) : guiOutPath('png');
+  const argv = [hwnd, out];
+  if (Number.isFinite(args.maxWidth) && args.maxWidth > 0) argv.push('-MaxWidth', String(args.maxWidth));
+  try {
+    const raw = runGuiScript(cfg, 'capture-window.ps1', argv, 60000);
+    return { ok: true, exitCode: 0, path: out, text: `${raw.trim()}\n图片：${out}` };
+  } catch (error) {
+    return { ok: false, exitCode: null, text: `截图失败：${error instanceof Error ? error.message : String(error)}` };
+  }
+}
+
+async function opGuiZoom(cfg, args = {}) {
+  const x = Number(args.x); const y = Number(args.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return { ok: false, exitCode: null, text: 'x / y 必须是数字' };
+  const out = args.outFile ? path.resolve(String(args.outFile)) : guiOutPath('png');
+  const argv = [String(Math.round(x)), String(Math.round(y)), out,
+    '-Size', String(Number.isFinite(args.size) ? Math.max(16, args.size) : 100),
+    '-Scale', String(Number.isFinite(args.scale) ? Math.max(1, args.scale) : 1)];
+  try {
+    const raw = runGuiScript(cfg, 'zoom-at.ps1', argv, 30000);
+    return { ok: true, exitCode: 0, path: out, text: `${raw.trim()}\n图片：${out}` };
+  } catch (error) {
+    return { ok: false, exitCode: null, text: `放大镜失败：${error instanceof Error ? error.message : String(error)}` };
+  }
+}
+
 const OPS = {  status: opStatus,
+  gui_windows: opGuiWindows,
+  gui_capture: opGuiCapture,
+  gui_zoom: opGuiZoom,
   github: opGithub,
   build: opBuild,
   flash: opFlash,
@@ -2365,6 +2432,53 @@ function buildToolDefinitions(cfg) {
         },
       },
       'github',
+    ),
+    tool(
+      cfg,
+      'gui_windows',
+      'List the top-level windows the agent may look at: handle, process, size and screen position, title, minimized flag. This is the only way the agent learns which windows exist — it never receives a whole-screen image. Pass `all: true` to include hidden helper windows (noisy; for debugging only).',
+      {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          all: { type: 'boolean', description: 'Include invisible/helper windows. Default false keeps only real, visible, non-minimized windows.' },
+        },
+      },
+      'gui_windows',
+    ),
+    tool(
+      cfg,
+      'gui_capture',
+      'Capture ONE window by handle and save it as PNG, then return the file path. Uses PrintWindow with PW_RENDERFULLCONTENT, so an occluded window still returns its own content (minimized, DRM-protected, exclusive-fullscreen windows return black). Prefer this over any full-screen capture: the agent only ever sees the window it names.',
+      {
+        type: 'object',
+        additionalProperties: false,
+        required: ['hwnd'],
+        properties: {
+          hwnd: { type: 'string', description: 'Window handle from gui_windows: decimal (`133728`) or hex (`0x20A60`).' },
+          outFile: { type: 'string', description: 'Optional absolute output path; default is a timestamped file under %TEMP%\\dsh_gui.' },
+          maxWidth: { type: 'number', description: 'Downscale so width does not exceed this (keeps aspect ratio). The model input cap is about 0.8 MP, so 900-1280 is a sane value.' },
+        },
+      },
+      'gui_capture',
+    ),
+    tool(
+      cfg,
+      'gui_zoom',
+      'Magnifier: given one screen point, return a small image (default 100x100 at native resolution) centred on it with a red crosshair, plus the `origin` that maps the image back to absolute coordinates. Use it when the agent can see something but cannot read it — it never has to guess coordinates blind.',
+      {
+        type: 'object',
+        additionalProperties: false,
+        required: ['x', 'y'],
+        properties: {
+          x: { type: 'number', description: 'Screen X (may be negative when a secondary display sits left of the primary).' },
+          y: { type: 'number', description: 'Screen Y.' },
+          size: { type: 'number', description: 'Edge length in pixels, default 100.' },
+          scale: { type: 'number', description: 'Nearest-neighbour upscale factor, default 1; 2-4 helps read small text.' },
+          outFile: { type: 'string', description: 'Optional absolute output path; default is a timestamped file under %TEMP%\\dsh_gui.' },
+        },
+      },
+      'gui_zoom',
     ),
     tool(
       cfg,
