@@ -381,6 +381,31 @@ export function apply(ctx) {
     },
   };
 
+  // 2026-10-31：补上 harness 自带 agent_send 缺的能力 —— 「把消息送到关着的会话」。
+  // agent_send 只认活动会话；本工具走 relay 的三级投递（含 sessionController.prompt 唤起）。
+  const defWake = {
+    name: 'dsh_wake_session',
+    description: 'Deliver an Agent message to a session by id, waking it if it is not loaded (agent_send cannot do this). Omit `to` to send to yourself.',
+    parameters: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        to: { type: 'string', description: 'session-<uuid> or bare uuid' },
+        text: { type: 'string' },
+      },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_a, v) => [{ type: 'text', text: typeof (v && v.text) === 'string' ? v.text : JSON.stringify(v) }],
+    },
+    async execute(args, exec) {
+      const self = callerId(exec);
+      const to = (args && args.to) || self;
+      if (!to) return { ok: false, text: '拿不到目标会话 id' };
+      const r = relay(to, 'notice', (args && args.text) || 'wake 测试', self || to);
+      return { ok: !!r.ok, to, via: r.via || 'live', text: (r.ok ? '已投递 → ' + to : '投递失败 → ' + to + '：' + (r.error || '')) };
+    },
+  };
+
   const defStatus = {    name: 'dsh_restart_status',
     description: 'Show the current restart request: phase, votes, pending peers, denial reasons, token state.',
     parameters: { type: 'object', additionalProperties: false, properties: {} },
@@ -439,6 +464,7 @@ export function apply(ctx) {
   ctx.effect(() => ctx.tools.register(defRequest), 'dsh-restart: dsh_restart');
   ctx.effect(() => ctx.tools.register(defCommit), 'dsh-restart: dsh_restart_commit');
   ctx.effect(() => ctx.tools.register(defStatus), 'dsh-restart: dsh_restart_status');
+  ctx.effect(() => ctx.tools.register(defWake), 'dsh-restart: dsh_wake_session');
   ctx.effect(() => ctx.tools.register(voteTool('allow', 'allowdshrestarting', 'Agree to the pending DSH restart.')), 'dsh-restart: allow');
   ctx.effect(() => ctx.tools.register(voteTool('deny', 'stopdshfromrestarting', 'Refuse the pending DSH restart; a reason is required.')), 'dsh-restart: deny');
 
