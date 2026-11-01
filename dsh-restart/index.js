@@ -577,7 +577,9 @@ export function apply(ctx) {
     if (out.state !== st) writeState(out.state);
     if (out.nudge) {
       const pending = pendingTargets(out.state);
-      notifyTargets(pending, 'notice', '重启表决还在等你：同意请 allowdshrestarting；拒绝请 stopdshfromrestarting 并附理由。', out.state.requester);
+      // 消息里带上请求 id：实测审批会话会因为读到旧请求（上一条已 denied）而说"没有待表决请求"，
+      // 带上 id 它就能对着这一条表决，而不是靠"最近一条"猜。
+      notifyTargets(pending, 'notice', '重启表决还在等你（请求 ' + out.state.id + '）：同意请 allowdshrestarting；拒绝请 stopdshfromrestarting 并附理由。', out.state.requester);
       log('nudged ' + pending.join(','));
     }
   }, 30000);
@@ -627,6 +629,7 @@ export function apply(ctx) {
     });
   } catch (e) { log('inject commands failed: ' + (e && e.message)); }
 }
+
 
 
 
