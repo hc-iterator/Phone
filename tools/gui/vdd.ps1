@@ -177,7 +177,18 @@ function Show-Status {
   foreach ($m in $mons) { "  $m" }
 }
 
-if ($Serve) { } elseif ($Status -or (-not $Add -and $Remove -lt 0)) { Show-Status; if (-not $Add -and $Remove -lt 0) { exit 0 } }
+  if ($Serve) {
+    # 单实例守卫：两个 keeper 并存会互相抢，实测会退化成"进程在、屏不亮"，
+    # 而且杀掉其中一个时那块屏会跟着消失（屏是跟着"加它的那个 keeper"活的）。
+    $mutex = New-Object System.Threading.Mutex($false, 'Global\PicoVddKeeper')
+    if (-not $mutex.WaitOne(0)) {
+      [Console]::Error.WriteLine('[vdd] 已有 keeper 在运行，本实例退出（避免双 keeper 抢设备）')
+      exit 0
+    }
+  } elseif ($Status -or (-not $Add -and $Remove -lt 0)) {
+    Show-Status
+    if (-not $Add -and $Remove -lt 0) { exit 0 }
+  }
 
 $h = [VddCtl]::Open()
 if ($h -eq [IntPtr]::Zero) {
