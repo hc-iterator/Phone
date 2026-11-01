@@ -465,7 +465,13 @@ export function apply(ctx) {
         log('commit 被拒：调用者 ' + caller0 + ' ≠ 发起者 ' + st.requester);
         return { ok: false, text: '只有发起本次重启请求的会话才能执行它（当前调用者不是发起者）。' };
       }
-      const next = Object.assign({}, st, { phase: 'committed', tokenUsed: true, pendingNotify: st.targets.concat(st.requester).filter(Boolean) });
+      const next = Object.assign({}, st, {
+      phase: 'committed',
+      tokenUsed: true,
+      // 「重启完成」不必再告诉重启审批员：它已经投过票、也知道自己批的是什么。
+      // 每重启一次就给它推一条"重启完成"是纯噪声（用户 2026-10-31 明确要求去掉）。
+      pendingNotify: st.targets.concat(st.requester).filter((id) => id && id !== APPROVAL_SESSION),
+    });
       writeState(next);
       const r = scheduleRestart();
       if (!r.ok) {
@@ -589,6 +595,7 @@ export function apply(ctx) {
     const summary = res ? '重启完成：旧 pid ' + res.oldPid + ' → 新 pid ' + res.newPid + '，监听=' + res.up : '重启完成（未读到结果文件）';
     const still = [];
     for (const sid of st.pendingNotify) {
+      if (sid === APPROVAL_SESSION) continue; // 审批员不收「重启完成」；见 writeState 处的说明
       const r = relay(sid, 'notice', summary, st.requester);
       if (!r.ok) still.push(sid);
     }
