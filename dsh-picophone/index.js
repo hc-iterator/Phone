@@ -2395,6 +2395,61 @@ async function opGuiVdd(cfg, args = {}) {
   }
 }
 
+async function opGuiUia(cfg, args = {}) {
+  const hwnd = String(args.hwnd ?? '').trim();
+  if (hwnd === '') return { ok: false, exitCode: null, text: 'hwnd 必填（先用 gui_windows 拿）' };
+  const cmd = String(args.cmd ?? 'tree');
+  const argv = [];
+  if (cmd === 'invoke') {
+    argv.push('-File', guiScriptPath(cfg, 'uia-invoke.ps1'), hwnd);
+    if (args.name) argv.push('-Name', String(args.name));
+    if (args.automationId) argv.push('-AutomationId', String(args.automationId));
+    if (args.type) argv.push('-Type', String(args.type));
+    if (args.method) argv.push('-Method', String(args.method));
+    if (args.value !== undefined) argv.push('-Value', String(args.value));
+    if (Number.isFinite(args.index)) argv.push('-Index', String(args.index));
+  } else {
+    argv.push('-File', guiScriptPath(cfg, 'uia-tree.ps1'), hwnd, '-Json');
+    if (Number.isFinite(args.maxDepth)) argv.push('-MaxDepth', String(args.maxDepth));
+    if (Number.isFinite(args.maxNodes)) argv.push('-MaxNodes', String(args.maxNodes));
+    if (args.onlyClickable === true) argv.push('-OnlyClickable');
+  }
+  try {
+    const raw = execFileSync('pwsh', ['-NoProfile', '-NonInteractive', ...argv], { encoding: 'utf8', windowsHide: true, timeout: 60000 });
+    return { ok: true, exitCode: 0, text: raw.trim() };
+  } catch (error) {
+    return { ok: false, exitCode: null, text: `UIA 失败：${error instanceof Error ? error.message : String(error)}` };
+  }
+}
+
+async function opGuiClick(cfg, args = {}) {
+  if (!Number.isFinite(args.x) || !Number.isFinite(args.y)) return { ok: false, exitCode: null, text: 'x/y 必填（屏幕坐标，可负）' };
+  const argv = ['-File', guiScriptPath(cfg, 'click-at.ps1'), String(args.x), String(args.y)];
+  if (args.button) argv.push('-Button', String(args.button));
+  if (args.double === true) argv.push('-DoubleClick');
+  if (args.restore === false) argv.push('-Restore:$false');
+  try {
+    const raw = execFileSync('pwsh', ['-NoProfile', '-NonInteractive', ...argv], { encoding: 'utf8', windowsHide: true, timeout: 30000 });
+    return { ok: true, exitCode: 0, text: raw.trim() };
+  } catch (error) {
+    return { ok: false, exitCode: null, text: `点击失败：${error instanceof Error ? error.message : String(error)}` };
+  }
+}
+
+async function opGuiVerify(cfg, args = {}) {
+  const hwnd = String(args.hwnd ?? '').trim();
+  const command = String(args.command ?? '').trim();
+  if (hwnd === '' || command === '') return { ok: false, exitCode: null, text: 'hwnd 与 command 都必填（command 是要执行的命令文本）' };
+  const argv = ['-File', guiScriptPath(cfg, 'verify-action.ps1'), hwnd, '-Command', command];
+  if (Number.isFinite(args.threshold)) argv.push('-Threshold', String(args.threshold));
+  if (Number.isFinite(args.settleMs)) argv.push('-SettleMs', String(args.settleMs));
+  try {
+    const raw = execFileSync('pwsh', ['-NoProfile', '-NonInteractive', ...argv], { encoding: 'utf8', windowsHide: true, timeout: 90000 });
+    return { ok: true, exitCode: 0, text: raw.trim() };
+  } catch (error) {
+    return { ok: false, exitCode: null, text: `校验失败：${error instanceof Error ? error.message : String(error)}` };
+  }
+}
 async function opGuiBrowser(cfg, args = {}) {
   const cmd = String(args.cmd ?? 'tree');
   if (!['list', 'tree', 'click', 'type', 'eval'].includes(cmd)) return { ok: false, exitCode: null, text: `cmd 必须是 list/tree/click/type/eval` };
@@ -2417,6 +2472,9 @@ const OPS = {  status: opStatus,
   gui_place: opGuiPlace,
   gui_vdd: opGuiVdd,
   gui_browser: opGuiBrowser,
+  gui_uia: opGuiUia,
+  gui_click: opGuiClick,
+  gui_verify: opGuiVerify,
   gui_capture: opGuiCapture,
   gui_zoom: opGuiZoom,
   github: opGithub,
@@ -2612,6 +2670,65 @@ function buildToolDefinitions(cfg) {
       },
       'gui_browser',
     ),
+      tool(
+        cfg,
+        'gui_uia',
+        'Read or act on a window through UI Automation. `tree` returns every control with its type, name, AutomationId and exact rect; `invoke` triggers a control by AutomationId or name WITHOUT moving the mouse or stealing focus — prefer this over coordinate clicking. Works well on Win32/UWP/WPF apps; Chromium web content is NOT exposed (use gui_browser/CDP instead).',
+        {
+          type: 'object',
+          additionalProperties: false,
+          required: ['hwnd'],
+          properties: {
+            hwnd: { type: 'string', description: 'Window handle from gui_windows.' },
+            cmd: { type: 'string', enum: ['tree', 'invoke'], description: 'tree (default) or invoke.' },
+            name: { type: 'string', description: 'invoke: control name/text, e.g. "7" or "确定".' },
+            automationId: { type: 'string', description: 'invoke: AutomationId, more stable than the label.' },
+            type: { type: 'string', description: 'invoke: restrict to a ControlType such as Button.' },
+            method: { type: 'string', enum: ['invoke', 'value', 'select'], description: 'invoke: pattern to use; default invoke.' },
+            value: { type: 'string', description: 'invoke+method=value: text to write.' },
+            index: { type: 'number', description: 'invoke: which match to use when several match; default 0.' },
+            maxDepth: { type: 'number', description: 'tree: recursion depth; default 6.' },
+            maxNodes: { type: 'number', description: 'tree: node cap; default 400.' },
+            onlyClickable: { type: 'boolean', description: 'tree: only controls that support Invoke.' },
+          },
+        },
+        'gui_uia',
+      ),
+      tool(
+        cfg,
+        'gui_click',
+        'Click one screen point with real input injection. This moves the real cursor and needs the target to be foreground, so it steals focus — use it only when gui_uia/gui_browser cannot act (canvas, custom-drawn UI). Pair it with gui_verify.',
+        {
+          type: 'object',
+          additionalProperties: false,
+          required: ['x', 'y'],
+          properties: {
+            x: { type: 'number', description: 'Screen X in the virtual-desktop coordinate space (may be negative).' },
+            y: { type: 'number', description: 'Screen Y.' },
+            button: { type: 'string', enum: ['left', 'right', 'middle'], description: 'Default left.' },
+            double: { type: 'boolean', description: 'Double click.' },
+            restore: { type: 'boolean', description: 'Put the cursor back afterwards; default true.' },
+          },
+        },
+        'gui_click',
+      ),
+      tool(
+        cfg,
+        'gui_verify',
+        'Prove that an action actually happened: capture the window, run the command, capture again, and report the changed-pixel ratio. Verdict changed/unchanged is explicit — never assume a click worked. Uses screen capture when the window is foreground (avoids the stale-frame problem of WinUI3 apps).',
+        {
+          type: 'object',
+          additionalProperties: false,
+          required: ['hwnd', 'command'],
+          properties: {
+            hwnd: { type: 'string', description: 'Window handle to watch.' },
+            command: { type: 'string', description: 'Command line to run between the two captures, e.g. "pwsh -File tools/gui/click-at.ps1 2000 300".' },
+            threshold: { type: 'number', description: 'Percent of pixels that must change; default 0.1.' },
+            settleMs: { type: 'number', description: 'Wait after the action before the second capture; default 600.' },
+          },
+        },
+        'gui_verify',
+      ),
     tool(
       cfg,
       'build',
@@ -3070,5 +3187,6 @@ export async function apply(ctx, rawConfig) {
     ctx.logger.info(`dsh-picophone: 已挂载 ${definitions.length} 个工具 + 1 个命令（root=${cfg.root}）`);
   }
 }
+
 
 
