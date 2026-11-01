@@ -199,9 +199,15 @@ try {
   if ($Serve) {
     $logPath = Join-Path $env:TEMP 'vdd-keeper.log'
     "=== keeper 启动 $(Get-Date) ===" | Out-File -FilePath $logPath -Encoding utf8 -Append
-    # 先确保有一块屏
-    $existing = [VddCtl]::Add($h)
-    "ADD → $existing" | Out-File -FilePath $logPath -Encoding utf8 -Append
+    # 先确保有一块屏。实测：DSH 重启后 keeper 一启动就 ADD 常常返回 -1（驱动还没就绪），
+    # 结果"进程在、屏不出来"。这里重试到真的加出来为止。
+    $existing = -1
+    for ($try = 1; $try -le 15; $try++) {
+      $existing = [VddCtl]::Add($h)
+      "ADD#$try -> $existing" | Out-File -FilePath $logPath -Encoding utf8 -Append
+      if ($existing -ge 0) { break }
+      Start-Sleep -Seconds 2
+    }
     $n = 0
     try {
       while ($true) {
@@ -224,6 +230,7 @@ finally { [void][VddCtl]::CloseHandle($h) }
 
 Start-Sleep -Milliseconds 800
 Show-Status
+
 
 
 
