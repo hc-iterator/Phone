@@ -52,7 +52,7 @@ while ((Get-Date) -lt $deadline) {
   Start-Sleep -Milliseconds 400
   try { $p.Refresh() } catch { break }
   if ($p -and $p.HasExited) { [Console]::Error.WriteLine('[launch] 进程已退出'); exit 4 }
-  $list = & pwsh -NoProfile -File (Join-Path $dir 'list-windows.ps1') -Json 2>$null | ConvertFrom-Json
+  $list = & pwsh -NoProfile -File (Join-Path $dir 'list-windows.ps1') -All -Json 2>$null | ConvertFrom-Json
   $w = if ($p) { $list | Where-Object { $_.pid -eq $p.Id } | Select-Object -First 1 }
        elseif ($TitleMatch -ne '') { $list | Where-Object { $_.title -match $TitleMatch } | Select-Object -First 1 }
        else { $list | Where-Object { $before -notcontains $_.hwndHex } | Select-Object -First 1 }
@@ -61,8 +61,6 @@ while ((Get-Date) -lt $deadline) {
     # 发现窗口的第一件事是把它最小化，挪好再还原 —— 这样闪的是任务栏，不是用户眼前。
     Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class LSW { [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c); }' -ErrorAction SilentlyContinue
     $hh = if ($w.hwndHex -match '^0x') { [IntPtr]([Convert]::ToInt64($w.hwndHex,16)) } else { [IntPtr][int64]$w.hwndHex }
-    [void][LSW]::ShowWindow($hh, 6)   # SW_MINIMIZE
-    Start-Sleep -Milliseconds 120
     $out = & pwsh -NoProfile -File (Join-Path $dir 'place-window.ps1') $w.hwndHex -Virtual 2>&1
     [void][LSW]::ShowWindow($hh, 9)   # SW_RESTORE
     "window hwnd=$($w.hwndHex) title=$($w.title)"
@@ -72,6 +70,11 @@ while ((Get-Date) -lt $deadline) {
   }
 }
 if (-not $placed) { [Console]::Error.WriteLine("[launch] 等不到窗口（${WaitSeconds}s）"); exit 5 }
+
+
+
+
+
 
 
 

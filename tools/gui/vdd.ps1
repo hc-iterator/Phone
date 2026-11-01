@@ -173,14 +173,28 @@ function Show-Status {
     if ($null -eq $d) { break }
     $mons += $d
   }
-  "显示器(适配器级): $($mons.Count)"
+"显示器(适配器级): $($mons.Count)"
+  try {
+    Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+    $screens = [System.Windows.Forms.Screen]::AllScreens
+    "实际屏幕数: $($screens.Count)"
+    foreach ($s in $screens) { "  $($s.DeviceName)  $($s.Bounds.Width)x$($s.Bounds.Height) @$($s.Bounds.X),$($s.Bounds.Y)  primary=$($s.Primary)" }
+  } catch { }
   foreach ($m in $mons) { "  $m" }
 }
 
   if ($Serve) {
+    # 总开关：没有这个标志文件就直接退出。
+    # 原因：别的会话会反复把 keeper 拉起来，而每插一次虚拟显示器，Windows 就会重排窗口
+    # （用户看到的就是“到处弹窗”）。有开关后，乱拉也只会空转，不会插屏。
+    $enableFlag = Join-Path $env:TEMP 'picophone-vdd.enable'
+    if (-not (Test-Path $enableFlag)) {
+      [Console]::Error.WriteLine('[vdd] 未启用（缺 picophone-vdd.enable），本实例不插屏、直接退出')
+      exit 0
+    }
     # 单实例守卫：两个 keeper 并存会互相抢，实测会退化成"进程在、屏不亮"，
     # 而且杀掉其中一个时那块屏会跟着消失（屏是跟着"加它的那个 keeper"活的）。
-    $mutex = New-Object System.Threading.Mutex($false, 'Global\PicoVddKeeper')
+    $mutex = New-Object System.Threading.Mutex($false, 'PicoVddKeeper')
     if (-not $mutex.WaitOne(0)) {
       [Console]::Error.WriteLine('[vdd] 已有 keeper 在运行，本实例退出（避免双 keeper 抢设备）')
       exit 0
@@ -241,6 +255,9 @@ finally { [void][VddCtl]::CloseHandle($h) }
 
 Start-Sleep -Milliseconds 800
 Show-Status
+
+
+
 
 
 

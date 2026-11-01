@@ -93,11 +93,21 @@ $ny = if ($Y -ne [int]::MinValue) { $Y } else { $target.Bounds.Y + 40 }
 $nw = if ($W -gt 0) { $W } else { [Math]::Min($curW, $target.Bounds.Width - 80) }
 $nh = if ($H -gt 0) { $H } else { [Math]::Min($curH, $target.Bounds.Height - 80) }
 
-$ok = [WinPlace]::Move($handle, $nx, $ny, $nw, $nh)
-if (-not $ok) {
-  [Console]::Error.WriteLine('[place] SetWindowPos 失败（窗口可能已被销毁）')
+# 实测：刚启动的程序 SetWindowPos 会偶发失败（窗口正在重建/还没稳定），
+# 一次失败就放弃会让窗口留在主屏上（用户会看到）。所以重试并**核对结果**。
+$ok = $false
+for ($try = 1; $try -le 5; $try++) {
+  $ok = [WinPlace]::Move($handle, $nx, $ny, $nw, $nh)
+  Start-Sleep -Milliseconds 120
+  [void][WinPlace]::GetWindowRect($handle, [ref]$r)
+  $nowX = $r.Left; $nowY = $r.Top
+  if ($nowX -eq $nx -and $nowY -eq $ny) { break }
+  if (-not $ok) { Start-Sleep -Milliseconds 200 }
+}
+[void][WinPlace]::GetWindowRect($handle, [ref]$r)
+if ($r.Left -ne $nx -or $r.Top -ne $ny) {
+  [Console]::Error.WriteLine("[place] 挪动没生效：想去 $nx,$ny，实际 $($r.Left),$($r.Top)（窗口可能已销毁或拒绝移动）")
   exit 3
 }
-
-[void][WinPlace]::GetWindowRect($handle, [ref]$r)
 "placed hwnd=$($handle.ToInt64()) -> screen=$($target.DeviceName) rect=$($r.Left),$($r.Top) $($r.Right - $r.Left)x$($r.Bottom - $r.Top)"
+
