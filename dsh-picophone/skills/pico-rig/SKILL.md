@@ -55,7 +55,7 @@ description: Use BEFORE the first pico_* tool call or /pico command in a session
 
 ## 5. 串口后门发命令的**正确写法**（2026-11-03 踩过）
 
-`pico_serial` / `pico_console` 的 `escapes` 解释的是 **C 风格转义**：`\r` `\n` `\t` `\0` `\x1b`。
+`pico_serial` / `pico_console` 的 `escapes` **两种写法都认**：C 风格 `\r` `\n` `\t` `\0` `\x1b`，以及 PowerShell 反引号 `` `r `` `` `n ``（用户要求保留原有写法）。
 **不是** PowerShell 的反引号转义 —— `` `r `` 会被当成字面的两个字符发出去，
 板子收到的是 `B`r` 这种垃圾，于是报 `unknown command`。
 
@@ -68,3 +68,4 @@ pico_serial({ target: "sampler", send: "B`r", escapes: true })
 
 同理，probe 板的后门要先发 `\x1b\x1b`（ESC ESC）再发 `B`：
 `send: "\x1b\x1bB\r", escapes: true`。
+

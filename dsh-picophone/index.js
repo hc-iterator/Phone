@@ -1390,7 +1390,8 @@ async function sessionOpen(cfg, args, ctx = {}) {
 }
 
 async function sessionSend(cfg, s, args) {
-  const res = await sessionRequest(s, { cmd: 'send', data: String(args.data ?? ''), escapes: args.escapes === true }, 15000);
+  const payload = args.escapes === true ? decodeSendEscapes(args.data ?? '') : String(args.data ?? '');
+        const res = await sessionRequest(s, { cmd: 'send', data: payload, escapes: false }, 15000);
   if (res.ok) sessionTouch(cfg, s);
   return { ok: res.ok, text: res.ok ? `已发送 ${res.bytes ?? 0} 字节到 ${s.port}。` : res.text };
 }
@@ -1755,6 +1756,19 @@ async function opFlash(cfg, args = {}, ctx = {}) {
   return { ok, exitCode: res ? res.exitCode : null, text: describeRun(`flash ${used || method} ${board || 'dut'}`, res ?? { exitCode: null, timedOut: false, stdout: '', stderr: '', durationMs: 0, ok: false }, cfg, extra), json: { flash: entry, volume } };
 }
 
+/**
+ * 把两种转义写法都解开（用户 2026-11-03 要求：原来 PowerShell 写法保留，再加 C 风格）：
+ *   - PowerShell 反引号：`r `n `t `0 `e `` `
+ *   - C 风格（serial.ps1 -Escapes 认的）：\r \n \t \0 \x1b
+ * 解完就不再传 -Escapes，避免二次解释。
+ */
+function decodeSendEscapes(input) {
+  const psMap = { n: '\n', r: '\r', t: '\t', '0': '\0', e: '\x1b', '`': '`' };
+  let out = String(input).replace(/`([nrt0e`])/g, (_m, c) => psMap[c] ?? _m);
+  const cMap = { n: '\n', r: '\r', t: '\t', '0': '\0' };
+  out = out.replace(/\\(x[0-9a-fA-F]{2}|[nrt0])/g, (m, c) => (c[0] === 'x' ? String.fromCharCode(parseInt(c.slice(1), 16)) : (cMap[c] ?? m)));
+  return out;
+}
 async function opSerial(cfg, args = {}, ctx = {}) {
   const timeoutMs = Number.isFinite(args.timeoutMs) ? args.timeoutMs : cfg.shortTimeoutMs;
   const scriptArgs = [];
@@ -1779,8 +1793,9 @@ async function opSerial(cfg, args = {}, ctx = {}) {
   const seconds = Number.isFinite(args.seconds) ? args.seconds : 5;
   if (args.list !== true) scriptArgs.push('-Seconds', String(seconds));
   if (args.send !== undefined && args.send !== null && String(args.send) !== '') {
-    scriptArgs.push('-Send', String(args.send));
-    if (args.escapes === true) scriptArgs.push('-Escapes');
+    // 两种转义写法都认（PowerShell 反引号 + C 风格）；解码在本层完成，不能再传 -Escapes
+    const sendPayload = args.escapes === true ? decodeSendEscapes(args.send) : String(args.send);
+    scriptArgs.push('-Send', sendPayload);
   }
   // serial.ps1 只在给了 -OutFile 时才把正文落盘（stdout 里只有 "READ n bytes"）
   // ⇒ 默认自己给一个 %TEMP% 下的文件，保证读到的字节一定能看见。
@@ -2798,7 +2813,7 @@ function buildToolDefinitions(cfg) {
           pid: { type: 'string', description: 'Custom PID, with vid.' },
           seconds: { type: 'number', description: 'Capture window, default 5 s.' },
           send: { type: 'string', description: 'Text written after opening. The probe backdoor needs a CR terminator.' },
-          escapes: { type: 'boolean', description: 'Interpret send as C-style escapes: \r, \n, \t, \0, \x1b (so "B\r" REALLY sends B plus CR). Note: PowerShell backtick escapes like `` `r `` are NOT interpreted — that form sends the literal characters.' },
+          escapes: { type: 'boolean', description: 'Interpret escapes. BOTH styles are accepted: PowerShell backtick (`r `n `t `0 `e) and C style (\\r \\n \\t \\0 \\x1b). "B`r" and "B\\r" both send B plus CR.'   },
           outFile: { type: 'string', description: 'Where to save the capture. Always lands under %TEMP%: a relative path resolves there, and an absolute path outside it is re-fenced into it (reported as 围栏). Defaults to a timestamped file in %TEMP%, whose contents are echoed back either way.' },
           list: { type: 'boolean', description: 'Only enumerate ports and their VID/PID.' },
           timeoutMs: { type: 'number', description: 'Hard timeout, default 120000 ms.' },
@@ -2821,7 +2836,7 @@ function buildToolDefinitions(cfg) {
           port: { type: 'string', description: 'Explicit COM port; wins over target.' },
           baud: { type: 'number', description: 'Baud rate; USB CDC ignores it. Default 115200.' },
           data: { type: 'string', description: 'Text to send (`send` and `expect`).' },
-          escapes: { type: 'boolean', description: 'Interpret data as C-style escapes: \r, \n, \t, \0, \x1b (so "B\r" REALLY sends B plus CR). PowerShell backtick escapes are NOT interpreted.' },
+          escapes: { type: 'boolean', description: 'Interpret escapes. BOTH styles are accepted: PowerShell backtick (`r `n `t `0 `e) and C style (\\r \\n \\t \\0 \\x1b).'   },
           until: { type: 'string', description: 'Regular expression that ends the wait early (`read` and `expect`).' },
           timeoutMs: { type: 'number', description: 'How long to wait for data before reporting a timeout; default 2000 ms.' },
           stamp: { type: 'boolean', description: 'Prefix every line with its arrival time; default true. Set false for byte-exact output.' },
@@ -3187,6 +3202,9 @@ export async function apply(ctx, rawConfig) {
     ctx.logger.info(`dsh-picophone: 已挂载 ${definitions.length} 个工具 + 1 个命令（root=${cfg.root}）`);
   }
 }
+
+
+
 
 
 
