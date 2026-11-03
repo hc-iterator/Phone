@@ -2798,7 +2798,7 @@ function buildToolDefinitions(cfg) {
           pid: { type: 'string', description: 'Custom PID, with vid.' },
           seconds: { type: 'number', description: 'Capture window, default 5 s.' },
           send: { type: 'string', description: 'Text written after opening. The probe backdoor needs a CR terminator.' },
-          escapes: { type: 'boolean', description: 'Interpret send as a PowerShell escape sequence, so `` `r `` becomes CR.' },
+          escapes: { type: 'boolean', description: 'Interpret send as C-style escapes: \r, \n, \t, \0, \x1b (so "B\r" REALLY sends B plus CR). Note: PowerShell backtick escapes like `` `r `` are NOT interpreted — that form sends the literal characters.' },
           outFile: { type: 'string', description: 'Where to save the capture. Always lands under %TEMP%: a relative path resolves there, and an absolute path outside it is re-fenced into it (reported as 围栏). Defaults to a timestamped file in %TEMP%, whose contents are echoed back either way.' },
           list: { type: 'boolean', description: 'Only enumerate ports and their VID/PID.' },
           timeoutMs: { type: 'number', description: 'Hard timeout, default 120000 ms.' },
@@ -2821,7 +2821,7 @@ function buildToolDefinitions(cfg) {
           port: { type: 'string', description: 'Explicit COM port; wins over target.' },
           baud: { type: 'number', description: 'Baud rate; USB CDC ignores it. Default 115200.' },
           data: { type: 'string', description: 'Text to send (`send` and `expect`).' },
-          escapes: { type: 'boolean', description: 'Interpret data as a PowerShell escape sequence, so `` `r `` becomes CR.' },
+          escapes: { type: 'boolean', description: 'Interpret data as C-style escapes: \r, \n, \t, \0, \x1b (so "B\r" REALLY sends B plus CR). PowerShell backtick escapes are NOT interpreted.' },
           until: { type: 'string', description: 'Regular expression that ends the wait early (`read` and `expect`).' },
           timeoutMs: { type: 'number', description: 'How long to wait for data before reporting a timeout; default 2000 ms.' },
           stamp: { type: 'boolean', description: 'Prefix every line with its arrival time; default true. Set false for byte-exact output.' },
@@ -3187,6 +3187,7 @@ export async function apply(ctx, rawConfig) {
     ctx.logger.info(`dsh-picophone: 已挂载 ${definitions.length} 个工具 + 1 个命令（root=${cfg.root}）`);
   }
 }
+
 
 
 
