@@ -23,7 +23,7 @@ description: Use before operating a desktop window (click, type, read UI) or whe
 
 ## 不打扰用户
 
-- `gui_launch` / `gui_place` 把窗口放到**虚拟屏**（`DISPLAY19 @1920,0`），用户看不见；
+- `gui_launch` / `gui_place` 把窗口放到**虚拟屏**（`非主屏 @1920,0`），用户看不见；
 - 两者都用 `SWP_NOACTIVATE`，**不抢焦点**；
 - 虚拟屏靠 `gui_vdd` + keeper 保活；**不要频繁插拔**——每插一次 Windows 会重排所有窗口。
 
@@ -51,3 +51,23 @@ pwsh -File tools/gui/find-color.ps1 0x1234 '#005a9e' -Tolerance 20
 
 - `DeepSeekCode/docs/图形化能力-2026-11-01.md` —— 完整能力说明与三个坑的来龙去脉
 - `DeepSeekCode/docs/图形化-用法速查.md` —— 每个工具的调用示例
+## 三级恢复（做完动作必须把环境还回去）
+
+Agent 动一次桌面会碰三样东西，用户立刻能感觉到：
+
+| 级别 | 现象 | 谁负责 |
+|---|---|---|
+| ① 鼠标 | "鼠标自己跑了" | `env-guard.ps1` + `click-at.ps1` |
+| ② 焦点 | 用户在打的字跑进别的窗口 | `env-guard.ps1 -Target` |
+| ③ 输入法 | 中/英模式、全半角被改，下个字就打错 | `env-guard.ps1`（键盘布局 + IME 转换模式） |
+
+`gui_click` / `gui_launch` / `gui_uia invoke` 已内置：动作前快照、动作后恢复，
+默认开启；`restore: false` 可关。
+
+安全规则：**只有当现在的前台既不是快照值、也不是我们操作的目标时，才什么都不做** ——
+用户在动作期间自己切了窗口，硬抢回来比不恢复更烦。
+
+## 启动不闪主屏
+
+`gui_launch` 现在是：**隐藏启动 → 挪到虚拟屏 → SW_SHOWNOACTIVATE 显示**。
+窗口在主屏上从头到尾不出现（隐藏状态下 SetWindowPos 有效，已验证）。

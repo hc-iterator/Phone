@@ -63,6 +63,24 @@ function guiOutPath(ext) {
   return path.join(dir, `gui-${stamp}.${ext}`);
 }
 
+// ── 三级恢复：鼠标 + 焦点 + 输入法 ────────────────────────────────────────────
+// 只恢复鼠标是不够的：焦点没回来用户还得自己点一下，输入法没回来他下一个字就打错。
+// 这两步都走 tools/gui/env-guard.ps1；失败一律吞掉（恢复不了不该让动作本身失败）。
+function envGuard(cfg, argv) {
+  try {
+    execFileSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', guiScriptPath(cfg, 'env-guard.ps1'), ...argv], {
+      encoding: 'utf8', windowsHide: true, timeout: 20000, stdio: ['ignore', 'pipe', 'ignore'],
+    });
+  } catch { /* best effort */ }
+}
+
+function envSnapshot(cfg) { envGuard(cfg, ['-Snapshot', '-Quiet']); }
+function envRestore(cfg, target) {
+  const argv = ['-Restore', '-Quiet'];
+  if (target) argv.push('-Target', String(target));
+  envGuard(cfg, argv);
+}
+
 async function opGuiWindows(cfg, args = {}) {
   const argv = ['-Json'];
   if (args.all === true) argv.push('-All');
@@ -113,11 +131,16 @@ async function opGuiLaunch(cfg, args = {}) {
   const argv = ['-File', guiScriptPath(cfg, 'launch-on-vd.ps1'), file];
   if (Array.isArray(args.args) && args.args.length > 0) argv.push('-Args', ...args.args.map(String));
   if (Number.isFinite(args.waitSeconds)) argv.push('-WaitSeconds', String(args.waitSeconds));
+  // 启动会短暂影响前台/光标 ⇒ 动作完把环境还回去，用户不会觉得"鼠标自己跑了"
+  const wantRestore = args.restore !== false;
+  if (wantRestore) envSnapshot(cfg);
   try {
     const raw = execFileSync('pwsh', ['-NoProfile', '-NonInteractive', ...argv], { encoding: 'utf8', windowsHide: true, timeout: 60000 });
     return { ok: true, exitCode: 0, text: raw.trim() };
   } catch (error) {
     return { ok: false, exitCode: null, text: `启动失败：${error instanceof Error ? error.message : String(error)}` };
+  } finally {
+    if (wantRestore) envRestore(cfg, null);
   }
 }
 
@@ -169,11 +192,16 @@ async function opGuiUia(cfg, args = {}) {
     if (Number.isFinite(args.maxNodes)) argv.push('-MaxNodes', String(args.maxNodes));
     if (args.onlyClickable === true) argv.push('-OnlyClickable');
   }
+  // UIA invoke 虽然不动鼠标，但可能让目标窗口抢到焦点、也可能改掉输入法状态 ⇒ 同样做三级恢复
+  const wantRestore = cmd === 'invoke' && args.restore !== false;
+  if (wantRestore) envSnapshot(cfg);
   try {
     const raw = execFileSync('pwsh', ['-NoProfile', '-NonInteractive', ...argv], { encoding: 'utf8', windowsHide: true, timeout: 60000 });
     return { ok: true, exitCode: 0, text: raw.trim() };
   } catch (error) {
     return { ok: false, exitCode: null, text: `UIA 失败：${error instanceof Error ? error.message : String(error)}` };
+  } finally {
+    if (wantRestore) envRestore(cfg, hwnd);
   }
 }
 
@@ -183,11 +211,16 @@ async function opGuiClick(cfg, args = {}) {
   if (args.button) argv.push('-Button', String(args.button));
   if (args.double === true) argv.push('-DoubleClick');
   if (args.restore === false) argv.push('-Restore:$false');
+  // 三级恢复：点之前记住鼠标/焦点/输入法，点完还回去（click-at.ps1 本身只管鼠标）
+  const wantRestore = args.restore !== false;
+  if (wantRestore) envSnapshot(cfg);
   try {
     const raw = execFileSync('pwsh', ['-NoProfile', '-NonInteractive', ...argv], { encoding: 'utf8', windowsHide: true, timeout: 30000 });
     return { ok: true, exitCode: 0, text: raw.trim() };
   } catch (error) {
     return { ok: false, exitCode: null, text: `点击失败：${error instanceof Error ? error.message : String(error)}` };
+  } finally {
+    if (wantRestore) envRestore(cfg, null);
   }
 }
 
@@ -437,4 +470,6 @@ export async function apply(ctx, rawConfig) {
     ctx.effect(() => ctx.tools.register(definition), `dsh-gui: ${definition.name}`);
   }
 }
+
+
 
