@@ -42,7 +42,11 @@ $dir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $before = (& pwsh -NoProfile -File (Join-Path $dir 'list-windows.ps1') -Json 2>$null | ConvertFrom-Json) | ForEach-Object { $_.hwndHex }
 $isProtocol = $File -match '^[A-Za-z][A-Za-z0-9+.-]*:$'
 if ($isProtocol) { Start-Process -FilePath $File; $p = $null }
-else { $p = Start-Process -FilePath $File -ArgumentList $Args -PassThru }
+else {
+  # 隐藏启动：窗口先不显示 ⇒ 主屏上完全不会闪；等挪到虚拟屏后再显示。
+  # 实测：隐藏状态下 SetWindowPos 有效，显示后位置保持（记事本 1960,40 验证通过）。
+  $p = Start-Process -FilePath $File -ArgumentList $Args -WindowStyle Hidden -PassThru
+}
 "started pid=$($p.Id) file=$File"
 if ($NoWait) { exit 0 }
 
@@ -61,7 +65,7 @@ while ((Get-Date) -lt $deadline) {
     # 发现窗口的第一件事是把它最小化，挪好再还原 —— 这样闪的是任务栏，不是用户眼前。
     Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class LSW { [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c); }' -ErrorAction SilentlyContinue
     $hh = if ($w.hwndHex -match '^0x') { [IntPtr]([Convert]::ToInt64($w.hwndHex,16)) } else { [IntPtr][int64]$w.hwndHex }
-    $out = & pwsh -NoProfile -File (Join-Path $dir 'place-window.ps1') $w.hwndHex -Virtual 2>&1
+    $out = & pwsh -NoProfile -File (Join-Path $dir 'place-window.ps1') $w.hwndHex -Virtual -Show 2>&1
     [void][LSW]::ShowWindow($hh, 9)   # SW_RESTORE
     "window hwnd=$($w.hwndHex) title=$($w.title)"
     $out | ForEach-Object { "  $_" }
@@ -70,6 +74,8 @@ while ((Get-Date) -lt $deadline) {
   }
 }
 if (-not $placed) { [Console]::Error.WriteLine("[launch] 等不到窗口（${WaitSeconds}s）"); exit 5 }
+
+
 
 
 

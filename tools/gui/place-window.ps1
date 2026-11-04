@@ -30,7 +30,8 @@ param(
   [int]$Y = [int]::MinValue,
   [int]$W = 0,
   [int]$H = 0,
-  [int]$MonitorIndex = -1
+  [int]$MonitorIndex = -1,
+  [switch]$Show
 )
 
 $ErrorActionPreference = 'Stop'
@@ -109,5 +110,7 @@ if ($r.Left -ne $nx -or $r.Top -ne $ny) {
   [Console]::Error.WriteLine("[place] 挪动没生效：想去 $nx,$ny，实际 $($r.Left),$($r.Top)（窗口可能已销毁或拒绝移动）")
   exit 3
 }
-"placed hwnd=$($handle.ToInt64()) -> screen=$($target.DeviceName) rect=$($r.Left),$($r.Top) $($r.Right - $r.Left)x$($r.Bottom - $r.Top)"
+if ($Show) { [void][WinPlace]::ShowWindow($handle, 4) }   # SW_SHOWNOACTIVATE：显示但不抢焦点
+"placed hwnd=$($handle.ToInt64()) -> screen=$($target.DeviceName) rect=$($r.Left),$($r.Top) $($r.Right - $r.Left)x$($r.Bottom - $r.Top) show=$($Show.IsPresent)"
+
 
