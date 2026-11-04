@@ -17,10 +17,16 @@
             config:
               prefix: >-
                 You are a coding agent powered by the {{model}} model.
+
+                用户介绍：用户是一个初中生，擅长信息技术，并提示Agent不要在回答中输出英语。
           - id: agent-instructions
             name: '@deepseek-ai/dsh-agent-instructions'
             config:
               maxBytes: 65536
+          # 图形化 / 屏幕操作：从 dsh-picophone 拆出来的独立插件。
+          # id 必须唯一（gui），否则与台架插件的行冲突。
+          - id: gui
+            name: '@local/dsh-gui'
           # Shell：只用标准的 tool-bash / tool-pwsh（按平台二选一）。
           # 2026-10-11 起本模式不再挂持久终端那一组（pty / terminal-bash /
           #   persistent-bash / terminal-pwsh / persistent-pwsh），原因两条：

@@ -1,0 +1,15 @@
+{
+  "name": "@local/dsh-gui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Graphical / screen-operation capabilities: window list, per-window capture, magnifier, virtual display, UIA, CDP, click, verified actions",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "README.md"
+  ]
+}
