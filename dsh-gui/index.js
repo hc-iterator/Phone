@@ -427,6 +427,10 @@ function buildToolDefinitions(cfg) {
       ),  ];
 }
 
+// cordis 要求：直接访问 ctx.tools 前必须在插件顶层声明依赖的 service。
+// 2026-11-04 修：缺这一行 ⇒ 预设挂载失败 ⇒ 所有含 gui 行的会话都无法 resume。
+export const inject = ['tools'];
+
 export async function apply(ctx, rawConfig) {
   const cfg = resolveConfig(rawConfig);
   for (const definition of buildToolDefinitions(cfg)) {
