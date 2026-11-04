@@ -255,7 +255,7 @@ function buildToolDefinitions(cfg) {
   return [    tool(
       cfg,
       'gui_windows',
-      'List the top-level windows the agent may look at: handle, process, size and screen position, title, minimized flag. This is the only way the agent learns which windows exist — it never receives a whole-screen image. Pass `all: true` to include hidden helper windows (noisy; for debugging only).',
+      'List top-level windows (handle, process, position, title). Entry point: everything else needs a handle.',
       {
         type: 'object',
         additionalProperties: false,
@@ -268,7 +268,7 @@ function buildToolDefinitions(cfg) {
     tool(
       cfg,
       'gui_capture',
-      'Capture ONE window by handle and save it as PNG, then return the file path. Uses PrintWindow with PW_RENDERFULLCONTENT, so an occluded window still returns its own content (minimized, DRM-protected, exclusive-fullscreen windows return black). Prefer this over any full-screen capture: the agent only ever sees the window it names.',
+      'Capture ONE window by handle to PNG. Reads occluded windows; black for minimized/DRM/fullscreen. Never capture the whole screen.',
       {
         type: 'object',
         additionalProperties: false,
@@ -285,7 +285,7 @@ function buildToolDefinitions(cfg) {
     tool(
       cfg,
       'gui_zoom',
-      'Magnifier: given one screen point, return a small image (default 100x100 at native resolution) centred on it with a red crosshair, plus the `origin` that maps the image back to absolute coordinates. Use it when the agent can see something but cannot read it — it never has to guess coordinates blind.',
+      'Magnifier: image around one screen point with a crosshair, plus `origin` to map back to absolute coordinates. Use it instead of guessing coordinates.',
       {
         type: 'object',
         additionalProperties: false,
@@ -303,7 +303,7 @@ function buildToolDefinitions(cfg) {
     tool(
       cfg,
       'gui_launch',
-      'Start a program and place its window on the virtual display, so the user never sees it. Uses SetWindowPos with SWP_NOACTIVATE: focus is not stolen. Prefer this over starting programs yourself, otherwise the window lands on the user primary screen.',
+      'Start a program and place its window on the virtual display without stealing focus, so the user never sees it.',
       {
         type: 'object',
         additionalProperties: false,
@@ -319,7 +319,7 @@ function buildToolDefinitions(cfg) {
     tool(
       cfg,
       'gui_place',
-      'Move one window to the virtual display (or explicit coordinates) without activating it. Use when a window was started by something else and is sitting on the user screen.',
+      'Move an existing window to the virtual display without activating it.',
       {
         type: 'object',
         additionalProperties: false,
@@ -336,7 +336,7 @@ function buildToolDefinitions(cfg) {
     tool(
       cfg,
       'gui_vdd',
-      'Manage the Parsec virtual display: `status` (device + screen list), `add` (plug a virtual monitor), `remove` (unplug by index). A keeper process pings the driver every 50 ms; without it the display is unplugged about a second after being added.',
+      'Manage the Parsec virtual display: status / add / remove. Needs a keeper process; never plug/unplug repeatedly (Windows rearranges all windows).',
       {
         type: 'object',
         additionalProperties: false,
@@ -350,7 +350,7 @@ function buildToolDefinitions(cfg) {
     tool(
       cfg,
       'gui_browser',
-      'Talk to a Chromium browser or Electron app over CDP: `tree` returns clickable elements with exact rects, text and CSS selectors; `click` triggers a real click by selector; `type` sets an input value; `list` shows targets; `eval` runs one expression. This never moves the real mouse, so it works on the virtual display without focus.',
+      'Chromium/Electron over CDP: tree / click / type / eval. No mouse movement, no focus change. Requires --remote-debugging-port.',
       {
         type: 'object',
         additionalProperties: false,
@@ -369,7 +369,7 @@ function buildToolDefinitions(cfg) {
       tool(
         cfg,
         'gui_uia',
-        'Read or act on a window through UI Automation. `tree` returns every control with its type, name, AutomationId and exact rect; `invoke` triggers a control by AutomationId or name WITHOUT moving the mouse or stealing focus — prefer this over coordinate clicking. Works well on Win32/UWP/WPF apps; Chromium web content is NOT exposed (use gui_browser/CDP instead).',
+        'UI Automation: tree / invoke. Triggers native controls WITHOUT moving the mouse — prefer it over clicking. Chromium content is invisible here; use gui_browser.',
         {
           type: 'object',
           additionalProperties: false,
@@ -393,7 +393,7 @@ function buildToolDefinitions(cfg) {
       tool(
         cfg,
         'gui_click',
-        'Click one screen point with real input injection. This moves the real cursor and needs the target to be foreground, so it steals focus — use it only when gui_uia/gui_browser cannot act (canvas, custom-drawn UI). Pair it with gui_verify.',
+        'Click one screen point (real input, steals focus). Only when gui_uia/gui_browser cannot act; always pair with gui_verify.',
         {
           type: 'object',
           additionalProperties: false,
@@ -411,7 +411,7 @@ function buildToolDefinitions(cfg) {
       tool(
         cfg,
         'gui_verify',
-        'Prove that an action actually happened: capture the window, run the command, capture again, and report the changed-pixel ratio. Verdict changed/unchanged is explicit — never assume a click worked. Uses screen capture when the window is foreground (avoids the stale-frame problem of WinUI3 apps).',
+        'Prove an action happened: capture, run command, capture, report changed/unchanged. Never assume a click worked.',
         {
           type: 'object',
           additionalProperties: false,
@@ -437,3 +437,4 @@ export async function apply(ctx, rawConfig) {
     ctx.effect(() => ctx.tools.register(definition), `dsh-gui: ${definition.name}`);
   }
 }
+
