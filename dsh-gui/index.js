@@ -200,9 +200,10 @@ async function opGuiPlace(cfg, args = {}) {
 
 async function opGuiVdd(cfg, args = {}) {
   const action = String(args.action ?? 'status');
+  // keeper 的生命周期跟虚拟屏绑定：add 会顺带把它拉起来，remove 会停掉并解除鼠标裁剪。
   const argv = ['-File', guiScriptPath(cfg, 'vdd.ps1')];
-  if (action === 'add') argv.push('-Add');
-  else if (action === 'remove') { argv.push('-Remove', String(Number.isFinite(args.index) ? args.index : 0)); }
+  if (action === 'add') argv.push('-Enable');
+  else if (action === 'remove') argv.push('-Disable');
   else argv.push('-Status');
   try {
     const raw = execFileSync('pwsh', ['-NoProfile', '-NonInteractive', ...argv], { encoding: 'utf8', windowsHide: true, timeout: 60000 });
@@ -512,6 +513,7 @@ export async function apply(ctx, rawConfig) {
     ctx.effect(() => ctx.tools.register(definition), `dsh-gui: ${definition.name}`);
   }
 }
+
 
 
 
