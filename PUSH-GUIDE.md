@@ -40,6 +40,17 @@ token 读 **`cfg.gitTokenFile`**（可通过预设配置指到 `.certs/git-token
 - ⚠️ 它**只能操作 `cfg.repo`**（`main` / `DeepSeekCode`）或 `_agents/<空间名>` —— **`dsh-plugins` worktree 不在其中**，请用第一节的直接 git；
 - ⚠️ 若 `cfg.gitTokenFile` 指向旧 token，会报 `Invalid username or token`。
 
+## 二点五、先确认加速器在跑（最常见的失败原因）
+
+本机 hosts 把 github 域名指到 **127.0.0.1**，由 **Steam++ / Watt Toolkit** 接管。
+**加速器没启动**时会出现两种完全不同的症状，都跟 token 无关：
+
+| 症状 | 说明 |
+|---|---|
+| `Failed to connect to github.com port 443 … Could not connect to server` | 127.0.0.1 上没人监听 ✓ |
+| `SSL certificate … unable to get local issuer certificate` | 连上了但不是加速器在答 ✓ |
+
+⇒ 先确认加速器在跑，再排查别的 ✓。（本次实测：加速器一开，方案 A 立刻 push 成功 ✓。）
 ## 三、常见失败对照
 
 | 现象 | 原因 | 处理 |
