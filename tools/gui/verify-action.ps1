@@ -16,8 +16,8 @@
 .PARAMETER Hwnd
   窗口句柄。
 
-.PARAMETER Command
-  要执行的命令文本（用 -File 调用脚本时，scriptblock 传不进来，只能传字符串）。
+.PARAMETER Exe
+  要执行的可执行文件。**不再接受任意 PowerShell 文本**：原实现用 Invoke-Expression，等于把宿主进程的任意代码执行权交给调用方（审计 H1）。
 
 .PARAMETER Threshold
   变化像素占比超过多少算"变了"，默认 0.1%。
@@ -31,7 +31,8 @@
 [CmdletBinding()]
 param(
   [Parameter(Mandatory = $true, Position = 0)][string]$Hwnd,
-  [Parameter(Mandatory = $true)][string]$Command,
+  [Parameter(Mandatory = $true)][string]$Exe,
+  [string[]]$ExeArgs = @(),
   [double]$Threshold = 0.1,
   [int]$SettleMs = 600
 )
@@ -93,7 +94,7 @@ if (Test-Path $before2) {
 
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 $actionError = $null
-try { Invoke-Expression $Command }
+try { & $Exe @ExeArgs }
 catch { $actionError = $_.Exception.Message }
 $sw.Stop()
 
@@ -134,6 +135,7 @@ $verdict = if ($ratio -ge $effective) { 'changed' } else { 'unchanged' }
 if ($verdict -eq 'unchanged') {
   [Console]::Error.WriteLine('[verify] 界面完全没变化 ⇒ 可能没点中、控件被禁用，或点在空白处。不要假设成功。')
 }
+
 
 
 

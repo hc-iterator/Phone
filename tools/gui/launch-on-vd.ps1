@@ -28,12 +28,17 @@
 param(
   [Parameter(Mandatory = $true, Position = 0)][string]$File,
   [string[]]$Args = @(),
+  [string]$ArgsJson = '',
   [int]$WaitSeconds = 15,
   [string]$TitleMatch = '',
   [switch]$NoWait
 )
 
 $ErrorActionPreference = 'Stop'
+# 工具侧用 -ArgsJson 传参：多参数直接摊开会被 PowerShell 拆错（审计实测：两个以上参数必失败）
+if ($ArgsJson -ne '') {
+  try { $Args = @(ConvertFrom-Json $ArgsJson) | ForEach-Object { [string]$_ } } catch { $Args = @() }
+}
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $dir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
@@ -74,6 +79,7 @@ while ((Get-Date) -lt $deadline) {
   }
 }
 if (-not $placed) { [Console]::Error.WriteLine("[launch] 等不到窗口（${WaitSeconds}s）"); exit 5 }
+
 
 
 
