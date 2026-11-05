@@ -71,3 +71,11 @@ Agent 动一次桌面会碰三样东西，用户立刻能感觉到：
 
 `gui_launch` 现在是：**隐藏启动 → 挪到虚拟屏 → SW_SHOWNOACTIVATE 显示**。
 窗口在主屏上从头到尾不出现（隐藏状态下 SetWindowPos 有效，已验证）。
+
+## 鼠标不会掉进虚拟屏
+
+虚拟屏在 **@1920,0** 但**看不见** —— 鼠标滑进去用户就丢了指针（真副屏至少有屏幕边缘挡着）。
+所以 keeper 起来时会用 `ClipCursor` 把物理鼠标**锁在主屏内**（实测撞到 1919 就停），keeper 退出自动解锁。
+
+Agent 要点虚拟屏时不需要关心：`click-at.ps1` 发现目标在锁外，会**临时解锁 → 点击 → 重新上锁**。
+想手动看状态/开关：`pwsh -File tools/gui/confine-cursor.ps1 -Status|-On|-Off`。
