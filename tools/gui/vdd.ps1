@@ -1,4 +1,9 @@
 <#
+
+
+
+
+<#
 .SYNOPSIS
   控制 Parsec 虚拟显示器（VDD）：加一块、拔一块、保活、看状态。
 
@@ -35,11 +40,49 @@ param(
   [int]$Remove = -1,
   [switch]$Status,
   [int]$KeepAliveSeconds = 0,
-  [switch]$Serve
+  [switch]$Serve,
+  [switch]$Enable,
+  [switch]$Disable
 )
 
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+# ── 开关：虚拟屏与 keeper 绑定（用户要求：keeper 跟着虚拟屏生、跟着虚拟屏死）──
+$enableFlag = Join-Path $env:TEMP 'picophone-vdd.enable'
+$keeperCmd = 'pwsh.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $PSCommandPath + '" -Serve'
+
+function Get-Keepers {
+  Get-CimInstance Win32_Process -Filter "Name='pwsh.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -and $_.CommandLine -like '*-File*vdd.ps1*Serve*' -and $_.CommandLine -notlike '*Get-CimInstance*' }
+}
+
+if ($Enable) {
+  New-Item -ItemType File -Path $enableFlag -Force | Out-Null
+  $existing = Get-Keepers
+  if ($existing) { "keeper 已在运行: " + (($existing | ForEach-Object { $_.ProcessId }) -join ',') }
+  else {
+    $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $keeperCmd }
+    "keeper 已拉起: pid=$($r.ProcessId) returnValue=$($r.ReturnValue)"
+  }
+  Start-Sleep -Seconds 7
+  Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+  $scr = [System.Windows.Forms.Screen]::AllScreens
+  "屏幕数=$($scr.Count)"; foreach ($s in $scr) { "  $($s.DeviceName) $($s.Bounds.Width)x$($s.Bounds.Height) @$($s.Bounds.X),$($s.Bounds.Y)" }
+  exit 0
+}
+
+if ($Disable) {
+  $k = Get-Keepers
+  foreach ($p in $k) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }
+  "已停 keeper: " + $(if ($k) { ($k | ForEach-Object { $_.ProcessId }) -join ',' } else { '(无)' })
+  Remove-Item $enableFlag -Force -ErrorAction SilentlyContinue
+  $confine = Join-Path $PSScriptRoot 'confine-cursor.ps1'
+  if (Test-Path $confine) { & pwsh -NoProfile -File $confine -Off 2>$null | Out-Null }
+  Start-Sleep -Seconds 4
+  Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+  "屏幕数=" + ([System.Windows.Forms.Screen]::AllScreens | Measure-Object).Count + "  鼠标裁剪已解除"
+  exit 0
+}
 
 if (-not ('VddCtl' -as [type])) {
   Add-Type -TypeDefinition @'
@@ -259,6 +302,7 @@ finally { [void][VddCtl]::CloseHandle($h) }
 
 Start-Sleep -Milliseconds 800
 Show-Status
+
 
 
 
