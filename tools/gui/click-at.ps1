@@ -84,6 +84,15 @@ $vy = [MouseIn]::GetSystemMetrics([MouseIn]::SM_YVIRTUALSCREEN)
 $vw = [MouseIn]::GetSystemMetrics([MouseIn]::SM_CXVIRTUALSCREEN)
 $vh = [MouseIn]::GetSystemMetrics([MouseIn]::SM_CYVIRTUALSCREEN)
 
+# 虚拟屏会把物理鼠标锁在主屏内（confine-cursor.ps1）；要点的坐标在锁外 ⇒ 临时解锁，点完再锁回去。
+$confineScript = Join-Path $PSScriptRoot 'confine-cursor.ps1'
+$primaryW = [MouseIn]::GetSystemMetrics(0)
+$primaryH = [MouseIn]::GetSystemMetrics(1)
+$needsUnclip = ($X -ge $primaryW -or $Y -ge $primaryH -or $X -lt 0 -or $Y -lt 0)
+if ($needsUnclip -and (Test-Path $confineScript)) {
+  & pwsh -NoProfile -File $confineScript -Off 2>$null | Out-Null
+}
+
 if ($X -lt $vx -or $Y -lt $vy -or $X -ge ($vx + $vw) -or $Y -ge ($vy + $vh)) {
   [Console]::Error.WriteLine("[click] ($X,$Y) 不在虚拟桌面 $vx,$vy ${vw}x${vh} 内")
   exit 2
@@ -106,9 +115,14 @@ for ($i = 0; $i -lt $(if ($DoubleClick) { 2 } else { 1 }); $i++) {
   if ($DoubleClick) { Start-Sleep -Milliseconds 60 }
 }
 
+if ($needsUnclip -and (Test-Path $confineScript)) {
+  & pwsh -NoProfile -File $confineScript -On 2>$null | Out-Null
+}
+
 if ($Restore) {
   Start-Sleep -Milliseconds 60
   [void][MouseIn]::SetCursorPos($orig.X, $orig.Y)
 }
 
 "clicked ($X,$Y) button=$Button double=$($DoubleClick.IsPresent) abs=$ax,$ay vdesk=$vx,$vy ${vw}x${vh} restored=$Restore"
+

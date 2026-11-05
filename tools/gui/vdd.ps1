@@ -233,6 +233,10 @@ try {
       if ($existing -ge 0) { break }
       Start-Sleep -Seconds 2
     }
+      # 虚拟屏插上了，但它是"看不见的"：把物理鼠标锁在主屏内，别让用户把指针滑进去丢掉。
+      # 解锁在 finally 里（keeper 退出即恢复），否则用户会莫名其妙被锁住。
+      $confine = Join-Path $PSScriptRoot 'confine-cursor.ps1'
+      if (Test-Path $confine) { & pwsh -NoProfile -File $confine -On | Out-Null }
     $n = 0
     try {
       while ($true) {
@@ -241,7 +245,7 @@ try {
         $n++
         if ($n % 1200 -eq 0) { "alive $([int]($n/20)) s" | Out-File -FilePath $logPath -Encoding utf8 -Append }
       }
-    } finally { [void][VddCtl]::CloseHandle($h); "=== keeper 退出 $(Get-Date) ===" | Out-File -FilePath $logPath -Encoding utf8 -Append }
+    } finally { if (Test-Path (Join-Path $PSScriptRoot 'confine-cursor.ps1')) { & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'confine-cursor.ps1') -Off | Out-Null }; [void][VddCtl]::CloseHandle($h); "=== keeper 退出 $(Get-Date) ===" | Out-File -FilePath $logPath -Encoding utf8 -Append }
     exit 0
   }
   if ($KeepAliveSeconds -gt 0) {
@@ -255,6 +259,7 @@ finally { [void][VddCtl]::CloseHandle($h) }
 
 Start-Sleep -Milliseconds 800
 Show-Status
+
 
 
 
