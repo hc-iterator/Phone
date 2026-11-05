@@ -36,7 +36,8 @@ const OUTPUT_SCHEMA = {
   additionalProperties: true,
   properties: {
     ok: { type: 'boolean' },
-    exitCode: { type: 'number' },
+    // 失败分支返回 exitCode: null ⇒ 这里必须允许 null，否则 schema 校验直接判"输出非法"
+    exitCode: { type: ['number', 'null'] },
     text: { type: 'string' },
   },
   required: ['ok', 'text'],
@@ -470,6 +471,7 @@ export async function apply(ctx, rawConfig) {
     ctx.effect(() => ctx.tools.register(definition), `dsh-gui: ${definition.name}`);
   }
 }
+
 
 
 
