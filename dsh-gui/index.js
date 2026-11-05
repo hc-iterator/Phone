@@ -36,8 +36,9 @@ const OUTPUT_SCHEMA = {
   additionalProperties: true,
   properties: {
     ok: { type: 'boolean' },
-    // 失败分支返回 exitCode: null ⇒ 这里必须允许 null，否则 schema 校验直接判"输出非法"
-    exitCode: { type: ['number', 'null'] },
+    // ⚠️ exitCode 故意不在 schema 里声明：它是 number|null，而网关只接受"单一类型字符串"
+    //    （实测报错：schema.properties.exitCode.type must be a single type string）。
+    //    additionalProperties: true ⇒ 不声明也能合法返回，值照样随结果传给模型。
     text: { type: 'string' },
   },
   required: ['ok', 'text'],
