@@ -57,6 +57,17 @@ function runGuiScript(cfg, name, argv, timeoutMs = 60000) {
   });
 }
 
+// 审计（中危）：outFile 原来接受任意路径 ⇒ 能把已有文件覆盖成 PNG（实测 .txt 被换掉），
+// 也是 fs/pwsh 被沙箱挡住时仍然能写的一条路。现在无条件围栏到 %TEMP% 之内。
+function fencedOut(outFile) {
+  if (!outFile) return null;
+  const target = path.resolve(String(outFile));
+  const root = path.resolve(tmpdir());
+  const rel = path.relative(root, target);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return null; // 越界 ⇒ 忽略，用默认路径
+  return target;
+}
+
 function guiOutPath(ext) {
   const dir = path.join(tmpdir(), 'dsh_gui');
   mkdirSync(dir, { recursive: true });
@@ -98,7 +109,7 @@ async function opGuiWindows(cfg, args = {}) {
 async function opGuiCapture(cfg, args = {}) {
   const hwnd = String(args.hwnd ?? '').trim();
   if (hwnd === '') return { ok: false, exitCode: null, text: 'hwnd 必填（十进制或 0x 十六进制）' };
-  const out = args.outFile ? path.resolve(String(args.outFile)) : guiOutPath('png');
+  const out = fencedOut(args.outFile) ?? guiOutPath('png');
   const argv = [hwnd, out];
   if (Number.isFinite(args.maxWidth) && args.maxWidth > 0) argv.push('-MaxWidth', String(args.maxWidth));
   if (args.raise === true) argv.push('-Raise');
@@ -113,7 +124,7 @@ async function opGuiCapture(cfg, args = {}) {
 async function opGuiZoom(cfg, args = {}) {
   const x = Number(args.x); const y = Number(args.y);
   if (!Number.isFinite(x) || !Number.isFinite(y)) return { ok: false, exitCode: null, text: 'x / y 必须是数字' };
-  const out = args.outFile ? path.resolve(String(args.outFile)) : guiOutPath('png');
+  const out = fencedOut(args.outFile) ?? guiOutPath('png');
   const argv = [String(Math.round(x)), String(Math.round(y)), out,
     '-Size', String(Number.isFinite(args.size) ? Math.max(16, args.size) : 100),
     '-Scale', String(Number.isFinite(args.scale) ? Math.max(1, args.scale) : 1)];
@@ -125,12 +136,38 @@ async function opGuiZoom(cfg, args = {}) {
   }
 }
 
+// 审计 H2：gui_launch 原本能起任意 exe/协议（实测 .cmd 被执行），等于在宿主令牌下任意代码执行。
+// 现在只允许「驱动窗口用的普通程序」，协议处理器默认全部拒绝；要放宽必须在插件配置里显式列。
+const DEFAULT_LAUNCH_ALLOW = [
+  'notepad.exe', 'mspaint.exe', 'charmap.exe', 'calc.exe', 'calculator.exe',
+  'msedge.exe', 'chrome.exe', 'explorer.exe', 'taskmgr.exe',
+  'winword.exe', 'excel.exe', 'powerpnt.exe', 'notepad++.exe', 'code.exe',
+];
+
+function launchAllowed(cfg, file) {
+  const raw = String(file ?? '').trim();
+  if (raw === '') return false;
+  const allow = Array.isArray(cfg.launchAllow) && cfg.launchAllow.length > 0 ? cfg.launchAllow : DEFAULT_LAUNCH_ALLOW;
+  const base = raw.includes('\\') || raw.includes('/') ? path.basename(raw).toLowerCase() : raw.toLowerCase();
+  // 协议处理器（foo: / ms-settings:）一律拒绝：它能把任意已注册程序拉起来
+  if (/^[a-z][a-z0-9+.-]*:$/i.test(raw)) return false;
+  return allow.map((x) => String(x).toLowerCase()).includes(base);
+}
+
 // ── 图形化：启动到虚拟屏 / 挪窗口 / 虚拟显示器 / 浏览器 CDP ────────────────
 async function opGuiLaunch(cfg, args = {}) {
   const file = String(args.file ?? '').trim();
   if (file === '') return { ok: false, exitCode: null, text: 'file 必填（例如 notepad.exe）' };
+  if (!launchAllowed(cfg, file)) {
+    return {
+      ok: false, exitCode: null,
+      text: `拒绝启动 ${file}：不在 gui_launch 白名单内（默认只允许常见窗口程序，协议处理器一律拒绝）。`
+        + `\n需要放宽就在插件配置里加 launchAllow: [...]。`,
+    };
+  }
   const argv = ['-File', guiScriptPath(cfg, 'launch-on-vd.ps1'), file];
-  if (Array.isArray(args.args) && args.args.length > 0) argv.push('-Args', ...args.args.map(String));
+  // 审计：多参数原来被拆散/吞掉 ⇒ 改用 JSON 一次传，脚本侧 ConvertFrom-Json 还原
+  if (Array.isArray(args.args) && args.args.length > 0) argv.push('-ArgsJson', JSON.stringify(args.args.map(String)));
   if (Number.isFinite(args.waitSeconds)) argv.push('-WaitSeconds', String(args.waitSeconds));
   // 启动会短暂影响前台/光标 ⇒ 动作完把环境还回去，用户不会觉得"鼠标自己跑了"
   const wantRestore = args.restore !== false;
@@ -227,9 +264,12 @@ async function opGuiClick(cfg, args = {}) {
 
 async function opGuiVerify(cfg, args = {}) {
   const hwnd = String(args.hwnd ?? '').trim();
-  const command = String(args.command ?? '').trim();
-  if (hwnd === '' || command === '') return { ok: false, exitCode: null, text: 'hwnd 与 command 都必填（command 是要执行的命令文本）' };
-  const argv = ['-File', guiScriptPath(cfg, 'verify-action.ps1'), hwnd, '-Command', command];
+  // 审计 H1：这里原来接受任意 PowerShell 文本并交给 Invoke-Expression ⇒ 宿主进程任意代码执行。
+  // 现在只接受「可执行文件 + 参数数组」，由 execFileSync 直接起进程（无 shell、无求值器）。
+  const exe = String(args.exe ?? '').trim();
+  if (hwnd === '' || exe === '') return { ok: false, exitCode: null, text: 'hwnd 与 exe 都必填（exe 是要在两次截图之间运行的可执行文件）' };
+  const argv = ['-File', guiScriptPath(cfg, 'verify-action.ps1'), hwnd, '-Exe', exe];
+  if (Array.isArray(args.args) && args.args.length > 0) { argv.push('-ExeArgs', ...args.args.map(String)); }
   if (Number.isFinite(args.threshold)) argv.push('-Threshold', String(args.threshold));
   if (Number.isFinite(args.settleMs)) argv.push('-SettleMs', String(args.settleMs));
   try {
@@ -337,7 +377,7 @@ function buildToolDefinitions(cfg) {
     tool(
       cfg,
       'gui_launch',
-      'Start a program and place its window on the virtual display without stealing focus, so the user never sees it.',
+      'Start an allow-listed program and place its window on the virtual display without stealing focus. Protocols and arbitrary executables are refused; widen with config launchAllow.',
       {
         type: 'object',
         additionalProperties: false,
@@ -445,7 +485,7 @@ function buildToolDefinitions(cfg) {
       tool(
         cfg,
         'gui_verify',
-        'Prove an action happened: capture, run command, capture, report changed/unchanged. Never assume a click worked.',
+        'Prove an action happened: capture, run one program, capture again, report changed/unchanged. Pass xe + rgs; arbitrary shell text is NOT accepted (audit H1). Never assume a click worked.',
         {
           type: 'object',
           additionalProperties: false,
@@ -471,6 +511,10 @@ export async function apply(ctx, rawConfig) {
     ctx.effect(() => ctx.tools.register(definition), `dsh-gui: ${definition.name}`);
   }
 }
+
+
+
+
 
 
 
