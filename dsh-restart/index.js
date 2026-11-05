@@ -395,7 +395,7 @@ export function apply(ctx) {
     },
     output: {
       schema: { type: 'object', additionalProperties: true },
-      render: (_a, v) => [{ type: 'text', text: typeof (v && v.text) === 'string' ? v.text : JSON.stringify(v) }],
+      render: (_a, v) => [{ type: 'text', text: ((typeof (v && v.text) === 'string' ? v.text : JSON.stringify(v)) + (v && v.token ? '\ntoken=' + v.token + '\n（把 token 原样传给 dsh_restart_commit 即可执行；一次性，用掉作废）' : '')) }],
     },
     timeoutMs: WAIT_BLOCK_MS + 20000,
     async execute(args, exec) {
@@ -452,7 +452,7 @@ export function apply(ctx) {
     },
     output: {
       schema: { type: 'object', additionalProperties: true },
-      render: (_a, v) => [{ type: 'text', text: typeof (v && v.text) === 'string' ? v.text : JSON.stringify(v) }],
+      render: (_a, v) => [{ type: 'text', text: ((typeof (v && v.text) === 'string' ? v.text : JSON.stringify(v)) + (v && v.token ? '\ntoken=' + v.token + '\n（把 token 原样传给 dsh_restart_commit 即可执行；一次性，用掉作废）' : '')) }],
     },
     async execute(args, exec) {
       const st = readState();
@@ -496,7 +496,7 @@ export function apply(ctx) {
     },
     output: {
       schema: { type: 'object', additionalProperties: true },
-      render: (_a, v) => [{ type: 'text', text: typeof (v && v.text) === 'string' ? v.text : JSON.stringify(v) }],
+      render: (_a, v) => [{ type: 'text', text: ((typeof (v && v.text) === 'string' ? v.text : JSON.stringify(v)) + (v && v.token ? '\ntoken=' + v.token + '\n（把 token 原样传给 dsh_restart_commit 即可执行；一次性，用掉作废）' : '')) }],
     },
     async execute(args, exec) {
       const self = senderOf(exec);
@@ -512,7 +512,7 @@ export function apply(ctx) {
     parameters: { type: 'object', additionalProperties: false, properties: {} },
     output: {
       schema: { type: 'object', additionalProperties: true },
-      render: (_a, v) => [{ type: 'text', text: typeof (v && v.text) === 'string' ? v.text : JSON.stringify(v) }],
+      render: (_a, v) => [{ type: 'text', text: ((typeof (v && v.text) === 'string' ? v.text : JSON.stringify(v)) + (v && v.token ? '\ntoken=' + v.token + '\n（把 token 原样传给 dsh_restart_commit 即可执行；一次性，用掉作废）' : '')) }],
     },
     async execute() {
       const st = readState();
@@ -542,7 +542,7 @@ export function apply(ctx) {
     },
     output: {
       schema: { type: 'object', additionalProperties: true },
-      render: (_a, v) => [{ type: 'text', text: typeof (v && v.text) === 'string' ? v.text : JSON.stringify(v) }],
+      render: (_a, v) => [{ type: 'text', text: ((typeof (v && v.text) === 'string' ? v.text : JSON.stringify(v)) + (v && v.token ? '\ntoken=' + v.token + '\n（把 token 原样传给 dsh_restart_commit 即可执行；一次性，用掉作废）' : '')) }],
     },
     async execute(args, exec) {
       const sid = senderOf(exec);
