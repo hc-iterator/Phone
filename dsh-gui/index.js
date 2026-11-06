@@ -12,7 +12,7 @@
  *    （实测同一脚本在沙箱里 PrintWindow=false 全黑，pwsh 直跑正常）。
  */
 import { existsSync, mkdirSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -327,6 +327,35 @@ function tool(cfg, name, description, parameters, opName) {
   };
 }
 
+// ── keeper 绑定到 DSH 生命周期 ──────────────────────────────────────────────
+// 用户要求：DSH 启动就自动插虚拟屏；DSH 挂了，keeper 与虚拟屏一起消失。
+// 所以 keeper 是**本进程的子进程**（不是 WMI 脱离进程，也不是独立服务）：
+//   · apply() 起来 ⇒ 插屏 + 鼠标锁主屏
+//   · 插件卸载/DSH 退出 ⇒ ctx.effect 的清理函数 kill 它 ⇒ 屏跟着消失
+//   · DSH 被硬杀（kill -9）时清理函数不会跑 ⇒ keeper 自己带 -ParentPid 轮询父进程，父没了就自杀
+let keeperChild = null;
+
+function keeperAlive() {
+  return Boolean(keeperChild && keeperChild.exitCode === null && !keeperChild.killed);
+}
+
+function startKeeper(cfg) {
+  if (keeperAlive()) return keeperChild;
+  const script = guiScriptPath(cfg, 'vdd.ps1');
+  try { mkdirSync(tmpdir(), { recursive: true }); } catch {}
+  keeperChild = spawn('pwsh', ['-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', script, '-Serve', '-ParentPid', String(process.pid)], {
+    stdio: 'ignore', windowsHide: true, detached: false,
+  });
+  keeperChild.on('exit', () => { keeperChild = null; });
+  return keeperChild;
+}
+
+function stopKeeper() {
+  if (!keeperChild) return;
+  try { keeperChild.kill(); } catch { /* 已经没了 */ }
+  keeperChild = null;
+}
+
 function buildToolDefinitions(cfg) {
   return [    tool(
       cfg,
@@ -512,7 +541,13 @@ export async function apply(ctx, rawConfig) {
   for (const definition of buildToolDefinitions(cfg)) {
     ctx.effect(() => ctx.tools.register(definition), `dsh-gui: ${definition.name}`);
   }
+
+  // 插件一加载就把虚拟屏和 keeper 拉起来（DSH 起来 = 屏就位）
+  startKeeper(cfg);
+  // DSH 退出/插件卸载时连带清理：留一个孤儿 keeper 等于留一块没人管的假屏
+  ctx.effect(() => () => stopKeeper(), 'dsh-gui: vdd keeper lifetime');
 }
+
 
 
 
