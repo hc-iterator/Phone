@@ -244,10 +244,10 @@ async function opUsage(args = {}, sessionId = '') {
   for (const f of files) {
     try {
       const st = fs.statSync(f.file);
-      if (scope === 'today' && Math.floor(st.mtimeMs) < startOfToday()) {
-        const known = db().prepare('SELECT 1 FROM files WHERE path=?').get(f.file);
-        if (known) continue; // 今天没动过、也索引过 → 跳过
-      }
+      // 只在"这个文件不可能包含范围内数据"时跳过：
+      // mtime 早于查询起点 ⇒ 里面不可能有范围内的调用，连索引都不必建
+      // （否则第一次查「今天」会白扫 769 个历史文件，约 10 分钟）。
+      if (since > 0 && Math.floor(st.mtimeMs) < since) continue;
       if (indexFile(f.file, f.session) > 0) scanned++;
     } catch { /* 单个文件失败不影响整体 */ }
   }
