@@ -284,6 +284,8 @@ async function opGuiUia(cfg, args = {}) {
 async function opGuiClick(cfg, args = {}) {
   if (!Number.isFinite(args.x) || !Number.isFinite(args.y)) return { ok: false, exitCode: null, text: 'x/y 必填（屏幕坐标，可负）' };
   const argv = ['-File', guiScriptPath(cfg, 'click-at.ps1'), String(args.x), String(args.y)];
+  // 规则：任何鼠标操作都自带窗口激活；不给 hwnd 就只点坐标（会点到当前前台窗口）
+  if (args.hwnd) argv.push('-Hwnd', String(args.hwnd));
   if (args.button) argv.push('-Button', String(args.button));
   if (args.double === true) argv.push('-DoubleClick');
   if (args.restore === false) argv.push('-Restore:$false');
@@ -556,7 +558,7 @@ function buildToolDefinitions(cfg) {
       tool(
         cfg,
         'gui_click',
-        'Click one screen point (real input, steals focus). Only when gui_uia/gui_browser cannot act; always pair with gui_verify.',
+        'Click one screen point. Pass hwnd so the target window is activated first — the whole input then happens in that window, and the previous focus/cursor/IME are restored afterwards. Omit hwnd only when the right window is already focused.',
         {
           type: 'object',
           additionalProperties: false,
@@ -566,6 +568,7 @@ function buildToolDefinitions(cfg) {
             y: { type: 'number', description: 'Screen Y.' },
             button: { type: 'string', enum: ['left', 'right', 'middle'], description: 'Default left.' },
             double: { type: 'boolean', description: 'Double click.' },
+            hwnd: { type: 'string', description: 'Target window to activate before clicking. Strongly recommended: without it the click lands on whatever is currently focused (which may be the user window).' },
             restore: { type: 'boolean', description: 'Put the cursor back afterwards; default true.' },
             allowRealScreen: { type: 'boolean', description: 'Allow clicking on the real screen when no virtual display exists (default false: refuse).' },
           },
@@ -592,7 +595,7 @@ function buildToolDefinitions(cfg) {
       tool(
         cfg,
         'gui_type',
-        "Type text into the focused window (Chinese OK, no IME needed), optionally followed by Enter. The only way to drive apps that expose neither UIA nor DOM (DingTalk, WeChat desktop).",
+        "Type text into a window (Chinese OK, no IME needed), optionally followed by Enter. Pass `hwnd` to activate the target first; focus/cursor/IME are restored afterwards. The only way to drive apps that expose neither UIA nor DOM (DingTalk, WeChat desktop).",
         {
           type: 'object',
           additionalProperties: false,
@@ -626,6 +629,9 @@ export async function apply(ctx, rawConfig) {
   // DSH 退出/插件卸载时连带清理：留一个孤儿 keeper 等于留一块没人管的假屏
   ctx.effect(() => () => stopKeeper(), 'dsh-gui: vdd keeper lifetime');
 }
+
+
+
 
 
 
