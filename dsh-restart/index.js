@@ -29,6 +29,8 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+// 会话日志是多帧 zstd（追加写入）：同步解码器只认第一帧，所以按 magic 逐帧解。
+import { zstdDecompressSync } from 'node:zlib';
 
 export const name = '@local/dsh-restart';
 export const inject = ['tools'];
@@ -295,11 +297,42 @@ export function apply(ctx) {
   };
 
   /**
-   * 最近 windowMs 内有写入的会话（按 `session.v4.jsonl.zstd` 的 mtime）。
+   * 会话里是否**真的发生过对话**（不只是头部）。
+   *
+   * 2026-11-06 事故：GUI 在某个时刻建了一个只有会话头、没有任何消息的草稿会话，
+   * 文件 mtime 立刻是"刚刚" ⇒ 被当成"正在干活" ⇒ 重启请求把它拉进投票名单并**唤醒**它，
+   * 用户在窗口里看到一个凭空冒出来、还在投票的对话，以为是插件在乱开窗。
+   *
+   * 所以"忙"不能只看 mtime：必须存在 user/message、assistant/message 或 turn/start 才算数。
+   */
+  const sessionHasWork = (file) => {
+    let buf;
+    try { buf = fs.readFileSync(file); } catch { return false; }
+    const MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
+    let i = 0;
+    let sawHeader = false;
+    while ((i = buf.indexOf(MAGIC, i)) !== -1) {
+      let text = '';
+      try { text = zstdDecompressSync(buf.subarray(i)).toString('utf8'); } catch { i += MAGIC.length; continue; }
+      for (const line of text.split('\n')) {
+        if (!line) continue;
+        if (!sawHeader) { sawHeader = true; continue; }  // 第一行是会话头
+        // 只认"真的动过"的事件；title/设置类事件不算（草稿会话也可能写它们）
+        if (line.includes('"user/message"') || line.includes('"assistant/message"') || line.includes('"turn/start"')) {
+          return true;
+        }
+      }
+      i += MAGIC.length;
+    }
+    return false;
+  };
+
+  /**
+   * 最近 windowMs 内有写入、且**真的在对话**的会话。
    *
    * 为什么需要：这台机器上 `sessionController.list()` 恒为 0 项，于是"正在跑的对话"
    * 完全不会出现在重启目标里（实测：PicoMode (1) 在跑，但没被征求同意）。
-   * 会话只要在干活就一定会写这个文件，所以文件时间是最可靠的"忙"信号。
+   * 会话只要在干活就一定会写这个文件；但**空会话也会被写**，所以要再用 sessionHasWork 过滤。
    */
   const sessionsRecentlyWritten = (windowMs) => {
     const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
@@ -316,7 +349,10 @@ export function apply(ctx) {
         if (!s.isDirectory() || !s.name.startsWith('session-')) continue;
         const file = path.join(root, ws.name, s.name, 'session.v4.jsonl.zstd');
         try {
-          if (fs.statSync(file).mtimeMs >= cutoff) found.push(s.name);
+          if (fs.statSync(file).mtimeMs < cutoff) continue;
+          // 刚写过的空会话（草稿）不算忙：它没有任何工作可被打断，也不该被唤醒去投票。
+          if (!sessionHasWork(file)) { log('skip 空会话（无对话事件）: ' + s.name); continue; }
+          found.push(s.name);
         } catch { /* 没有这个文件就不是活跃会话 */ }
       }
     }
@@ -375,9 +411,13 @@ export function apply(ctx) {
     return [...union];
   };
 
-  const notifyTargets = (targets, kind, body, senderId) => {
+  const notifyTargets = (targets, kind, body, senderId, opts) => {
+    const skip = (opts && opts.skip) || [];
     const okIds = [];
     for (const t of targets) {
+      // 审批员只在「需要它投票」时收消息；其余流程通知（进入待执行、重启完成等）
+      // 对它都是纯噪声（用户 2026-11-06 要求）。
+      if (skip.includes(t)) continue;
       const r = relay(t, kind, body, senderId);
       if (r.ok) okIds.push(t); else log('relay failed to ' + t + ': ' + r.error);
     }
@@ -551,11 +591,11 @@ export function apply(ctx) {
       if (r.error) return { ok: false, text: r.error };
       writeState(r.state);
       if (r.transition === 'approved') {
-        notifyTargets(r.state.targets, 'notice', '全员已同意，重启进入待执行（由发起者提交）。', sid);
+        notifyTargets(r.state.targets, 'notice', '全员已同意，重启进入待执行（由发起者提交）。', sid, { skip: [APPROVAL_SESSION] });
         return { ok: true, phase: 'approved', text: '已同意（最后一票）⇒ 已批准；等待发起者提交执行。' };
       }
       if (r.transition === 'denied') {
-        notifyTargets(r.state.targets.concat(r.state.requester), 'notice', '已拒绝重启：' + String((args && args.reason) || ''), sid);
+        notifyTargets(r.state.targets.concat(r.state.requester), 'notice', '已拒绝重启：' + String((args && args.reason) || ''), sid, { skip: [APPROVAL_SESSION] });
         return { ok: true, phase: 'denied', text: '已拒绝，理由已记录并通知发起者。' };
       }
       return { ok: true, phase: 'collecting', text: '已同意，还剩 ' + pendingTargets(r.state).length + ' 个未决。' };
@@ -629,6 +669,7 @@ export function apply(ctx) {
     });
   } catch (e) { log('inject commands failed: ' + (e && e.message)); }
 }
+
 
 
 
