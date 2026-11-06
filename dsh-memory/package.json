@@ -1,0 +1,9 @@
+{
+  "name": "@local/dsh-memory",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Two long-term stores: tiny injected user profile (<=400 chars) + per-workspace precise project facts",
+  "type": "module",
+  "exports": { ".": "./index.js", "./package.json": "./package.json" },
+  "files": ["index.js", "README.md"]
+}
