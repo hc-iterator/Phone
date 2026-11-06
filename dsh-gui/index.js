@@ -13,7 +13,7 @@
  * ⚠️ 这些操作必须在**宿主进程**里跑：pico_run 的 workspace-write 沙箱会挡住 GDI/桌面访问
  *    （实测同一脚本在沙箱里 PrintWindow=false 全黑，pwsh 直跑正常）。
  */
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, appendFileSync, readFileSync } from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
@@ -126,6 +126,53 @@ function noVirtualScreen() {
     text: '拒绝执行：当前没有第二块屏（虚拟屏未开启），这会在用户真实屏幕上闪窗口/抢焦点。'
       + '\n先 gui_vdd({action:"add"})；确实要在真实屏幕操作，显式传 allowRealScreen: true。',
   };
+}
+
+// ── 操作列表（journal）────────────────────────────────────────────────────────
+// 每次 gui_* 调用都记一条：时间、工具、是否成功、耗时、参数的摘要。
+// 目的：① 用户能回看"它到底做了什么"；② 出问题时不用靠猜（本次实战就缺这个）。
+function journalPath() {
+  const dir = path.join(tmpdir(), 'dsh_gui');
+  try { mkdirSync(dir, { recursive: true }); } catch {}
+  return path.join(dir, 'ops.jsonl');
+}
+
+function journalTool(name, args, result, ms) {
+  try {
+    const digest = {};
+    for (const [k, v] of Object.entries(args ?? {})) {
+      if (k === 'text') digest[k] = String(v).slice(0, 40);
+      else if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') digest[k] = v;
+      else if (Array.isArray(v)) digest[k] = v.slice(0, 5);
+    }
+    const row = {
+      at: new Date().toISOString(),
+      tool: name,
+      ok: result?.ok !== false,
+      ms,
+      args: digest,
+      result: String(result?.text ?? '').split('\n')[0].slice(0, 160),
+    };
+    appendFileSync(journalPath(), JSON.stringify(row) + '\n', 'utf8');
+  } catch { /* 记不下就算了，绝不影响主流程 */ }
+}
+
+async function opGuiOps(cfg, args = {}) {
+  const limit = Number.isFinite(args.limit) ? args.limit : 20;
+  try {
+    if (!existsSync(journalPath())) return { ok: true, exitCode: 0, text: '（还没有任何操作记录）' };
+    const lines = readFileSync(journalPath(), 'utf8').trim().split('\n').filter(Boolean);
+    const tail = lines.slice(-limit);
+    const out = tail.map((l) => {
+      try {
+        const r = JSON.parse(l);
+        return `${r.at.slice(11, 19)} ${r.ok ? '✓' : '✗'} ${r.tool} (${r.ms}ms) ${JSON.stringify(r.args).slice(0, 90)}`;
+      } catch { return l; }
+    });
+    return { ok: true, exitCode: 0, text: `最近 ${tail.length} 条操作：\n` + out.join('\n') };
+  } catch (error) {
+    return { ok: false, exitCode: null, text: `读取操作记录失败：${error instanceof Error ? error.message : String(error)}` };
+  }
 }
 
 async function opGuiWindows(cfg, args = {}) {
@@ -365,6 +412,7 @@ const OPS = {
   gui_click: opGuiClick,
   gui_verify: opGuiVerify,
   gui_type: opGuiType,
+  gui_ops: opGuiOps,
   gui_capture: opGuiCapture,
   gui_zoom: opGuiZoom,
 };
@@ -381,7 +429,10 @@ function tool(cfg, name, description, parameters, opName) {
       ],
     },
     async execute(args) {
-      return await OPS[opName](cfg, args ?? {}, {});
+      const started = Date.now();
+      const result = await OPS[opName](cfg, args ?? {}, {});
+      journalTool(name, args, result, Date.now() - started);
+      return result;
     },
   };
 }
@@ -611,6 +662,19 @@ function buildToolDefinitions(cfg) {
         },
         'gui_type',
       ),
+      tool(
+        cfg,
+        'gui_ops',
+        'List the most recent GUI operations (time, tool, ok, duration, arguments). Use it to answer "what did you actually do" instead of guessing.',
+        {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            limit: { type: 'number', description: 'How many recent operations to show; default 20.' },
+          },
+        },
+        'gui_ops',
+      ),
     ];
 }
 
@@ -629,6 +693,8 @@ export async function apply(ctx, rawConfig) {
   // DSH 退出/插件卸载时连带清理：留一个孤儿 keeper 等于留一块没人管的假屏
   ctx.effect(() => () => stopKeeper(), 'dsh-gui: vdd keeper lifetime');
 }
+
+
 
 
 
