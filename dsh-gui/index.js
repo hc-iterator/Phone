@@ -333,6 +333,7 @@ async function opGuiClick(cfg, args = {}) {
   const argv = ['-File', guiScriptPath(cfg, 'click-at.ps1'), String(args.x), String(args.y)];
   // 规则：任何鼠标操作都自带窗口激活；不给 hwnd 就只点坐标（会点到当前前台窗口）
   if (args.hwnd) argv.push('-Hwnd', String(args.hwnd));
+  if (args.coord === 'window') argv.push('-Coord', 'window');
   if (args.button) argv.push('-Button', String(args.button));
   if (args.double === true) argv.push('-DoubleClick');
   if (args.restore === false) argv.push('-Restore:$false');
@@ -360,6 +361,7 @@ async function opGuiType(cfg, args = {}) {
   if (args.enter === true) argv.push('-Enter');
   if (args.escapes === true) argv.push('-Escapes');
   if (args.hwnd) argv.push('-Hwnd', String(args.hwnd));
+  if (args.coord === 'window') argv.push('-Coord', 'window');
   if (args.restore === false) argv.push('-NoRestore');
   try {
     const raw = execFileSync('pwsh', ['-NoProfile', '-NonInteractive', ...argv], { encoding: 'utf8', windowsHide: true, timeout: 60000 });
@@ -620,6 +622,7 @@ function buildToolDefinitions(cfg) {
             button: { type: 'string', enum: ['left', 'right', 'middle'], description: 'Default left.' },
             double: { type: 'boolean', description: 'Double click.' },
             hwnd: { type: 'string', description: 'Target window to activate before clicking. Strongly recommended: without it the click lands on whatever is currently focused (which may be the user window).' },
+            coord: { type: 'string', enum: ['screen', 'window'], description: 'Coordinate space of x/y: screen (default, absolute virtual-desktop pixels) or window (relative to the target window, requires hwnd).' },
             restore: { type: 'boolean', description: 'Put the cursor back afterwards; default true.' },
             allowRealScreen: { type: 'boolean', description: 'Allow clicking on the real screen when no virtual display exists (default false: refuse).' },
           },
@@ -693,6 +696,7 @@ export async function apply(ctx, rawConfig) {
   // DSH 退出/插件卸载时连带清理：留一个孤儿 keeper 等于留一块没人管的假屏
   ctx.effect(() => () => stopKeeper(), 'dsh-gui: vdd keeper lifetime');
 }
+
 
 
 
