@@ -1,4 +1,6 @@
 /**
+    ),
+/**
  * dsh-gui —— 图形化 / 屏幕操作能力（宿主插件）
  *
  * 从 dsh-picophone（PicoPhone 台架）里拆出来的：台架和"看屏幕/点窗口"是两件事，
@@ -94,6 +96,38 @@ function envRestore(cfg, target) {
   envGuard(cfg, argv);
 }
 
+// ── 真实屏幕守卫 ────────────────────────────────────────────────────────────
+// 教训（2026-11-06）：虚拟屏挂掉时，工具会退化成"直接在用户真实屏幕上点/打字" ——
+// 又闪又抢焦点，用户当场就看到鼠标乱跑。所以：**没有第二块屏就拒绝**，除非显式放行。
+let __screenCache = { at: 0, count: 0 };
+
+function screenCount(cfg) {
+  const now = Date.now();
+  if (now - __screenCache.at < 5000) return __screenCache.count;
+  let count = 1;
+  try {
+    const out = execFileSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command',
+      '[System.Windows.Forms.Screen]::AllScreens.Count'], { encoding: 'utf8', windowsHide: true, timeout: 15000 });
+    const n = Number(String(out).trim());
+    if (Number.isFinite(n)) count = n;
+  } catch { count = 1; }
+  __screenCache = { at: now, count };
+  return count;
+}
+
+function realScreenAllowed(cfg, args) {
+  if (args && args.allowRealScreen === true) return true;
+  return screenCount(cfg) >= 2;
+}
+
+function noVirtualScreen() {
+  return {
+    ok: false, exitCode: null,
+    text: '拒绝执行：当前没有第二块屏（虚拟屏未开启），这会在用户真实屏幕上闪窗口/抢焦点。'
+      + '\n先 gui_vdd({action:"add"})；确实要在真实屏幕操作，显式传 allowRealScreen: true。',
+  };
+}
+
 async function opGuiWindows(cfg, args = {}) {
   const argv = ['-Json'];
   if (args.all === true) argv.push('-All');
@@ -159,6 +193,7 @@ function launchAllowed(cfg, file) {
 async function opGuiLaunch(cfg, args = {}) {
   const file = String(args.file ?? '').trim();
   if (file === '') return { ok: false, exitCode: null, text: 'file 必填（例如 notepad.exe）' };
+  if (!realScreenAllowed(cfg, args)) return noVirtualScreen();
   if (!launchAllowed(cfg, file)) {
     return {
       ok: false, exitCode: null,
@@ -233,6 +268,7 @@ async function opGuiUia(cfg, args = {}) {
     if (args.onlyClickable === true) argv.push('-OnlyClickable');
   }
   // UIA invoke 虽然不动鼠标，但可能让目标窗口抢到焦点、也可能改掉输入法状态 ⇒ 同样做三级恢复
+  if (cmd === 'invoke' && !realScreenAllowed(cfg, args)) return noVirtualScreen();
   const wantRestore = cmd === 'invoke' && args.restore !== false;
   if (wantRestore) envSnapshot(cfg);
   try {
@@ -261,6 +297,26 @@ async function opGuiClick(cfg, args = {}) {
     return { ok: false, exitCode: null, text: `点击失败：${error instanceof Error ? error.message : String(error)}` };
   } finally {
     if (wantRestore) envRestore(cfg, null);
+  }
+}
+
+// ── 键盘输入 ────────────────────────────────────────────────────────────────
+// 之前只有 gui_click 没有 gui_type ⇒ CEF 类程序（钉钉/微信桌面版）既没 UIA 也没 DOM，
+// 就彻底没法操作（实战：钉钉搜索框点开了却打不进字，只能临时借 SendKeys）。
+async function opGuiType(cfg, args = {}) {
+  const text = String(args.text ?? '');
+  if (text === '') return { ok: false, exitCode: null, text: 'text 必填' };
+  if (!realScreenAllowed(cfg, args)) return noVirtualScreen();
+  const argv = ['-File', guiScriptPath(cfg, 'type-text.ps1'), text];
+  if (args.enter === true) argv.push('-Enter');
+  if (args.escapes === true) argv.push('-Escapes');
+  if (args.hwnd) argv.push('-Hwnd', String(args.hwnd));
+  if (args.restore === false) argv.push('-NoRestore');
+  try {
+    const raw = execFileSync('pwsh', ['-NoProfile', '-NonInteractive', ...argv], { encoding: 'utf8', windowsHide: true, timeout: 60000 });
+    return { ok: true, exitCode: 0, text: raw.trim() };
+  } catch (error) {
+    return { ok: false, exitCode: null, text: `输入失败：${error instanceof Error ? error.message : String(error)}` };
   }
 }
 
@@ -306,6 +362,7 @@ const OPS = {
   gui_uia: opGuiUia,
   gui_click: opGuiClick,
   gui_verify: opGuiVerify,
+  gui_type: opGuiType,
   gui_capture: opGuiCapture,
   gui_zoom: opGuiZoom,
 };
@@ -491,6 +548,7 @@ function buildToolDefinitions(cfg) {
             maxDepth: { type: 'number', description: 'tree: recursion depth; default 6.' },
             maxNodes: { type: 'number', description: 'tree: node cap; default 400.' },
             onlyClickable: { type: 'boolean', description: 'tree: only controls that support Invoke.' },
+            allowRealScreen: { type: 'boolean', description: 'invoke: allow acting on the real screen when no virtual display exists (default false: refuse).' },
           },
         },
         'gui_uia',
@@ -509,6 +567,7 @@ function buildToolDefinitions(cfg) {
             button: { type: 'string', enum: ['left', 'right', 'middle'], description: 'Default left.' },
             double: { type: 'boolean', description: 'Double click.' },
             restore: { type: 'boolean', description: 'Put the cursor back afterwards; default true.' },
+            allowRealScreen: { type: 'boolean', description: 'Allow clicking on the real screen when no virtual display exists (default false: refuse).' },
           },
         },
         'gui_click',
@@ -529,7 +588,27 @@ function buildToolDefinitions(cfg) {
           },
         },
         'gui_verify',
-      ),  ];
+      ),
+      tool(
+        cfg,
+        'gui_type',
+        "Type text into the focused window (Chinese OK, no IME needed), optionally followed by Enter. The only way to drive apps that expose neither UIA nor DOM (DingTalk, WeChat desktop).",
+        {
+          type: 'object',
+          additionalProperties: false,
+          required: ['text'],
+          properties: {
+            text: { type: 'string', description: 'Text to type; with escapes:true, \\n and \\t become Enter/Tab.' },
+            enter: { type: 'boolean', description: 'Press Enter after typing (sending a chat message).' },
+            escapes: { type: 'boolean', description: 'Interpret \\n and \\t in text.' },
+            hwnd: { type: 'string', description: 'Optional window to focus first; default the current foreground window.' },
+            restore: { type: 'boolean', description: 'Restore cursor/focus/IME afterwards; default true.' },
+            allowRealScreen: { type: 'boolean', description: "Allow acting on the user's real screen when no virtual display exists (default false: refuse)." },
+          },
+        },
+        'gui_type',
+      ),
+    ];
 }
 
 // cordis 要求：直接访问 ctx.tools 前必须在插件顶层声明依赖的 service。
@@ -547,6 +626,10 @@ export async function apply(ctx, rawConfig) {
   // DSH 退出/插件卸载时连带清理：留一个孤儿 keeper 等于留一块没人管的假屏
   ctx.effect(() => () => stopKeeper(), 'dsh-gui: vdd keeper lifetime');
 }
+
+
+
+
 
 
 
