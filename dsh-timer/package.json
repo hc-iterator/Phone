@@ -1,0 +1,15 @@
+{
+  "name": "@local/dsh-timer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Three tiny time tools: stopwatch (count up), countdown, and current time",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "README.md"
+  ]
+}

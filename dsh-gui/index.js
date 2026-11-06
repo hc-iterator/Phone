@@ -141,7 +141,9 @@ function journalTool(name, args, result, ms) {
   try {
     const digest = {};
     for (const [k, v] of Object.entries(args ?? {})) {
-      if (k === 'text') digest[k] = String(v).slice(0, 40);
+      // 审计建议：日志不要落原文（短口令会被完整记下）；只记长度与摘要。
+      if (k === 'text') digest[k] = `<${String(v).length} chars>`;
+      else if (k === 'outFile' || k === 'file' || k === 'path') digest[k] = path.basename(String(v));
       else if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') digest[k] = v;
       else if (Array.isArray(v)) digest[k] = v.slice(0, 5);
     }
@@ -158,7 +160,10 @@ function journalTool(name, args, result, ms) {
 }
 
 async function opGuiOps(cfg, args = {}) {
-  const limit = Number.isFinite(args.limit) ? args.limit : 20;
+// limit 必须规范化：slice(-0) 会返回整个数组，负数会从尾部切掉（slice(-(-5)) = slice(5)）
+  let limit = Number(args.limit);
+  if (!Number.isFinite(limit) || limit < 1) limit = 20;
+  limit = Math.min(Math.floor(limit), 200);
   try {
     if (!existsSync(journalPath())) return { ok: true, exitCode: 0, text: '（还没有任何操作记录）' };
     const lines = readFileSync(journalPath(), 'utf8').trim().split('\n').filter(Boolean);
@@ -289,6 +294,9 @@ async function opGuiVdd(cfg, args = {}) {
   else argv.push('-Status');
   try {
     const raw = execFileSync('pwsh', ['-NoProfile', '-NonInteractive', ...argv], { encoding: 'utf8', windowsHide: true, timeout: 60000 });
+    // 屏数缓存必须失效：否则 add/remove 之后 5 秒内守卫仍按旧数量判断，
+    // 表现为"刚开屏却被拒"或"屏已关却仍放行"（这种误判很难查）。
+    __screenCache = { at: 0, count: 0 };
     return { ok: true, exitCode: 0, text: raw.trim() };
   } catch (error) {
     return { ok: false, exitCode: null, text: `VDD 操作失败：${error instanceof Error ? error.message : String(error)}` };
@@ -330,6 +338,8 @@ async function opGuiUia(cfg, args = {}) {
 
 async function opGuiClick(cfg, args = {}) {
   if (!Number.isFinite(args.x) || !Number.isFinite(args.y)) return { ok: false, exitCode: null, text: 'x/y 必填（屏幕坐标，可负）' };
+  // 守卫：没有第二块屏时不许直接点用户真实屏幕（这条之前漏了，实战踩过一次）
+  if (!realScreenAllowed(cfg, args)) return noVirtualScreen();
   const argv = ['-File', guiScriptPath(cfg, 'click-at.ps1'), String(args.x), String(args.y)];
   // 规则：任何鼠标操作都自带窗口激活；不给 hwnd 就只点坐标（会点到当前前台窗口）
   if (args.hwnd) argv.push('-Hwnd', String(args.hwnd));
@@ -415,6 +425,7 @@ const OPS = {
   gui_verify: opGuiVerify,
   gui_type: opGuiType,
   gui_ops: opGuiOps,
+  // 注意：opGuiVdd 成功后要清屏数缓存，否则刚开的屏 5 秒内仍被判'没有第二块屏'
   gui_capture: opGuiCapture,
   gui_zoom: opGuiZoom,
 };
@@ -636,10 +647,11 @@ function buildToolDefinitions(cfg) {
         {
           type: 'object',
           additionalProperties: false,
-          required: ['hwnd', 'command'],
+          required: ['hwnd', 'exe'],
           properties: {
             hwnd: { type: 'string', description: 'Window handle to watch.' },
-            command: { type: 'string', description: 'Command line to run between the two captures, e.g. "pwsh -File tools/gui/click-at.ps1 2000 300".' },
+            exe: { type: 'string', description: 'Executable to run between the two captures. No shell text (audit H1: arbitrary PowerShell is refused).' },
+            args: { type: 'array', items: { type: 'string' }, description: 'Arguments passed to exe.' },
             threshold: { type: 'number', description: 'Percent of pixels that must change; default 0.1.' },
             settleMs: { type: 'number', description: 'Wait after the action before the second capture; default 600.' },
           },
@@ -696,6 +708,8 @@ export async function apply(ctx, rawConfig) {
   // DSH 退出/插件卸载时连带清理：留一个孤儿 keeper 等于留一块没人管的假屏
   ctx.effect(() => () => stopKeeper(), 'dsh-gui: vdd keeper lifetime');
 }
+
+
 
 
 
