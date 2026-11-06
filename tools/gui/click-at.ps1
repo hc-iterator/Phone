@@ -32,7 +32,8 @@ param(
   [ValidateSet('left', 'right', 'middle')][string]$Button = 'left',
   [switch]$DoubleClick,
   [bool]$Restore = $true,
-  [string]$Hwnd = ''
+  [string]$Hwnd = '',
+  [ValidateSet('screen','window')][string]$Coord = 'screen'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -92,6 +93,33 @@ $primaryH = [MouseIn]::GetSystemMetrics(1)
 $needsUnclip = ($X -ge $primaryW -or $Y -ge $primaryH -or $X -lt 0 -or $Y -lt 0)
 if ($needsUnclip -and (Test-Path $confineScript)) {
   & pwsh -NoProfile -File $confineScript -Off 2>$null | Out-Null
+}
+
+# 两种坐标系必须显式区分（否则"我点的 100,50"到底是屏幕还是窗口，全靠猜）：
+#   screen = 虚拟桌面绝对坐标（默认）
+#   window = 相对窗口左上角（需同时给 -Hwnd）
+if ($Coord -eq 'window') {
+  if ($Hwnd -eq '') { [Console]::Error.WriteLine('[click] -Coord window 必须同时给 -Hwnd'); exit 2 }
+  if (-not ('ClickRect' -as [type])) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class ClickRect {
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int a, out RECT r, int s);
+  public static RECT Bounds(IntPtr h) {
+    RECT r;
+    if (DwmGetWindowAttribute(h, 9, out r, Marshal.SizeOf(typeof(RECT))) == 0) return r;
+    GetWindowRect(h, out r); return r;
+  }
+}
+"@
+  }
+  $hh = if ($Hwnd -match '^0x') { [IntPtr]([Convert]::ToInt64($Hwnd, 16)) } else { [IntPtr][int64]$Hwnd }
+  $wr = [ClickRect]::Bounds($hh)
+  $X = $wr.Left + $X; $Y = $wr.Top + $Y
+  "coords: window-relative -> screen ($X,$Y) using origin $($wr.Left),$($wr.Top)"
 }
 
 if ($X -lt $vx -or $Y -lt $vy -or $X -ge ($vx + $vw) -or $Y -ge ($vy + $vh)) {
@@ -158,5 +186,6 @@ if ($Restore) {
 }
 
 "clicked ($X,$Y) button=$Button double=$($DoubleClick.IsPresent) abs=$ax,$ay vdesk=$vx,$vy ${vw}x${vh} restored=$Restore"
+
 
 

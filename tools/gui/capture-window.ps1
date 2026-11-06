@@ -213,9 +213,14 @@ $bmp.Save($OutFile, [System.Drawing.Imaging.ImageFormat]::Png)
 $bmp.Dispose(); $g.Dispose()
 
 $bytes = (Get-Item $OutFile).Length
-"captured hwnd=$($handle.ToInt64()) ${w}x${h} method=$method printWindow=$ok allBlack=$allBlack bytes=$bytes -> $OutFile"
+# 输出里必须带 **窗口原点 + 缩放比**：Agent 看到的是窗口内像素，要换算回屏幕坐标
+# 只能靠这三样（origin.x/y、原尺寸、缩放比）。少了它们就只能瞎猜。
+$ratio = if ($w -gt 0 -and $MaxWidth -gt 0 -and $w -gt $MaxWidth) { [math]::Round($MaxWidth / $w, 4) } else { 1 }
+"captured hwnd=$($handle.ToInt64()) windowRect=$($r.Left),$($r.Top) ${w}x${h} origin=$($r.Left),$($r.Top) scale=$ratio imageW=$([int]($w*$ratio)) method=$method printWindow=$ok allBlack=$allBlack bytes=$bytes -> $OutFile"
+"  换算：屏幕坐标 = origin + 图片像素 / scale"
 if ($allBlack) { [Console]::Error.WriteLine('[capture] 抓到的图全黑：多半是 DRM/独占全屏/不支持的窗口。') }
 exit 0
+
 
 
 

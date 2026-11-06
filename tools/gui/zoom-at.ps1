@@ -64,6 +64,13 @@ $g.DrawLine($pen, $halfI - 6, $halfI, $halfI - 1, $halfI)
 $g.DrawLine($pen, $halfI + 1, $halfI, $halfI + 6, $halfI)
 $g.DrawLine($pen, $halfI, $halfI - 6, $halfI, $halfI - 1)
 $g.DrawLine($pen, $halfI, $halfI + 1, $halfI, $halfI + 6)
+
+# 把坐标数字画在图上：Agent 看到的是图片，不给它写死数字，它就得自己推 origin+size 换算，容易错。
+$font = New-Object System.Drawing.Font('Consolas', 10, [System.Drawing.FontStyle]::Bold)
+$brush = [System.Drawing.Brushes]::Red
+$label = "($X,$Y)"
+$g.DrawString($label, $font, $brush, 4, 4)
+$g.DrawString("origin=($left,$top)", $font, [System.Drawing.Brushes]::Yellow, 4, ($outSize - 18))
 $g.DrawRectangle($pen, $halfI, $halfI, 1, 1)
 $pen.Dispose()
 $g.Dispose()
@@ -86,4 +93,5 @@ $bmp.Dispose()
 
 # 把"这张图对应屏幕哪一块"一并返回，Agent 才能把图里的位置换算回绝对坐标
 "zoom center=($X,$Y) size=$Size scale=$Scale origin=($left,$top) image=$outSize -> $OutFile"
+
 
