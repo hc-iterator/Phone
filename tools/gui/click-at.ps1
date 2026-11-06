@@ -144,8 +144,13 @@ public class ClickFg {
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, IntPtr p);
   [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool f);
   [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
   public static bool Force(IntPtr h) {
     if (GetForegroundWindow() == h) return true;
+    // 前台锁（Windows 前台保护）会让 SetForegroundWindow 静默失败；先模拟一次 ALT 轻点，
+    // 系统就把"下一个 SetForegroundWindow"当作用户意图放行。
+    keybd_event(0x12, 0, 0, UIntPtr.Zero);
+    keybd_event(0x12, 0, 2, UIntPtr.Zero);
     SetForegroundWindow(h);
     if (GetForegroundWindow() == h) return true;
     uint ft = GetWindowThreadProcessId(GetForegroundWindow(), IntPtr.Zero);
@@ -186,6 +191,7 @@ if ($Restore) {
 }
 
 "clicked ($X,$Y) button=$Button double=$($DoubleClick.IsPresent) abs=$ax,$ay vdesk=$vx,$vy ${vw}x${vh} restored=$Restore"
+
 
 
 

@@ -194,9 +194,13 @@ if ($allBlack) {
   }
 }
 
+# 原始尺寸与缩放比必须在缩放**之前**固定下来：缩放会覆盖 $w/$h，
+# 之后再算就会得到"图片尺寸 + scale=1"这种自洽但完全错误的换算依据。
+$origW = $w; $origH = $h
+$outScale = 1
 if ($MaxWidth -gt 0 -and $w -gt $MaxWidth) {
-  $scale = $MaxWidth / $w
-  $nw = [int]($w * $scale); $nh = [int]($h * $scale)
+  $outScale = [math]::Round($MaxWidth / $w, 4)
+  $nw = [int]($w * $outScale); $nh = [int]($h * $outScale)
   $small = New-Object System.Drawing.Bitmap($nw, $nh)
   $g2 = [System.Drawing.Graphics]::FromImage($small)
   $g2.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
@@ -215,11 +219,12 @@ $bmp.Dispose(); $g.Dispose()
 $bytes = (Get-Item $OutFile).Length
 # 输出里必须带 **窗口原点 + 缩放比**：Agent 看到的是窗口内像素，要换算回屏幕坐标
 # 只能靠这三样（origin.x/y、原尺寸、缩放比）。少了它们就只能瞎猜。
-$ratio = if ($w -gt 0 -and $MaxWidth -gt 0 -and $w -gt $MaxWidth) { [math]::Round($MaxWidth / $w, 4) } else { 1 }
-"captured hwnd=$($handle.ToInt64()) windowRect=$($r.Left),$($r.Top) ${w}x${h} origin=$($r.Left),$($r.Top) scale=$ratio imageW=$([int]($w*$ratio)) method=$method printWindow=$ok allBlack=$allBlack bytes=$bytes -> $OutFile"
+$ratio = $outScale
+"captured hwnd=$($handle.ToInt64()) origin=$($r.Left),$($r.Top) window=${origW}x${origH} scale=$ratio image=$($w)x$($h) method=$method printWindow=$ok allBlack=$allBlack bytes=$bytes -> $OutFile"
 "  换算：屏幕坐标 = origin + 图片像素 / scale"
 if ($allBlack) { [Console]::Error.WriteLine('[capture] 抓到的图全黑：多半是 DRM/独占全屏/不支持的窗口。') }
 exit 0
+
 
 
 

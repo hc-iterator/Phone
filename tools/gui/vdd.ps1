@@ -120,6 +120,11 @@ if ($Enable) {
 }
 
 if ($Disable) {
+  # 必须先关窗、再停 keeper：keeper 被强杀时 finally 不会执行，
+  # 而虚拟屏一拔，屏上的窗口就会被 Windows 甩回主屏（用户会突然看到本来看不见的窗口）。
+  $closer = Join-Path $PSScriptRoot 'close-vd-windows.ps1'
+  if (Test-Path $closer) { & pwsh -NoProfile -File $closer -GraceMs 800 2>$null | ForEach-Object { "  $_" } }
+  Start-Sleep -Milliseconds 300
   $k = Get-Keepers
   foreach ($p in $k) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }
   "已停 keeper: " + $(if ($k) { ($k | ForEach-Object { $_.ProcessId }) -join ',' } else { '(无)' })
@@ -386,6 +391,7 @@ finally { [void][VddCtl]::CloseHandle($h) }
 
 Start-Sleep -Milliseconds 800
 Show-Status
+
 
 
 
