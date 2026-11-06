@@ -66,11 +66,19 @@ public class CursorClip {
 
   public static void Release() { ClipCursor(IntPtr.Zero); }
 
+  public static void ToRect(int l, int t, int r, int b) {
+    RECT rc = new RECT(); rc.Left = l; rc.Top = t; rc.Right = r; rc.Bottom = b;
+    IntPtr p = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(RECT)));
+    try { Marshal.StructureToPtr(rc, p, false); ClipCursor(p); } finally { Marshal.FreeHGlobal(p); }
+  }
+
   public static string Describe() {
     RECT r;
     if (!GetClipCursor(out r)) return "none";
     int w = r.Right - r.Left, h = r.Bottom - r.Top;
-    if (w >= GetSystemMetrics(SM_CXSCREEN) * 2) return "none";
+    int vw = GetSystemMetrics(78); int vh = GetSystemMetrics(79);
+    if (vw <= 0) vw = GetSystemMetrics(SM_CXSCREEN);
+    if (w >= vw && h >= (vh > 0 ? vh : GetSystemMetrics(1))) return "none";
     return string.Format("{0},{1} {2}x{3}", r.Left, r.Top, w, h);
   }
 }
@@ -98,5 +106,12 @@ if ($On) {
   exit 0
 }
 
-[CursorClip]::Release()
-'clip=off'
+# ClipCursor(NULL) 在某些情况下不会真正解除（实测：调完仍报 0,0 1920x1080）。
+# 更可靠的做法是显式裁剪到**整个虚拟桌面**。
+$vx = [CursorClip]::GetSystemMetrics(76); $vy = [CursorClip]::GetSystemMetrics(77)
+$vw = [CursorClip]::GetSystemMetrics(78); $vh = [CursorClip]::GetSystemMetrics(79)
+if ($vw -le 0) { $vw = [CursorClip]::GetSystemMetrics(0) }
+if ($vh -le 0) { $vh = [CursorClip]::GetSystemMetrics(1) }
+[CursorClip]::ToRect($vx, $vy, $vx + $vw, $vy + $vh)
+"clip=off (virtual $vx,$vy ${vw}x${vh})"
+
