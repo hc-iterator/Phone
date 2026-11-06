@@ -70,7 +70,7 @@ $font = New-Object System.Drawing.Font('Consolas', 10, [System.Drawing.FontStyle
 $brush = [System.Drawing.Brushes]::Red
 $label = "($X,$Y)"
 $g.DrawString($label, $font, $brush, 4, 4)
-  $g.DrawString("origin=($left,$top)", $font, [System.Drawing.Brushes]::Yellow, 4, [Math]::Max(0, $bmp.Height - 18))
+  $g.DrawString("crop=($left,$top)", $font, [System.Drawing.Brushes]::Yellow, 4, [Math]::Max(0, $bmp.Height - 18))
 $g.DrawRectangle($pen, $halfI, $halfI, 1, 1)
 $pen.Dispose()
 $g.Dispose()
@@ -92,6 +92,7 @@ $outSize = "$($bmp.Width)x$($bmp.Height)"
 $bmp.Dispose()
 
 # 把"这张图对应屏幕哪一块"一并返回，Agent 才能把图里的位置换算回绝对坐标
-"zoom center=($X,$Y) size=$Size scale=$Scale origin=($left,$top) image=$outSize -> $OutFile"
+"zoom center=($X,$Y) size=$Size scale=$Scale cropOrigin=($left,$top) image=$outSize -> $OutFile"
+
 
 
