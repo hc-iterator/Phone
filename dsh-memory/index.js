@@ -96,15 +96,20 @@ function decodeWsDir(name) {
   let s = name;
   if (s.startsWith('--')) s = s.slice(2);
   if (s.endsWith('--')) s = s.slice(0, -2);
-  // 盘符形如 C-Users-... ⇒ C:\Users\...
-  return s.replace(/-/g, '\\');
+  s = s.replace(/-/g, '\\');
+  // 盘符要补回冒号：C\Users\... → C:\Users\...
+  if (/^[A-Za-z]\\/.test(s)) s = s[0] + ':' + s.slice(1);
+  return s;
 }
 
 function rebuildWsMap() {
   const map = new Map();
   try {
     const raw = fs.readFileSync(path.join(dshHome(), 'storages', 'workspace.json'), 'utf8');
-    const tables = JSON.parse(raw)?.tables?.workspaces?.[0] ?? {};
+    // ⚠️ tables.workspaces 实际是**对象**（id → 工作区），不是数组：
+    //    之前写成 workspaces[0] 取到 undefined ⇒ 权威来源形同虚设，一路走目录扫描兜底。
+    const table = JSON.parse(raw)?.tables?.workspaces;
+    const tables = Array.isArray(table) ? (table[0] ?? {}) : (table ?? {});
     for (const ws of Object.values(tables)) {
       const p = String(ws.path ?? '');
       if (!p) continue;
