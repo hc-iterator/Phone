@@ -70,7 +70,7 @@ $font = New-Object System.Drawing.Font('Consolas', 10, [System.Drawing.FontStyle
 $brush = [System.Drawing.Brushes]::Red
 $label = "($X,$Y)"
 $g.DrawString($label, $font, $brush, 4, 4)
-$g.DrawString("origin=($left,$top)", $font, [System.Drawing.Brushes]::Yellow, 4, ($outSize - 18))
+  $g.DrawString("origin=($left,$top)", $font, [System.Drawing.Brushes]::Yellow, 4, [Math]::Max(0, $bmp.Height - 18))
 $g.DrawRectangle($pen, $halfI, $halfI, 1, 1)
 $pen.Dispose()
 $g.Dispose()
