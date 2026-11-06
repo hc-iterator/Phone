@@ -49,6 +49,14 @@ function db() {
   DB = new DatabaseSync(dbPath());
   DB.exec('PRAGMA journal_mode = WAL;');
   DB.exec('PRAGMA synchronous = NORMAL;');
+  // 修复（G 路）：并发写时不要立刻失败，排队等一会儿。
+  DB.exec('PRAGMA busy_timeout = 8000;');
+  // 修复（G 路）：连接永不关闭 ⇒ 句柄泄漏、删库报 EPERM、多次开关实例内存上涨。
+  //   进程退出时统一收尾（注册一次即可）。
+  if (!db.closingRegistered) {
+    db.closingRegistered = true;
+    process.once('exit', () => { try { DB?.close(); } catch { /* 已关 */ } });
+  }
   DB.exec(`
     CREATE TABLE IF NOT EXISTS profile(
       id INTEGER PRIMARY KEY,
@@ -84,62 +92,81 @@ function db() {
   return DB;
 }
 
-// ── 工作区解析：会话 id → 工作区路径 ────────────────────────────────────────
-// 三种来源，按可靠性排序：
-//   ① storages/workspace.json 里的 sessionIds（权威，但可能还没写进去）
-//   ② sessions/<工作区目录>/session-<uuid> 的目录结构（一定存在）
-//   ③ 兜底用 process.cwd()（最差，会落到 system32，所以只当最后手段）
+// ── 工作区解析：会话 id → 工作区身份 ────────────────────────────────────────
+// 关键认知：DSH 的会话目录名是**有损编码**（`dsh-session-persistence-jsonl` 的 projectKey）：
+//   `/ \ :` → 单个 `-`（连续折叠），不安全字符（含 `~`）→ `~XXXX`，两端包 `--`。
+//   有损 ⇒ **不能反解**。之前用"把 - 换成 \ 再补冒号"的猜法，把
+//   `--C-~56FA...-.dsh-dsh_orb--` 解成 `C:\~56FA...\.dsh\dsh_orb` 这种幻影路径，
+//   153/776 个会话会因此把事实写进不存在的工作区。
+//
+// 正确做法：**正向编码**。从 workspace.json 拿到真实路径，按官方规则算出目录名，
+//   用"目录名 → 真实路径"建映射；认不出来的（workspace.json 还没记），
+//   就用**目录名本身**当工作区身份（稳定、唯一，绝不编造路径）。
 let WS_CACHE = { at: 0, map: new Map() };
 
-/** 工作区目录名 → 路径（`--C-Users-Chen-Desktop-Pico-PicoPhone--` 这种编码）。 */
-function decodeWsDir(name) {
-  let s = name;
-  if (s.startsWith('--')) s = s.slice(2);
-  if (s.endsWith('--')) s = s.slice(0, -2);
-  s = s.replace(/-/g, '\\');
-  // 盘符要补回冒号：C\Users\... → C:\Users\...
-  if (/^[A-Za-z]\\/.test(s)) s = s[0] + ':' + s.slice(1);
-  return s;
+/** 官方 projectKey 的复刻：路径 → 会话目录名（与 DSH 完全一致）。 */
+function projectKey(cwd) {
+  if (!cwd) throw new Error('empty path');
+  let readable = '';
+  let separatorRun = false;
+  for (let i = 0; i < cwd.length; i++) {
+    const code = cwd.charCodeAt(i);
+    const ch = String.fromCharCode(code);
+    if (ch === '/' || ch === '\\' || ch === ':') {
+      if (!separatorRun) readable += '-';
+      separatorRun = true;
+    } else if (ch !== '~' && /^[A-Za-z0-9._-]$/.test(ch)) {
+      readable += ch;
+      separatorRun = false;
+    } else {
+      readable += '~' + code.toString(16).toUpperCase().padStart(4, '0');
+      separatorRun = false;
+    }
+  }
+  const trimmed = readable.replace(/^-+/, '') || 'root';
+  return `--${trimmed.slice(0, 251)}--`;
 }
 
 function rebuildWsMap() {
-  const map = new Map();
+  const bySession = new Map();   // 会话 id → 工作区身份
+  const dirToPath = new Map();   // 目录名 → 真实路径（能算出来的）
+
+  // ① 权威：workspace.json 里 path + sessionIds
   try {
     const raw = fs.readFileSync(path.join(dshHome(), 'storages', 'workspace.json'), 'utf8');
-    // ⚠️ tables.workspaces 实际是**对象**（id → 工作区），不是数组：
-    //    之前写成 workspaces[0] 取到 undefined ⇒ 权威来源形同虚设，一路走目录扫描兜底。
     const table = JSON.parse(raw)?.tables?.workspaces;
     const tables = Array.isArray(table) ? (table[0] ?? {}) : (table ?? {});
     for (const ws of Object.values(tables)) {
       const p = String(ws.path ?? '');
       if (!p) continue;
+      try { dirToPath.set(projectKey(p), p); } catch { /* 路径异常就跳过 */ }
       for (const sid of ws.sessionIds ?? []) {
         const id = String(sid);
-        map.set(id, p);
-        map.set(id.replace(/^session-/, ''), p);
+        bySession.set(id, p);
+        bySession.set(id.replace(/^session-/, ''), p);
       }
     }
-  } catch { /* 没有就靠目录扫描 */ }
+  } catch { /* 没有就靠目录映射 */ }
 
-  // 目录扫描：会话目录一定在 sessions/<工作区目录>/ 下
+  // ② 目录扫描：目录名先尝试用正向编码对上真实路径，对不上就把目录名当身份
   try {
     const root = path.join(dshHome(), 'sessions');
     for (const wsDir of fs.readdirSync(root, { withFileTypes: true })) {
       if (!wsDir.isDirectory()) continue;
-      const fallback = decodeWsDir(wsDir.name);
+      const identity = dirToPath.get(wsDir.name) || wsDir.name;
       let entries = [];
       try { entries = fs.readdirSync(path.join(root, wsDir.name), { withFileTypes: true }); } catch { continue; }
       for (const e of entries) {
         if (!e.isDirectory()) continue;
         const id = e.name;
-        if (!map.has(id)) map.set(id, fallback);
+        if (!bySession.has(id)) bySession.set(id, identity);
         const bare = id.replace(/^session-/, '');
-        if (!map.has(bare)) map.set(bare, fallback);
+        if (!bySession.has(bare)) bySession.set(bare, identity);
       }
     }
   } catch { /* 读不到就算了 */ }
 
-  return map;
+  return bySession;
 }
 
 function workspaceOf(sessionId) {
@@ -148,7 +175,7 @@ function workspaceOf(sessionId) {
   const id = String(sessionId ?? '');
   const hit = WS_CACHE.map.get(id) || WS_CACHE.map.get('session-' + id);
   if (hit) return hit;
-  // 未命中（新会话还没落盘）时强刷一次，仍无则退回 cwd
+  // 未命中（新会话还没落盘）时强刷一次；仍无则退回 cwd（最后手段）
   WS_CACHE = { at: now, map: rebuildWsMap() };
   return WS_CACHE.map.get(id) || WS_CACHE.map.get('session-' + id) || process.cwd();
 }
@@ -164,17 +191,40 @@ function profileBlock(force = false) {
     const rows = db()
       .prepare('SELECT category, key, value, pinned, importance FROM profile ORDER BY pinned DESC, importance DESC, updated_at DESC LIMIT 200')
       .all();
-    const picked = [];
-    let used = 0;
+
+    // 修复（F 路 M1）：原来在遍历里 `if (used >= BUDGET) break`，而 pinned 排在最前，
+    // 于是 pinned 一多就在它们内部提前 break ⇒ 只注入 1 条 pinned，还超预算。
+    // 现在改两趟：**pinned 先全部放进**（最多 PINNED_LIMIT 条），再用剩余预算填普通条目。
+    //
+    // 修复（F 路 M2）：同一个 key 可能存在于不同 category（写入时没有全局唯一约束），
+    // 那样会注入两条自相矛盾的行。这里按排序只保留**优先级最高**的那条。
+    const seenKey = new Set();
+    const pinnedRows = [];
+    const otherRows = [];
     for (const r of rows) {
-      const line = `${r.key}=${r.value}`;
-      if (used + line.length + 3 > PROMPT_BUDGET && !(r.pinned && picked.length < PINNED_LIMIT)) continue;
-      picked.push(line);
-      used += line.length + 3;
-      if (used >= PROMPT_BUDGET) break;
+      if (seenKey.has(r.key)) continue;
+      seenKey.add(r.key);
+      (r.pinned ? pinnedRows : otherRows).push(r);
     }
-    if (picked.length) {
-      text = '[用户画像] ' + picked.join(' | ')
+
+    const lines = [];
+    let used = 0;
+    const pushLine = (r) => {
+      const line = `${r.key}=${r.value}`;
+      lines.push(line);
+      used += line.length + 3;
+    };
+
+    for (const r of pinnedRows.slice(0, PINNED_LIMIT)) pushLine(r);
+    // pinned 自己就超预算时不再硬塞普通条目（但 pinned 一条都不丢）
+    for (const r of otherRows) {
+      const cost = r.key.length + String(r.value).length + 3;
+      if (used + cost > PROMPT_BUDGET) continue;
+      pushLine(r);
+    }
+
+    if (lines.length) {
+      text = '[用户画像] ' + lines.join(' | ')
         + '\n（更多特征用 mem_profile_list 查；不要臆造画像里没有的信息）';
     }
   } catch { /* 库坏了就少一段说明，绝不影响主流程 */ }
@@ -245,15 +295,27 @@ async function opFactPut(args = {}, sessionId = '') {
   const unit = args.unit == null ? null : String(args.unit);
   const note = args.note == null ? null : String(args.note);
   const now = Date.now();
-  const existing = liveFactRow(workspace, subject, attribute);
-  if (existing) {
-    db().prepare('UPDATE project_fact SET value=?, unit=?, note=?, source_session=?, updated_at=? WHERE id=?')
-      .run(value, unit, note, sessionId, now, existing.id);
-    return { ok: true, text: `已更新事实：${subject}.${attribute} = ${value}${unit ? ' ' + unit : ''}（原值 ${existing.value}）` };
+  // 修复（G 路）：原来"先查再写"，两个连接并发写同一新键会直接抛 UNIQUE 冲突；
+  //   而且更新时若调用方没给 unit/note，会把旧值静默清空。
+  //   现在用**单条原子 upsert** + COALESCE 保留旧值。
+  const before = liveFactRow(workspace, subject, attribute);
+  db().prepare(`
+    INSERT INTO project_fact(workspace,subject,attribute,value,unit,note,source_session,created_at,updated_at)
+    VALUES(?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(workspace,subject,attribute) WHERE invalid_at IS NULL DO UPDATE SET
+      value = excluded.value,
+      unit  = COALESCE(excluded.unit, project_fact.unit),
+      note  = COALESCE(excluded.note, project_fact.note),
+      source_session = excluded.source_session,
+      updated_at = excluded.updated_at
+  `).run(workspace, subject, attribute, value, unit, note, sessionId, now, now);
+
+  const written = liveFactRow(workspace, subject, attribute);
+  const suffix = unit ? ' ' + unit : '';
+  if (before && before.value !== value) {
+    return { ok: true, text: `已更新事实：${subject}.${attribute} = ${value}${suffix}（原值 ${before.value}）` };
   }
-  db().prepare('INSERT INTO project_fact(workspace,subject,attribute,value,unit,note,source_session,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)')
-    .run(workspace, subject, attribute, value, unit, note, sessionId, now, now);
-  return { ok: true, text: `已记录事实：${subject}.${attribute} = ${value}${unit ? ' ' + unit : ''}\n工作区：${workspace}` };
+  return { ok: true, text: `已记录事实：${subject}.${attribute} = ${value}${suffix}\n工作区：${written?.workspace ?? workspace}` };
 }
 
 async function opFactGet(args = {}, sessionId = '') {
@@ -274,10 +336,13 @@ async function opFactSearch(args = {}, sessionId = '') {
   if (!q) return { ok: false, text: 'query 必填' };
   const workspace = args.allWorkspaces === true ? null : (String(args.workspace ?? '').trim() || workspaceOf(sessionId));
   const limit = Math.max(1, Math.min(Number(args.limit) || 20, 100));
-  const like = `%${q}%`;
+  // 修复（G 路）：LIKE 里的 % 和 _ 是通配符，没转义的话查 "%" 会命中全部、查 "3_3" 会命中外
+  //   "3.3"。这里按 SQLite 的 ESCAPE 规则转义三个字符。
+  const escaped = q.replace(/[\\%_]/g, (m) => '\\' + m);
+  const like = `%${escaped}%`;
   const rows = workspace
-    ? db().prepare(`SELECT * FROM project_fact WHERE invalid_at IS NULL AND workspace=? AND (subject LIKE ? OR attribute LIKE ? OR value LIKE ? OR note LIKE ?) ORDER BY updated_at DESC LIMIT ?`).all(workspace, like, like, like, like, limit)
-    : db().prepare(`SELECT * FROM project_fact WHERE invalid_at IS NULL AND (subject LIKE ? OR attribute LIKE ? OR value LIKE ? OR note LIKE ?) ORDER BY updated_at DESC LIMIT ?`).all(like, like, like, like, limit);
+    ? db().prepare(`SELECT * FROM project_fact WHERE invalid_at IS NULL AND workspace=? AND (subject LIKE ? ESCAPE '\\' OR attribute LIKE ? ESCAPE '\\' OR value LIKE ? ESCAPE '\\' OR note LIKE ? ESCAPE '\\') ORDER BY updated_at DESC LIMIT ?`).all(workspace, like, like, like, like, limit)
+    : db().prepare(`SELECT * FROM project_fact WHERE invalid_at IS NULL AND (subject LIKE ? ESCAPE '\\' OR attribute LIKE ? ESCAPE '\\' OR value LIKE ? ESCAPE '\\' OR note LIKE ? ESCAPE '\\') ORDER BY updated_at DESC LIMIT ?`).all(like, like, like, like, limit);
   if (!rows.length) return { ok: true, text: `没找到含「${q}」的事实` };
   const lines = rows.map((r) => `${r.subject}.${r.attribute} = ${r.value}${r.unit ? ' ' + r.unit : ''}  [${r.workspace.split('\\').pop() || r.workspace}]`);
   return { ok: true, text: `命中 ${rows.length} 条：\n` + lines.join('\n') };
@@ -307,13 +372,24 @@ async function opExport(args = {}) {
   const out = String(args.path ?? '').trim() || path.join(dshHome(), 'memory', 'memory.md');
   const prof = db().prepare('SELECT category,key,value,pinned FROM profile ORDER BY category, pinned DESC').all();
   const facts = db().prepare('SELECT * FROM project_fact WHERE invalid_at IS NULL ORDER BY workspace, subject, attribute').all();
-  const lines = ['# 记忆库导出', '', `导出时间：${new Date().toLocaleString()}`, '', '## 用户画像', ''];
-  for (const p of prof) lines.push(`- ${p.pinned ? '★ ' : ''}[${p.category}] ${p.key} = ${p.value}`);
+  // 修复（G 路）：value/note 里的换行、反引号、管道会把 Markdown 结构破坏掉（一行变多行、
+  //   代码块提前闭合）。导出是给人看的，必须压成单行并把关键符号替换掉。
+  const oneLine = (s) => String(s ?? '')
+    .replace(/[\r\n]+/g, ' ⏎ ')
+    .replace(/`/g, "'")
+    .replace(/\|/g, '\\|')
+    .trim();
+  const lines = ['# 记忆库导出', '', `导出时间：${new Date().toLocaleString(undefined, { hour12: false })}`, '', '## 用户画像', ''];
+  if (!prof.length) lines.push('（空）');
+  for (const p of prof) lines.push(`- ${p.pinned ? '★ ' : ''}[${p.category}] ${oneLine(p.key)} = ${oneLine(p.value)}`);
   lines.push('', '## 项目事实', '');
+  if (!facts.length) lines.push('（空）');
   let ws = null;
   for (const f of facts) {
-    if (f.workspace !== ws) { ws = f.workspace; lines.push('', `### ${ws}`, ''); }
-    lines.push(`- \`${f.subject}.${f.attribute}\` = ${f.value}${f.unit ? ' ' + f.unit : ''}${f.note ? ` — ${f.note}` : ''}`);
+    if (f.workspace !== ws) { ws = f.workspace; lines.push('', `### ${oneLine(ws)}`, ''); }
+    const unit = f.unit ? ' ' + oneLine(f.unit) : '';
+    const note = f.note ? ` — ${oneLine(f.note)}` : '';
+    lines.push(`- \`${oneLine(f.subject)}.${oneLine(f.attribute)}\` = ${oneLine(f.value)}${unit}${note}`);
   }
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(out, lines.join('\n'), 'utf8');

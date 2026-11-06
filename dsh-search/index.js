@@ -85,6 +85,11 @@ function tokenize(text) {
   const out = [];
   const parts = text.match(/[\u4e00-\u9fff\u3040-\u30ff]+|\p{N}{1,3}|[^\s\u4e00-\u9fff\u3040-\u30ff\p{N}]+|\s+/gu) || [];
   for (const part of parts) {
+    // 修复（G 路 #1）：空白与纯标点不建索引。
+    //   之前 `\s+` 也被切成一个 token（byte-level 的 "Ġ"），实测它命中 20303 条消息（占 91%），
+    //   再被每 token 的 LIMIT 截断 ⇒ 带空格的多词查询只在最老的 5000 条里求交，**真值 1 条却返回 0**。
+    //   空白/标点对检索没有区分度，直接丢掉：索引更小，查询也不会再被它们污染。
+    if (!/[\p{L}\p{N}]/u.test(part)) continue;
     let s = '';
     for (const b of Buffer.from(part, 'utf8')) s += byteToUni.get(b);
     let syms = Array.from(s);
@@ -100,6 +105,11 @@ function tokenize(text) {
     for (const sym of syms) out.push(sym);
   }
   return out;
+}
+
+/** 查询归一化：把换行/Tab/连续空格压成单个空格，再 trim。 */
+function normalizeQuery(text) {
+  return String(text ?? '').replace(/\s+/g, ' ').trim();
 }
 
 // ── 会话解码 ────────────────────────────────────────────────────────────────
@@ -230,13 +240,20 @@ function search(db, query, limit) {
   const tokens = [...new Set(tokenize(query))];
   if (tokens.length === 0) return { tokens, rows: [] };
   const stmt = db.prepare('SELECT doc FROM postings WHERE token = ? LIMIT ?');
+  const countStmt = db.prepare('SELECT COUNT(*) AS n FROM postings WHERE token = ?');
   let candidate = null;
+  let skipped = 0;
   for (const tok of tokens) {
-    const set = new Set(stmt.all(tok, MAX_DOCS_PER_TOKEN).map((r) => r.doc));
-    if (set.size === 0) return { tokens, rows: [] };
+    // 修复（G 路 #1）：不再"截断后求交"。命中过多说明这个词没有区分度（停用词性质），
+    //   截断会让交集偏向最老的 doc id ⇒ 假阴性。改成**整词跳过**：宁可放宽召回，绝不少算。
+    const n = countStmt.get(tok).n;
+    if (n > MAX_DOCS_PER_TOKEN) { skipped++; continue; }
+    const set = new Set(stmt.all(tok, n).map((r) => r.doc));
+    if (set.size === 0) return { tokens, rows: [], skipped };
     candidate = candidate === null ? set : new Set([...candidate].filter((x) => set.has(x)));
-    if (candidate.size === 0) return { tokens, rows: [] };
+    if (candidate.size === 0) return { tokens, rows: [], skipped };
   }
+  if (candidate === null) return { tokens, rows: [], skipped, allStopwords: true };
   const getDoc = db.prepare('SELECT id, session, role, ts, text FROM docs WHERE id = ?');
   const rows = [];
   for (const id of candidate) {
@@ -244,19 +261,25 @@ function search(db, query, limit) {
     if (d) rows.push(d);
   }
   rows.sort((a, b) => b.ts - a.ts);
-  return { tokens, rows: rows.slice(0, limit) };
+  return { tokens, rows: rows.slice(0, limit), skipped };
 }
 
 // ── 工具 ────────────────────────────────────────────────────────────────────
 async function opSearch(cfg, args = {}) {
-  const query = String(args.query ?? '').trim();
-  if (!query) return { ok: false, text: 'query 必填' };
+  // 修复（G 路 #2）：查询侧必须和文档侧一样归一化空白。
+  //   文档侧早就把 `\s+` 压成单个空格，查询侧只 trim ⇒ 「虚拟屏\n波特率」会被切成 "Ċ" 而 0 命中。
+  const query = normalizeQuery(args.query);
+  if (!query) return { ok: false, text: 'query 必填（且不能只有空白/标点）' };
   const limit = Math.max(1, Math.min(Number(args.limit) || 10, 50));
   const db = openDb();
   try {
-    const { tokens, rows } = search(db, query, limit);
+    const { tokens, rows, skipped, allStopwords } = search(db, query, limit);
+    if (tokens.length === 0) {
+      return { ok: false, text: `查询里没有可检索的字符（只有空白/标点？）：${JSON.stringify(query)}` };
+    }
     if (rows.length === 0) {
-      return { ok: true, text: `没有命中（分词：${tokens.length} 个 token）。索引可能还没建，先调 search_reindex。` };
+      if (allStopwords) return { ok: true, text: `查询词都是高频停用词（${skipped} 个被跳过），换更具体的词试试` };
+      return { ok: true, text: `没有命中（分词：${tokens.length} 个 token${skipped ? `，${skipped} 个高频词已跳过` : ''}）。索引可能还没建，先调 search_reindex。` };
     }
     const lines = rows.map((r) => {
       const t = new Date(r.ts).toISOString().replace('T', ' ').slice(0, 16);
@@ -264,7 +287,8 @@ async function opSearch(cfg, args = {}) {
       const sid = String(r.session).replace(/^session-/, '').slice(0, 8);
       return `[${t}] ${r.role}  ${sid}\n    ${snippet}`;
     });
-    return { ok: true, text: `命中 ${rows.length} 条（分词 ${tokens.length} 个）：\n` + lines.join('\n') };
+    const note = skipped ? `（${skipped} 个高频词无区分度，已跳过）` : '';
+    return { ok: true, text: `命中 ${rows.length} 条（分词 ${tokens.length} 个）${note}：\n` + lines.join('\n') };
   } finally { db.close(); }
 }
 

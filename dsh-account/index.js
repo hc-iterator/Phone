@@ -132,9 +132,13 @@ function db() {
   DB = new DatabaseSync(path.join(dir, 'usage.db'));
   DB.exec('PRAGMA journal_mode = WAL;');
   DB.exec('PRAGMA synchronous = NORMAL;');
+  // 修复（F 路 A1）：两个进程同时查用量时直接抛 "database is locked"。
+  //   WAL 只解决读写并存，写-写仍要排队；没有 busy_timeout 就立刻失败。
+  DB.exec('PRAGMA busy_timeout = 8000;');
   DB.exec(`
     CREATE TABLE IF NOT EXISTS calls(
       id INTEGER PRIMARY KEY,
+      file TEXT,
       session TEXT NOT NULL,
       ts INTEGER NOT NULL,
       input INTEGER NOT NULL,
@@ -152,24 +156,37 @@ function db() {
       calls INTEGER NOT NULL
     );
   `);
+  // 老库迁移：calls 表补 file 列（修复 F 路 A2：只按会话名 DELETE 会让不同工作区的
+  // 同名会话互相覆盖，而被覆盖的那份因为 files 行还在，永远不会重建）。
+  const cols = DB.prepare("PRAGMA table_info(calls)").all().map((c) => c.name);
+  if (!cols.includes('file')) DB.exec('ALTER TABLE calls ADD COLUMN file TEXT');
+  DB.exec('CREATE INDEX IF NOT EXISTS ix_calls_file ON calls(file)');
   return DB;
 }
 
 function decodeFrames(file) {
   let buf;
-  try { buf = fs.readFileSync(file); } catch { return []; }
+  // 读失败返回 null（不是 []）：调用方据此**不写 files 行**，下次还会重试。
+  // 返回 [] 会被当成"这个文件没有 usage"，把已索引的数据清成 0 且永不重解。
+  try { buf = fs.readFileSync(file); } catch { return null; }
   const events = [];
   let i = 0;
+  let frames = 0;
+  let badFrames = 0;
   while ((i = buf.indexOf(ZSTD_MAGIC, i)) !== -1) {
+    frames++;
     try {
       const text = zstdDecompressSync(buf.subarray(i)).toString('utf8');
       for (const line of text.split('\n')) {
         if (!line) continue;
         try { events.push(JSON.parse(line)); } catch { /* 半行 */ }
       }
-    } catch { /* 坏帧跳过 */ }
+    } catch { badFrames++; }
     i += ZSTD_MAGIC.length;
   }
+  // 帧解不开通常是"文件正在追加，末帧还没写完"。这种情况返回 null 让调用方跳过，
+  // 下次 size 变化时再解 —— 而不是把一个不完整的结果当成最终结果记下来。
+  if (frames > 0 && badFrames > 0) return null;
   return events;
 }
 
@@ -196,27 +213,45 @@ function indexFile(file, session) {
   const known = db().prepare('SELECT mtime, size FROM files WHERE path=?').get(file);
   if (known && known.mtime === Math.floor(st.mtimeMs) && known.size === st.size) return 0;
 
-  db().prepare('DELETE FROM calls WHERE session=?').run(session);
   const events = decodeFrames(file);
-  const ins = db().prepare('INSERT INTO calls(session, ts, input, output, cache_read, cache_write, total) VALUES(?,?,?,?,?,?,?)');
+  // 修复（F 路 A6）：读失败/半帧时**不要**写 files 行。
+  //   否则"读到截断的末帧"会被记成已索引，之后 size 不变就再也不会重解 ⇒ 永久漏计；
+  //   更糟的是 readFileSync 失败会返回 []，等于把该会话已有数据清空并记成 0。
+  if (events === null) return -1;
+
+  const ins = db().prepare('INSERT INTO calls(file, session, ts, input, output, cache_read, cache_write, total) VALUES(?,?,?,?,?,?,?,?)');
   let n = 0;
-  for (const e of events) {
-    if (e?.type !== 'assistant/message') continue;
-    const u = e.data?.usage;
-    if (!u) continue;
-    ins.run(
-      session,
-      Number(e.time) || 0,
-      Number(u.inputTokens) || 0,
-      Number(u.outputTokens) || 0,
-      Number(u.cacheReadTokens) || 0,
-      Number(u.cacheWriteTokens) || 0,
-      Number(u.totalTokens) || 0,
-    );
-    n++;
+  // 修复（F 路 A3）：删旧 + 插新 + 写 files 行必须在一个事务里，
+  //   否则中途被打断（崩溃/锁超时）会留下"files 说已索引、calls 却是空的"，永久丢数。
+  db().exec('BEGIN IMMEDIATE');
+  try {
+    // 修复（F 路 A2）：按**文件路径**删，而不是按会话名 —— 不同工作区可能有同名会话。
+    db().prepare('DELETE FROM calls WHERE file=?').run(file);
+    // 兼容旧库：老行没有 file 列，按会话名 + 空 file 再兜一次
+    db().prepare('DELETE FROM calls WHERE session=? AND file IS NULL').run(session);
+    for (const e of events) {
+      if (e?.type !== 'assistant/message') continue;
+      const u = e.data?.usage;
+      if (!u) continue;
+      ins.run(
+        file,
+        session,
+        Number(e.time) || 0,
+        Number(u.inputTokens) || 0,
+        Number(u.outputTokens) || 0,
+        Number(u.cacheReadTokens) || 0,
+        Number(u.cacheWriteTokens) || 0,
+        Number(u.totalTokens) || 0,
+      );
+      n++;
+    }
+    db().prepare('INSERT OR REPLACE INTO files(path, mtime, size, calls) VALUES(?,?,?,?)')
+      .run(file, Math.floor(st.mtimeMs), st.size, n);
+    db().exec('COMMIT');
+  } catch (error) {
+    try { db().exec('ROLLBACK'); } catch { /* 已经回滚 */ }
+    throw error;
   }
-  db().prepare('INSERT OR REPLACE INTO files(path, mtime, size, calls) VALUES(?,?,?,?)')
-    .run(file, Math.floor(st.mtimeMs), st.size, n);
   return n;
 }
 
@@ -228,7 +263,15 @@ function startOfToday() {
 
 async function opUsage(args = {}, sessionId = '') {
   const scope = String(args.scope ?? 'today');
-  const days = Number.isFinite(args.days) ? Number(args.days) : 7;
+  // 修复（F 路 A4/A5）：days 之前用 Number.isFinite 判断，传字符串 "3" 会被静默当成 7 天；
+  //   days<=0 或超大也没有校验（0 → "最近 0 天"、-1 → since 落在未来、10000 → 等价全部）。
+  let days = 7;
+  if (args.days !== undefined && args.days !== null) {
+    const parsed = Number(args.days);
+    if (!Number.isFinite(parsed)) return { ok: false, text: `days 必须是数字（收到 ${JSON.stringify(args.days)}）` };
+    if (parsed < 1) return { ok: false, text: `days 必须 ≥ 1（收到 ${parsed}）` };
+    days = Math.min(parsed, 36500);
+  }
   let since = 0;
   let until = Date.now();
 
@@ -258,14 +301,22 @@ async function opUsage(args = {}, sessionId = '') {
   if (since > 0) { where.push('ts >= ?'); params.push(since); }
   if (until > 0) { where.push('ts <= ?'); params.push(until); }
   const whereSql = where.length ? 'WHERE ' + where.join(' AND ') : '';
-  const row = db().prepare(`
-    SELECT COUNT(*) AS calls,
-           COALESCE(SUM(input),0) AS input,
-           COALESCE(SUM(output),0) AS output,
-           COALESCE(SUM(cache_read),0) AS cacheRead,
-           COALESCE(SUM(cache_write),0) AS cacheWrite,
-           COALESCE(SUM(total),0) AS total
-    FROM calls ${whereSql}`).get(...params);
+  let row;
+  try {
+    row = db().prepare(`
+      SELECT COUNT(*) AS calls,
+             COALESCE(SUM(input),0) AS input,
+             COALESCE(SUM(output),0) AS output,
+             COALESCE(SUM(cache_read),0) AS cacheRead,
+             COALESCE(SUM(cache_write),0) AS cacheWrite,
+             COALESCE(SUM(total),0) AS total
+      FROM calls ${whereSql}`).get(...params);
+  } catch (error) {
+    // 修复（F 路 A1）：锁超时不该以异常形式冒给模型；给出可行动的说法。
+    const msg = error instanceof Error ? error.message : String(error);
+    if (/locked|busy/i.test(msg)) return { ok: false, text: '用量库正被另一个进程写入（锁超时），稍后重试即可。' };
+    return { ok: false, text: `查询用量失败：${msg}` };
+  }
 
   const scopeLabel = scope === 'today' ? '今天'
     : scope === 'days' ? `最近 ${days} 天`
@@ -347,4 +398,9 @@ if (process.argv[1] && process.argv[1].endsWith('index.js') && process.argv.incl
   console.log((await opBalance({ force: true })).text);
   console.log('\n' + (await opReindex({ maxFiles: 20 })).text);
   console.log('\n' + (await opUsage({ scope: 'all' }, '')).text);
+}
+// ── 并发测试入口：node index.js --usage-test ─────────────────────────────────
+if (process.argv[1] && process.argv[1].endsWith('index.js') && process.argv.includes('--usage-test')) {
+  const r = await opUsage({ scope: 'all' }, '');
+  console.log((r.ok ? 'OK  ' : 'FAIL') + ' ' + r.text.split('\n')[0]);
 }

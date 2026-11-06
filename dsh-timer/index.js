@@ -25,19 +25,28 @@ const OUTPUT_SCHEMA = {
 function human(ms) {
   if (!Number.isFinite(ms)) ms = 0;
   const neg = ms < 0;
-  ms = Math.abs(ms);
-  const h = Math.floor(ms / 3600000);
-  const m = Math.floor((ms % 3600000) / 60000);
-  const s = (ms % 60000) / 1000;
+  // 修复（G 路）：先取整到秒再拆时分。
+  //   之前 `Math.floor(s)` 会留下 "60.0s"（实测 human(59950) = "60.0s"），
+  //   也就是 59.95 秒显示成 60 秒却不进位。现在四舍五入后统一进位。
+  let totalSec = Math.round(Math.abs(ms) / 1000);
+  const h = Math.floor(totalSec / 3600);
+  totalSec %= 3600;
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
   const parts = [];
   if (h > 0) parts.push(h + 'h');
-  if (h > 0 || m > 0) {
+  if (h > 0) {
     parts.push(String(m).padStart(2, '0') + 'm');
-    parts.push(String(Math.floor(s)).padStart(2, '0') + 's');
+    parts.push(String(s).padStart(2, '0') + 's');
+  } else if (m > 0) {
+    parts.push(m + 'm');
+    parts.push(String(s).padStart(2, '0') + 's');
   } else {
-    parts.push(s.toFixed(1) + 's');
+    parts.push(s + 's');
   }
-  return (neg ? '-' : '') + parts.join(' ');
+  // 0 秒不要显示成 "-0s"（-200ms 四舍五入后带符号没有意义）
+  const showNeg = neg && (h > 0 || m > 0 || s > 0);
+  return (showNeg ? '-' : '') + parts.join(' ');
 }
 
 // ── 每个会话一份状态 ────────────────────────────────────────────────────────
@@ -110,6 +119,19 @@ async function opCountdown(args = {}, sessionId = '') {
   if (action === 'start') {
     const seconds = Number(args.seconds);
     if (!Number.isFinite(seconds) || seconds <= 0) return { ok: false, text: 'seconds 必须是正数（秒）' };
+    // 修复（G 路）：setTimeout 超过 2^31-1 ms（约 24.8 天）会立刻溢出成 1ms 触发。
+    //   直接拒绝，比"看起来成功但立刻到期"诚实。
+    if (seconds * 1000 > 2147483647) {
+      return { ok: false, text: `倒计时最长 2147483 秒（约 24.8 天），setTimeout 不支持更长` };
+    }
+    // 修复（G 路）：到期后 endsAt 没清空 ⇒ 再 start 被拒，提示"剩 -0.2s"，不 cancel 就永远开不了。
+    //   现在只要已到期，就自动视为结束并允许重开。
+    if (cd.endsAt !== null && remainingOf(cd) <= 0) {
+      clearCountdownTimer(cd);
+      cd.endsAt = null;
+      cd.totalMs = 0;
+      cd.fired = false;
+    }
     if (cd.endsAt !== null) {
       return { ok: false, text: `本对话已有倒计时在跑（剩 ${human(remainingOf(cd))}）。先 cancel 再开新的。` };
     }
