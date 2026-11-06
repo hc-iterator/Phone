@@ -1,0 +1,9 @@
+{
+  "name": "@local/dsh-account",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Balance and token-usage tools: DeepSeek account balance + per-session token accounting",
+  "type": "module",
+  "exports": { ".": "./index.js", "./package.json": "./package.json" },
+  "files": ["index.js", "README.md"]
+}
