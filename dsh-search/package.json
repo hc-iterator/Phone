@@ -1,0 +1,9 @@
+{
+  "name": "@local/dsh-search",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Exact Chinese conversation search: DeepSeek BPE tokens + AND semantics over multi-frame zstd session logs",
+  "type": "module",
+  "exports": { ".": "./index.js", "./package.json": "./package.json" },
+  "files": ["index.js", "README.md"]
+}
