@@ -33,6 +33,7 @@ param(
   [switch]$Snapshot,
   [switch]$Restore,
   [string]$Target = '',
+  [switch]$CursorOnly,
   [switch]$Quiet
 )
 
@@ -170,6 +171,14 @@ if ($userMoved) {
   exit 0
 }
 
+# 只恢复光标：点击/输入本来就是要激活目标窗口，此时把焦点抢回去等于把动作撤销
+# （实战：点开记事本 → 恢复把焦点还给浏览器 → 后面 gui_type 打到了浏览器）。
+if ($CursorOnly) {
+  [void][GuiEnv]::SetCursorPos([int]$s.cursorX, [int]$s.cursorY)
+  if (-not $Quiet) { 'restored cursor-only' }
+  exit 0
+}
+
 $restored = @()
 # ① 焦点
 if ($nowFg -ne [int64]$s.foreground) {
@@ -189,3 +198,4 @@ $restored += 'cursor'
 
 if (-not $Quiet) { 'restored ' + ($restored -join '+') }
 exit 0
+

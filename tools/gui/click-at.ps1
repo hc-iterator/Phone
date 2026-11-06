@@ -31,7 +31,8 @@ param(
   [Parameter(Mandatory = $true, Position = 1)][int]$Y,
   [ValidateSet('left', 'right', 'middle')][string]$Button = 'left',
   [switch]$DoubleClick,
-  [bool]$Restore = $true
+  [bool]$Restore = $true,
+  [string]$Hwnd = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -102,6 +103,38 @@ if ($X -lt $vx -or $Y -lt $vy -or $X -ge ($vx + $vw) -or $Y -ge ($vy + $vh)) {
 $ax = [int](($X - $vx) * 65535 / [Math]::Max(1, $vw - 1))
 $ay = [int](($Y - $vy) * 65535 / [Math]::Max(1, $vh - 1))
 
+# 鼠标操作自带激活：先把目标窗口切到前台，再点。
+# 这样"点"和"后续输入"作用在同一个窗口上，不会串到用户正在用的窗口。
+if ($Hwnd -ne '') {
+  if (-not ('ClickFg' -as [type])) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class ClickFg {
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, IntPtr p);
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool f);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+  public static bool Force(IntPtr h) {
+    if (GetForegroundWindow() == h) return true;
+    SetForegroundWindow(h);
+    if (GetForegroundWindow() == h) return true;
+    uint ft = GetWindowThreadProcessId(GetForegroundWindow(), IntPtr.Zero);
+    uint me = GetCurrentThreadId();
+    bool at = AttachThreadInput(me, ft, true);
+    SetForegroundWindow(h);
+    if (at) AttachThreadInput(me, ft, false);
+    return GetForegroundWindow() == h;
+  }
+}
+"@
+  }
+  $h = if ($Hwnd -match '^0x') { [IntPtr]([Convert]::ToInt64($Hwnd, 16)) } else { [IntPtr][int64]$Hwnd }
+  if (-not [ClickFg]::Force($h)) { [Console]::Error.WriteLine('[click] 无法激活目标窗口'); exit 3 }
+  Start-Sleep -Milliseconds 150
+}
+
 $orig = New-Object MouseIn+POINT
 [void][MouseIn]::GetCursorPos([ref]$orig)
 
@@ -125,4 +158,5 @@ if ($Restore) {
 }
 
 "clicked ($X,$Y) button=$Button double=$($DoubleClick.IsPresent) abs=$ax,$ay vdesk=$vx,$vy ${vw}x${vh} restored=$Restore"
+
 
