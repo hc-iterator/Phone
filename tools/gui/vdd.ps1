@@ -43,11 +43,56 @@ param(
   [switch]$Serve,
   [switch]$Enable,
   [switch]$Disable,
+  [switch]$Reset,
   [int]$ParentPid = 0
 )
 
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+# ── 自愈：虚拟屏卡死时的硬重置 ────────────────────────────────────────────────
+# 症状（2026-11-06 实遇）：ADD 返回 >=0，但 Windows 屏幕上就是不出现第二块屏；
+# 反复 add/remove 也无效 —— 驱动内部状态卡住了。这个分支按"清干净再重来"处理，
+# 并在最后如实说明"要不要重启系统"，而不是假装成功。
+if ($Reset) {
+  $pwshExe = (Get-Process -Id $PID).Path
+  $me = $PID
+  Get-CimInstance Win32_Process -Filter "Name='pwsh.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.ProcessId -ne $me -and $_.CommandLine -like '*-File*vdd.ps1*' -and $_.CommandLine -notlike '*Get-CimInstance*' } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+  "1) 已停所有 keeper"
+  Remove-Item (Join-Path $env:TEMP 'picophone-vdd-keeper.lock') -Force -ErrorAction SilentlyContinue
+  Start-Sleep -Seconds 4
+
+  # 拔掉所有可能残留的虚拟屏
+  1..3 | ForEach-Object {
+    & $pwshExe -NoProfile -File $PSCommandPath -Remove 0 2>$null | Out-Null
+    Start-Sleep -Seconds 2
+  }
+  "2) 已尝试拔除残留显示器"
+  Start-Sleep -Seconds 4
+
+  New-Item -ItemType File -Path (Join-Path $env:TEMP 'picophone-vdd.enable') -Force | Out-Null
+  Start-Process -FilePath $pwshExe -ArgumentList @('-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',$PSCommandPath,'-Serve') -WindowStyle Hidden | Out-Null
+  "3) keeper 已重启，等待屏幕出现…"
+
+  Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+  $ok = $false
+  for ($i = 1; $i -le 12; $i++) {
+    Start-Sleep -Seconds 2
+    $n = ([System.Windows.Forms.Screen]::AllScreens | Measure-Object).Count
+    if ($n -ge 2) { $ok = $true; "   第${i}次检查：屏幕数=$n ✓"; break }
+  }
+  if (-not $ok) {
+    "❌ 重置失败：ADD 说成功，但系统里始终只有 1 块屏。"
+    "   这是驱动内部状态卡死，脚本层修不了。可尝试："
+    "   · 设备管理器里禁用再启用 'Parsec Virtual Display Adapter'；"
+    "   · 或重启系统（最稳）。"
+    exit 3
+  }
+  "reset=ok"
+  exit 0
+}
+
 # ── 开关：虚拟屏与 keeper 绑定（用户要求：keeper 跟着虚拟屏生、跟着虚拟屏死）──
 $enableFlag = Join-Path $env:TEMP 'picophone-vdd.enable'
 $keeperCmd = 'pwsh.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $PSCommandPath + '" -Serve'
@@ -62,8 +107,10 @@ if ($Enable) {
   $existing = Get-Keepers
   if ($existing) { "keeper 已在运行: " + (($existing | ForEach-Object { $_.ProcessId }) -join ',') }
   else {
-    $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $keeperCmd }
-    "keeper 已拉起: pid=$($r.ProcessId) returnValue=$($r.ReturnValue)"
+    # 用绝对路径的 pwsh + Start-Process：WMI 创建时 PATH 里不一定有 pwsh.exe（实测起来就退）。
+    $pwshExe = (Get-Process -Id $PID).Path
+    $p = Start-Process -FilePath $pwshExe -ArgumentList @('-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-Serve') -WindowStyle Hidden -PassThru
+    "keeper 已拉起: pid=$($p.Id)"
   }
   Start-Sleep -Seconds 7
   Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
@@ -313,6 +360,7 @@ finally { [void][VddCtl]::CloseHandle($h) }
 
 Start-Sleep -Milliseconds 800
 Show-Status
+
 
 
 
