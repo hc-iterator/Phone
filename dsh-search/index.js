@@ -426,5 +426,18 @@ if (process.argv[1] && process.argv[1].endsWith('index.js') && process.argv.incl
     console.log(`完成：会话 ${i}（失败 ${failed}），消息 ${total}，倒排 ${postings}，用时 ${((Date.now()-started)/1000).toFixed(1)}s`);
   } finally { db.close(); }
 }
-
-
+// ── 查询 CLI（测试/排错用）：node index.js --search "关键词" ────────────────
+if (process.argv[1] && process.argv[1].endsWith('index.js') && process.argv.includes('--search')) {
+  const q = process.argv[process.argv.indexOf('--search') + 1] ?? '';
+  const db = openDb();
+  try {
+    const norm = normalizeQuery(q);
+    const { tokens, rows, skipped, allStopwords } = search(db, norm, 5);
+    console.log(`查询 ${JSON.stringify(q)} -> 归一化 ${JSON.stringify(norm)}`);
+    console.log(`分词 ${tokens.length} 个${skipped ? `（跳过 ${skipped} 个高频词）` : ''}${allStopwords ? ' 全是停用词' : ''}`);
+    console.log(`命中 ${rows.length} 条`);
+    for (const r of rows) {
+      console.log(`  [${new Date(r.ts).toISOString().slice(0, 16)}] ${r.role} ${r.text.slice(0, 90)}`);
+    }
+  } finally { db.close(); }
+}
