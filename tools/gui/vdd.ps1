@@ -42,7 +42,8 @@ param(
   [int]$KeepAliveSeconds = 0,
   [switch]$Serve,
   [switch]$Enable,
-  [switch]$Disable
+  [switch]$Disable,
+  [int]$ParentPid = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -287,6 +288,16 @@ try {
         Start-Sleep -Milliseconds 50
         $n++
         if ($n % 1200 -eq 0) { "alive $([int]($n/20)) s" | Out-File -FilePath $logPath -Encoding utf8 -Append }
+          # 绑父进程：DSH 被硬杀时清理函数不会执行，只能靠这里发现"爹没了"→ 清理并退出，
+          # 否则会留下一个继续 pinging 的孤儿 keeper 和一块没人管的假屏。
+          if ($ParentPid -gt 0 -and ($n % 40 -eq 0)) {
+            $parentAlive = $false
+            try { $null = Get-Process -Id $ParentPid -ErrorAction Stop; $parentAlive = $true } catch { $parentAlive = $false }
+            if (-not $parentAlive) {
+              "父进程 $ParentPid 已消失，keeper 退出" | Out-File -FilePath $logPath -Encoding utf8 -Append
+              break
+            }
+          }
       }
     } finally { if (Test-Path (Join-Path $PSScriptRoot 'confine-cursor.ps1')) { & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'confine-cursor.ps1') -Off | Out-Null }; [void][VddCtl]::CloseHandle($h); "=== keeper 退出 $(Get-Date) ===" | Out-File -FilePath $logPath -Encoding utf8 -Append }
     exit 0
@@ -302,6 +313,7 @@ finally { [void][VddCtl]::CloseHandle($h) }
 
 Start-Sleep -Milliseconds 800
 Show-Status
+
 
 
 

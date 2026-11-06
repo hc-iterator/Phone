@@ -60,7 +60,10 @@ $placed = $false
 while ((Get-Date) -lt $deadline) {
   Start-Sleep -Milliseconds 400
   try { $p.Refresh() } catch { break }
-  if ($p -and $p.HasExited) { [Console]::Error.WriteLine('[launch] 进程已退出'); exit 4 }
+# UWP 的应用执行别名（calc.exe / notepad 之类）会返回一个"立刻退出"的存根进程，
+  # 真窗口是另一个进程开的 ⇒ 不能因为存根退出就放弃（否则窗口留在用户主屏上没人管）。
+  $stubExited = $false
+  if ($p -and $p.HasExited) { $stubExited = $true; $p = $null }
   $list = & pwsh -NoProfile -File (Join-Path $dir 'list-windows.ps1') -All -Json 2>$null | ConvertFrom-Json
   $w = if ($p) { $list | Where-Object { $_.pid -eq $p.Id } | Select-Object -First 1 }
        elseif ($TitleMatch -ne '') { $list | Where-Object { $_.title -match $TitleMatch } | Select-Object -First 1 }
@@ -79,6 +82,7 @@ while ((Get-Date) -lt $deadline) {
   }
 }
 if (-not $placed) { [Console]::Error.WriteLine("[launch] 等不到窗口（${WaitSeconds}s）"); exit 5 }
+
 
 
 
