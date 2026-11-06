@@ -78,9 +78,24 @@ public class Typist {
     Send(down); Send(up);
   }
 
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, IntPtr p);
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool f);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+
+  /// 稳健激活：直接 SetForegroundWindow 会被前台锁静默拒绝（实测钉钉上报"无法切到前台"）。
+  /// 三步：ALT 轻点 → SetForegroundWindow → AttachThreadInput 再试一次。
   public static bool Focus(IntPtr h) {
     if (GetForegroundWindow() == h) return true;
+    keybd_event(0x12, 0, 0, UIntPtr.Zero);
+    keybd_event(0x12, 0, 2, UIntPtr.Zero);
     SetForegroundWindow(h);
+    if (GetForegroundWindow() == h) return true;
+    uint ft = GetWindowThreadProcessId(GetForegroundWindow(), IntPtr.Zero);
+    uint me = GetCurrentThreadId();
+    bool at = AttachThreadInput(me, ft, true);
+    SetForegroundWindow(h);
+    if (at) AttachThreadInput(me, ft, false);
     return GetForegroundWindow() == h;
   }
 }
@@ -119,3 +134,4 @@ finally {
     & pwsh -NoProfile -File $guard @a 2>$null | Out-Null
   }
 }
+

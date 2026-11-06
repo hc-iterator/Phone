@@ -101,7 +101,13 @@ switch ($Method) {
       [Console]::Error.WriteLine("[uia] 该控件不支持 Invoke（$desc）")
       exit 4
     }
-    $pat.Invoke()
+    try { $pat.Invoke() }
+    catch {
+      [Console]::Error.WriteLine("[uia] 调用失败：$($_.Exception.Message)")
+      [Console]::Error.WriteLine("[uia] 常见原因：控件 enabled=false（Qt/CEF 的搜索框常这样）。")
+      [Console]::Error.WriteLine("[uia] 兜底：先 gui_click 点到它，再 gui_type(hwnd=...) 输入。")
+      exit 5
+    }
     "invoked $desc"
   }
   'value' {
@@ -110,7 +116,13 @@ switch ($Method) {
       [Console]::Error.WriteLine("[uia] 该控件不支持 Value（$desc）")
       exit 4
     }
-    $pat.SetValue($Value)
+    try { $pat.SetValue($Value) }
+    catch {
+      [Console]::Error.WriteLine("[uia] 设值失败：$($_.Exception.Message)")
+      [Console]::Error.WriteLine("[uia] 常见原因：控件 enabled=false（Qt 的搜索框实测如此），UIA 拒绝写值。")
+      [Console]::Error.WriteLine("[uia] 兜底：gui_click 点到输入框 → gui_type(hwnd=..., text=...) 走键盘输入。")
+      exit 5
+    }
     "value-set $desc -> '$Value'"
   }
   'select' {
@@ -123,3 +135,4 @@ switch ($Method) {
     "selected $desc"
   }
 }
+
