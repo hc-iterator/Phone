@@ -326,8 +326,27 @@ try {
     }
       # 虚拟屏插上了，但它是"看不见的"：把物理鼠标锁在主屏内，别让用户把指针滑进去丢掉。
       # 解锁在 finally 里（keeper 退出即恢复），否则用户会莫名其妙被锁住。
-      $confine = Join-Path $PSScriptRoot 'confine-cursor.ps1'
-      if (Test-Path $confine) { & pwsh -NoProfile -File $confine -On | Out-Null }
+      # ⚠️ 必须在本进程内锁鼠标：之前 spawn 一个 pwsh 去锁，那 2 秒里没 ping
+      # ⇒ 驱动认为 keeper 死了 ⇒ 把刚插上的虚拟屏拔掉（实测：ADD 后屏出现又消失）。
+      if (-not ('VddClip' -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class VddClip {
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+  [DllImport("user32.dll")] public static extern bool ClipCursor(IntPtr r);
+  [DllImport("user32.dll")] public static extern int GetSystemMetrics(int i);
+  public static void ToPrimary() {
+    RECT r = new RECT();
+    r.Left = 0; r.Top = 0; r.Right = GetSystemMetrics(0); r.Bottom = GetSystemMetrics(1);
+    IntPtr p = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(RECT)));
+    try { Marshal.StructureToPtr(r, p, false); ClipCursor(p); } finally { Marshal.FreeHGlobal(p); }
+  }
+  public static void Release() { ClipCursor(IntPtr.Zero); }
+}
+"@
+      }
+      [VddClip]::ToPrimary()
     $n = 0
     try {
       while ($true) {
@@ -346,7 +365,14 @@ try {
             }
           }
       }
-    } finally { if (Test-Path (Join-Path $PSScriptRoot 'confine-cursor.ps1')) { & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'confine-cursor.ps1') -Off | Out-Null }; [void][VddCtl]::CloseHandle($h); "=== keeper 退出 $(Get-Date) ===" | Out-File -FilePath $logPath -Encoding utf8 -Append }
+    } finally {
+      # 虚拟屏一拔，屏上的窗口会被 Windows 甩回主屏（用户会突然看到一堆"本来看不见"的窗口）。
+      # 所以退出时先把虚拟屏上的窗口关掉，再解除鼠标裁剪。只关非主屏上的窗口，主屏一律不碰。
+      try {
+        $closer = Join-Path $PSScriptRoot 'close-vd-windows.ps1'
+        if (Test-Path $closer) { & pwsh -NoProfile -File $closer -GraceMs 800 2>$null | Out-File -FilePath $logPath -Encoding utf8 -Append }
+      } catch { }
+      try { [VddClip]::Release() } catch {} ; [void][VddCtl]::CloseHandle($h); "=== keeper 退出 $(Get-Date) ===" | Out-File -FilePath $logPath -Encoding utf8 -Append }
     exit 0
   }
   if ($KeepAliveSeconds -gt 0) {
@@ -360,6 +386,8 @@ finally { [void][VddCtl]::CloseHandle($h) }
 
 Start-Sleep -Milliseconds 800
 Show-Status
+
+
 
 
 
