@@ -381,6 +381,26 @@ async function opGuiType(cfg, args = {}) {
   }
 }
 
+// ── 关闭窗口 ────────────────────────────────────────────────────────────────
+// UIA 对 WinUI3/自绘窗口（任务管理器、部分 Electron）只暴露 Pane，标题栏的 × 不在树里，
+// uia-invoke 点不到。坐标点 × 又太脆。这里走标准关闭消息：WM_CLOSE → SC_CLOSE → 复核。
+// 实测任务管理器：WM_CLOSE 无效，SC_CLOSE 生效并让进程退出。
+async function opGuiClose(cfg, args = {}) {
+  const hwnd = String(args.hwnd ?? '').trim();
+  if (!hwnd) return { ok: false, exitCode: null, text: 'hwnd 必填' };
+  if (!realScreenAllowed(cfg, args)) return noVirtualScreen();
+  const argv = ['-File', guiScriptPath(cfg, 'close-window.ps1'), hwnd];
+  if (Number.isFinite(args.graceMs)) argv.push('-GraceMs', String(args.graceMs));
+  if (args.force === true) argv.push('-Force');
+  try {
+    const raw = execFileSync('pwsh', ['-NoProfile', '-NonInteractive', ...argv], { encoding: 'utf8', windowsHide: true, timeout: 30000 });
+    return { ok: true, exitCode: 0, text: raw.trim() };
+  } catch (error) {
+    const out = error && error.stdout ? String(error.stdout).trim() : '';
+    return { ok: false, exitCode: null, text: (out ? out + '\n' : '') + `关闭失败：${error instanceof Error ? error.message : String(error)}` };
+  }
+}
+
 async function opGuiVerify(cfg, args = {}) {
   const hwnd = String(args.hwnd ?? '').trim();
   // 审计 H1：这里原来接受任意 PowerShell 文本并交给 Invoke-Expression ⇒ 宿主进程任意代码执行。
@@ -423,6 +443,7 @@ const OPS = {
   gui_uia: opGuiUia,
   gui_click: opGuiClick,
   gui_verify: opGuiVerify,
+  gui_close: opGuiClose,
   gui_type: opGuiType,
   gui_ops: opGuiOps,
   // 注意：opGuiVdd 成功后要清屏数缓存，否则刚开的屏 5 秒内仍被判'没有第二块屏'
@@ -686,6 +707,23 @@ function buildToolDefinitions(cfg) {
       ),
       tool(
         cfg,
+        'gui_close',
+        'Close ONE window like its x button (WM_CLOSE then SC_CLOSE, never killing the process unless force:true). Use it when UIA exposes no close button (WinUI3 apps such as Task Manager).',
+        {
+          type: 'object',
+          additionalProperties: false,
+          required: ['hwnd'],
+          properties: {
+            hwnd: { type: 'string', description: 'Window handle from gui_windows.' },
+            graceMs: { type: 'number', description: 'Wait after each step; default 800.' },
+            force: { type: 'boolean', description: 'Allow TerminateProcess as the last resort (loses unsaved data). Default false.' },
+            allowRealScreen: { type: 'boolean', description: "Allow acting on the user's real screen when no virtual display exists (default false: refuse)." },
+          },
+        },
+        'gui_close',
+      ),
+      tool(
+        cfg,
         'gui_type',
         "Type text into a window (Chinese OK, no IME needed), optionally followed by Enter. Pass `hwnd` to activate the target first; focus/cursor/IME are restored afterwards. The only way to drive apps that expose neither UIA nor DOM (DingTalk, WeChat desktop).",
         {
@@ -734,6 +772,8 @@ export async function apply(ctx, rawConfig) {
   // DSH 退出/插件卸载时连带清理：留一个孤儿 keeper 等于留一块没人管的假屏
   ctx.effect(() => () => stopKeeper(), 'dsh-gui: vdd keeper lifetime');
 }
+
+
 
 
 
