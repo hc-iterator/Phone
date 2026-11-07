@@ -457,23 +457,49 @@ function tool(cfg, name, description, parameters, opName) {
 //   · 插件卸载/DSH 退出 ⇒ ctx.effect 的清理函数 kill 它 ⇒ 屏跟着消失
 //   · DSH 被硬杀（kill -9）时清理函数不会跑 ⇒ keeper 自己带 -ParentPid 轮询父进程，父没了就自杀
 let keeperChild = null;
+// 任务栏搬运器：用户点任务栏上"虚拟屏窗口"的图标时，把窗口搬到主屏。
+// 与 keeper 同生命周期 —— 没有虚拟屏时它无事可做，留着只会空转。
+let bringChild = null;
 
 function keeperAlive() {
   return Boolean(keeperChild && keeperChild.exitCode === null && !keeperChild.killed);
 }
 
+function startBring(cfg) {
+  if (bringChild && bringChild.exitCode === null && !bringChild.killed) return bringChild;
+  const script = guiScriptPath(cfg, 'bring-to-primary.ps1');
+  if (!existsSync(script)) return null;
+  try {
+    bringChild = spawn('pwsh', ['-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', script, '-Watch'], {
+      stdio: 'ignore', windowsHide: true, detached: false,
+    });
+    bringChild.on('exit', () => { bringChild = null; });
+  } catch {
+    bringChild = null;
+  }
+  return bringChild;
+}
+
+function stopBring() {
+  if (!bringChild) return;
+  try { bringChild.kill(); } catch { /* 已经没了 */ }
+  bringChild = null;
+}
+
 function startKeeper(cfg) {
-  if (keeperAlive()) return keeperChild;
+  if (keeperAlive()) { startBring(cfg); return keeperChild; }
   const script = guiScriptPath(cfg, 'vdd.ps1');
   try { mkdirSync(tmpdir(), { recursive: true }); } catch {}
   keeperChild = spawn('pwsh', ['-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', script, '-Serve', '-ParentPid', String(process.pid)], {
     stdio: 'ignore', windowsHide: true, detached: false,
   });
   keeperChild.on('exit', () => { keeperChild = null; });
+  startBring(cfg);
   return keeperChild;
 }
 
 function stopKeeper() {
+  stopBring();
   if (!keeperChild) return;
   try { keeperChild.kill(); } catch { /* 已经没了 */ }
   keeperChild = null;
@@ -708,6 +734,7 @@ export async function apply(ctx, rawConfig) {
   // DSH 退出/插件卸载时连带清理：留一个孤儿 keeper 等于留一块没人管的假屏
   ctx.effect(() => () => stopKeeper(), 'dsh-gui: vdd keeper lifetime');
 }
+
 
 
 
