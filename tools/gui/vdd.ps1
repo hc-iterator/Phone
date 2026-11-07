@@ -356,6 +356,10 @@ public class VddClip {
     try {
       while ($true) {
         [VddCtl]::Ping($h)
+          # 裁剪要**持续维持**：ClipCursor 是全局共享状态，任何别的进程（我们的 click-at 解裁剪、
+          # 其它工具、甚至某些游戏）一调用就会清掉。之前只在插屏时锁一次，实测几分钟后鼠标就能跑进虚拟屏。
+          # 每 20 次心跳（约 1 秒）重新锁一次，代价可以忽略。
+          if ($n % 20 -eq 0) { try { [VddClip]::ToPrimary() } catch { } }
         Start-Sleep -Milliseconds 50
         $n++
         if ($n % 1200 -eq 0) { "alive $([int]($n/20)) s" | Out-File -FilePath $logPath -Encoding utf8 -Append }
