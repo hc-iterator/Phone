@@ -1,13 +1,24 @@
 ---
 name: tools-catalog
-description: 列出可用的按需工具组（pico / gui / rea）及每组工具数，说明怎么加载。当任务需要台架、屏幕操作或 REA 逆向工具时先读本技能，再 tools_load 对应组。
+description: 按需工具组的总目录：列出 REA 的 14 个工具组（组名 + 一句描述 + 工具数）。需要逆向/反编译时先读本技能，再加载对应组。
 ---
-# 按需工具组
+# 按需工具组目录
 
-工具默认是**隐藏**的，只留三个管理工具：`tools_catalog` / `tools_load` / `tools_unload`。
+REA 的工具默认**不占上下文**，按组加载。共 **14 组、约 250 个工具**（工具数为预估，REA 装好后以 	ools_catalog 实测为准）：
 
-1. 先 `tools_catalog`：看有哪些组、每组多少个工具、当前哪些已加载；
-2. 需要哪组就 `tools_load { group: "pico" }`（或 `gui` / `rea`）；
-3. 用完想省上下文就 `tools_unload { group: "pico" }`。
+- **rea-disasm** —— 反汇编 / 反编译：伪代码、函数恢复、控制流（约 25 个工具）
+- **rea-binary** —— ELF / PE / Mach-O 解析：节区、导入导出、头结构（约 20 个工具）
+- **rea-strings** —— 字符串与常量：提取、搜索、编码识别（约 15 个工具）
+- **rea-debug** —— 调试与内存：断点、内存读写、寄存器（约 25 个工具）
+- **rea-packers** —— 打包器 / 壳识别：UPX/VMProtect 等与脱壳（约 15 个工具）
+- **rea-scripts** —— 脚本引擎：内置脚本、批处理、插件 API（约 15 个工具）
+- **rea-network** —— 网络与证书：抓包、证书、协议解析（约 15 个工具）
+- **rea-formats** —— 文件格式：固件、镜像、容器、压缩（约 20 个工具）
+- **rea-symbols** —— 符号与重定位：PDB/DWARF、符号恢复（约 15 个工具）
+- **rea-js** —— JS / Electron：打包、混淆、热更新（约 20 个工具）
+- **rea-managed** —— .NET / Java：IL 与字节码反编译（约 20 个工具）
+- **rea-mobile** —— Android / iOS：APK/IPA 拆包与分析（约 15 个工具）
+- **rea-firmware** —— 固件 / 嵌入式：解包、RTOS 符号、启动链（约 15 个工具）
+- **rea-workflow** —— 流程编排：会话、任务、报告与证据（约 15 个工具）
 
-组按工具名前缀归属：`pico_*` / `gui_*` / `rea_*`。`rea` 是占位，需 REA 插件挂载后才有工具。
+**用法**：需要某组时，读该组的 ea-<组名> 技能（其中写明怎么加载），它会调 	ools_load('<组名>') 只把该组注册进当前会话；默认 **10 分钟无调用自动卸载**，也可 	ools_unload('<组名>') 手动卸载。

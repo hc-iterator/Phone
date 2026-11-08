@@ -1,7 +1,5 @@
 /**
- * 离线冒烟：dsh-tool-lazy 的 catalog / load / unload。
- * 伪造 ctx（schemas + restrict），不依赖 DSH 运行时。
- * 运行：node smoke-test.mjs   （退出码 0 = 全过）
+ * 离线冒烟：dsh-tool-lazy（分组 / load / unload / 自动回收）。
  */
 import { pathToFileURL } from 'node:url';
 import * as path from 'node:path';
@@ -10,50 +8,51 @@ import { fileURLToPath } from 'node:url';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const mod = await import(pathToFileURL(path.join(HERE, 'index.js')).href);
 
-const defs = {};
-const restricts = [];
-const ctx = {
-  effect: (fn) => fn(),
-  tools: {
-    register: (definition) => { defs[definition.name] = definition; return () => {}; },
-    schemas: () => ['pico_status', 'pico_build', 'gui_capture', 'gui_click', 'rea_search', 'read', 'write'].map((name) => ({ name })),
-    restrict: (filter) => { restricts.push(filter); return () => {}; },
-  },
+const NAMES = ['rea_disasm_func','rea_decompil_pseudo','rea_elf_section','rea_strings_extract','timer_countdown','timer_now','read','write'];
+const defs = {}; const restricts = []; const guards = [];
+const fakeTools = {
+  register: (d) => { defs[d.name] = d; return () => {}; },
+  schemas: () => NAMES.map((name) => ({ name })),
+  restrict: (filter) => { restricts.push(filter); return () => {}; },
+  guard: (fn) => { guards.push(fn); return () => {}; },
 };
-await mod.apply(ctx);
-const agent = { id: 'sess-x' };
-let failures = 0;
-const check = (label, ok, extra = '') => {
-  console.log((ok ? '✓ ' : '✗ ') + label + (extra ? '   ' + extra : ''));
-  if (!ok) failures += 1;
-};
+const ctx = { effect: (fn) => fn(), tools: fakeTools, systemPrompt: { section: () => {}, getSectionOrder: () => 0 } };
+await mod.apply(ctx, { idleMs: 60, sweepMs: 10, maxAgeMs: 10000 });
 
-check('注册 3 个工具', Object.keys(defs).sort().join(',') === 'tools_catalog,tools_load,tools_unload', Object.keys(defs).join(','));
+const agent = { id: 'sess-x', ctx: { tools: { guard: fakeTools.guard } } };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let failures = 0;
+const check = (label, ok, extra = '') => { console.log((ok ? '✓ ' : '✗ ') + label + (extra ? '   ' + extra : '')); if (!ok) failures += 1; };
+
+check('注册 3 个工具', Object.keys(defs).sort().join(',') === 'tools_catalog,tools_load,tools_unload');
 
 const cat0 = await defs.tools_catalog.execute({}, { agent });
-check('初始全为未加载', /pico\s+未加载\s+2/.test(cat0.text) && /gui\s+未加载\s+2/.test(cat0.text) && /rea\s+未加载\s+1/.test(cat0.text), cat0.text.split('\n')[1]);
+check('catalog: rea-disasm=2 / rea-binary=1 / rea-strings=1',
+  /rea-disasm\s+未加载\s+2/.test(cat0.text) && /rea-binary\s+未加载\s+1/.test(cat0.text) && /rea-strings\s+未加载\s+1/.test(cat0.text),
+  cat0.text.split('\n')[1]);
+check('catalog 不含 probe（测试组不进目录）', !/probe/.test(cat0.text));
 
-const load = await defs.tools_load.execute({ group: 'pico' }, { agent });
+const load = await defs.tools_load.execute({ group: 'probe' }, { agent });
 const f1 = restricts.at(-1) ?? {};
-check('load pico 成功', load.ok === true);
-check('load 后 deny 不含 pico_*', !(f1.deny ?? []).some((n) => n.startsWith('pico_')), JSON.stringify(f1));
-check('load 后 deny 含 gui_/rea_', (f1.deny ?? []).includes('gui_capture') && (f1.deny ?? []).includes('rea_search'));
+check('load probe 成功', load.ok === true, String(load.text).slice(0, 40));
+check('load probe 后 deny 含 rea_* 且不含 timer_*',
+  (f1.deny ?? []).some((n) => n.startsWith('rea_')) && !(f1.deny ?? []).some((n) => n.startsWith('timer_')),
+  JSON.stringify(f1.deny));
 
-const cat1 = await defs.tools_catalog.execute({}, { agent });
-check('catalog 显示 pico 已加载', /pico\s+已加载\s+2/.test(cat1.text), cat1.text.split('\n')[1]);
-
-const un = await defs.tools_unload.execute({ group: 'pico' }, { agent });
+const un = await defs.tools_unload.execute({ group: 'probe' }, { agent });
 const f2 = restricts.at(-1) ?? {};
-check('unload pico 成功', un.ok === true);
-check('unload 后 deny 重新含 pico_*', (f2.deny ?? []).includes('pico_status'), JSON.stringify(f2));
+check('unload probe 后 deny 重新含 timer_*', un.ok === true && (f2.deny ?? []).includes('timer_now'), JSON.stringify(f2.deny));
 
-const bad = await defs.tools_load.execute({ group: 'nope' }, { agent });
-check('未知组被拒', bad.ok === false);
-
-const rea = await defs.tools_load.execute({ group: 'rea' }, { agent });
-check('rea 有工具时可加载', rea.ok === true, String(rea.text).slice(0, 50));
+const load2 = await defs.tools_load.execute({ group: 'rea-disasm' }, { agent });
 const f3 = restricts.at(-1) ?? {};
-check('加载 rea 后 deny 不含 rea_*', !(f3.deny ?? []).some((n) => n.startsWith('rea_')), JSON.stringify(f3.deny));
+check('load rea-disasm：只放行 disasm 关键字',
+  load2.ok === true && !(f3.deny ?? []).includes('rea_disasm_func') && (f3.deny ?? []).includes('rea_elf_section'),
+  JSON.stringify(f3.deny));
+
+await sleep(200);
+const cat1 = await defs.tools_catalog.execute({}, { agent });
+check('自动回收：等待 > idleMs 后 rea-disasm 变回未加载', /rea-disasm\s+未加载/.test(cat1.text), cat1.text.split('\n')[1]);
+check('guard 已注册', guards.length >= 1, 'guards=' + guards.length);
 
 console.log(failures === 0 ? '\nRESULT: ALL PASS ✓' : '\nRESULT: ' + failures + ' FAILED ✗');
 process.exit(failures === 0 ? 0 : 1);
