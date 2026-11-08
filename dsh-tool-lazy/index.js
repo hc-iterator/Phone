@@ -22,6 +22,8 @@ const GROUPS = {
   pico: { prefix: 'pico_', label: 'PicoPhone 台架（dsh-picophone）' },
   gui: { prefix: 'gui_', label: '屏幕/窗口操作（dsh-gui）' },
   rea: { prefix: 'rea_', label: 'REA 逆向工程（需 REA 插件配合；本组仅占位）' },
+  // 测试组：本机任何会话都有 timer_*，用来端到端验证 load/unload 机制（REA 未安装时也能自检）。
+  probe: { prefix: 'timer_', label: '测试用：timer_*（验证 load/unload 机制）' },
 };
 const GROUP_KEYS = Object.keys(GROUPS);
 
@@ -109,8 +111,8 @@ function buildToolDefinitions(ctx) {
         const lines = GROUP_KEYS.map((key) => {
           const g = GROUPS[key];
           const total = byGroup[key].length;
-          const loaded = s.loaded.has(key) || total === 0;
-          return `- ${key.padEnd(5)} ${loaded ? '已加载' : '未加载'}  ${String(total).padStart(3)} 个工具  ${g.label}`;
+          const status = total === 0 ? '无工具' : (s.loaded.has(key) ? '已加载' : '未加载');
+          return `- ${key.padEnd(5)} ${status}  ${String(total).padStart(3)} 个工具  ${g.label}`;
         });
         return {
           ok: true,
