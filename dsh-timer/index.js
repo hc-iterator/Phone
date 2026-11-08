@@ -8,8 +8,10 @@
  * 其它取舍：
  *   · 定时器一律 unref()：否则长倒计时会把 DSH 进程吊住，关不掉。
  *   · 时间用 Date.now() 差值而不是累加 tick：系统卡顿也不会让计时漂移。
- *   · 倒计时到期不主动推送，只把状态标成"已结束"（主动提醒该由上层决定）。
+ *   · 倒计时到期会主动向发起它的会话投递一条"系统提醒"（非 user 来源），见 deliverCountdownExpiry。
  */
+
+import { randomUUID } from 'node:crypto';
 
 const OUTPUT_SCHEMA = {
   type: 'object',
@@ -51,7 +53,10 @@ function human(ms) {
 
 // ── 每个会话一份状态 ────────────────────────────────────────────────────────
 const stopwatchBySession = new Map();  // id -> { startedAt, accumulated }
-const countdownBySession = new Map();  // id -> { endsAt, totalMs, handle, fired }
+const countdownBySession = new Map();  // id -> { endsAt, totalMs, handle, fired, agent, sessionId }
+
+/** apply 时捕获的宿主 ctx，到期兜底查 agent 用。 */
+let hostCtx = null;
 
 function stopwatchOf(id) {
   if (!stopwatchBySession.has(id)) stopwatchBySession.set(id, { startedAt: null, accumulated: 0 });
@@ -59,7 +64,7 @@ function stopwatchOf(id) {
 }
 
 function countdownOf(id) {
-  if (!countdownBySession.has(id)) countdownBySession.set(id, { endsAt: null, totalMs: 0, handle: null, fired: false });
+  if (!countdownBySession.has(id)) countdownBySession.set(id, { endsAt: null, totalMs: 0, handle: null, fired: false, agent: null, sessionId: null });
   return countdownBySession.get(id);
 }
 
@@ -111,7 +116,41 @@ async function opStopwatch(args = {}, sessionId = '') {
   }
 }
 
-async function opCountdown(args = {}, sessionId = '') {
+/** 到期投递：优先 steer（插当前回合），否则 followup（排下一回合）；失败只记日志，不抛。 */
+async function deliverCountdownExpiry(cd) {
+  const agent = cd.agent !== null && cd.agent !== void 0
+    ? cd.agent
+    : (typeof hostCtx?.get === 'function' ? hostCtx.get('agents')?.get?.(cd.sessionId) : void 0);
+  if (agent === void 0 || agent === null) {
+    console.warn('[dsh-timer] 倒计时到期，但找不到发起会话的 agent，跳过投递');
+    return;
+  }
+  const text =
+    '\u23f1\ufe0f【倒计时到期】这是**倒计时器的系统提醒**，不是用户发来的新指令。\n' +
+    '你之前在本次对话里设置的倒计时（原定 ' + human(cd.totalMs) + '）已到期（约 ' +
+    new Date(cd.endsAt).toLocaleTimeString() + '）。\n' +
+    '请自行判断是否继续之前的工作；如无需要，忽略本条即可。';
+  const message = {
+    id: 'timer-' + randomUUID(),
+    role: 'user',
+    content: [{ type: 'text', text }],
+    // 非 user 来源：这是系统提醒，不能被当成"人类授权"（目标操作那道闸只看 source.kind === 'user'）。
+    source: { kind: 'tool', callId: 'timer-countdown-' + randomUUID() },
+  };
+  try {
+    if (typeof agent.steer === 'function') agent.steer(message);
+    else if (typeof agent.followup === 'function') agent.followup(message);
+    else console.warn('[dsh-timer] agent 没有 steer/followup，跳过投递');
+  } catch (error) {
+    try {
+      if (typeof agent.followup === 'function') agent.followup(message);
+      else throw error;
+    } catch (error2) {
+      console.warn('[dsh-timer] 倒计时到期投递失败：' + (error2 && error2.message ? error2.message : String(error2)));
+    }
+  }
+}
+async function opCountdown(args = {}, sessionId = '', exec) {
   const action = String(args.action ?? 'status');
   const now = Date.now();
   const cd = countdownOf(sessionId);
@@ -139,10 +178,14 @@ async function opCountdown(args = {}, sessionId = '') {
     cd.totalMs = ms;
     cd.endsAt = now + ms;
     cd.fired = false;
+    cd.agent = exec?.agent ?? null;
+    cd.sessionId = sessionId;
     clearCountdownTimer(cd);
     cd.handle = setTimeout(() => {
       cd.fired = true;
       cd.handle = null;
+      // 到期必须叫醒会话：只翻标志位的话会话永远等不到下一回合（2026-11-08 用户实测）。
+      void deliverCountdownExpiry(cd);
     }, ms);
     if (typeof cd.handle.unref === 'function') cd.handle.unref();
     return { ok: true, text: `本对话倒计时开始：${human(ms)}（到 ${new Date(cd.endsAt).toLocaleTimeString()}）` };
@@ -186,7 +229,7 @@ function tool(name, description, parameters, run) {
     async execute(args, exec) {
       // 会话 id 就是隔离键；拿不到时退回 'global'（不崩，只是退化成共享）
       const sessionId = String(exec?.agent?.id ?? 'global');
-      return await run(args ?? {}, sessionId);
+      return await run(args ?? {}, sessionId, exec);
     },
   };
 }
@@ -216,7 +259,7 @@ function buildToolDefinitions() {
           seconds: { type: 'number', description: 'start: duration in seconds (> 0).' },
         },
       },
-      (args, sessionId) => opCountdown(args, sessionId),
+      (args, sessionId, exec) => opCountdown(args, sessionId, exec),
     ),
     tool(
       'timer_now',
@@ -232,6 +275,7 @@ function buildToolDefinitions() {
 export const inject = ['tools'];
 
 export async function apply(ctx, rawConfig) {
+  hostCtx = ctx;
   for (const definition of buildToolDefinitions()) {
     ctx.effect(() => ctx.tools.register(definition), `dsh-timer: ${definition.name}`);
   }
