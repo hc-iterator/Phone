@@ -1,0 +1,9 @@
+{
+  "name": "@local/dsh-rea-lazy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "description": "REA(MCP) 工具按任务分组懒加载：连上只 tools/list，不注册；tools_load 时才 scoped 注册该组/该工具，引用计数卸载，10 分钟无调用自动回收",
+  "files": ["index.js", "groups.json", "README.md", "smoke-test.mjs"]
+}
