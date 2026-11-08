@@ -25,6 +25,7 @@ import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { zstdDecompressSync } from 'node:zlib';
 
 export const name = '@local/dsh-agent-bus';
 export const inject = ['tools'];
@@ -152,9 +153,14 @@ export function apply(ctx) {
     if (!agent) return { ok: false, error: '目标会话当前没有存活的 Agent（只能发给正在运行的会话）' };
     const msg = buildAgentMessage(senderId, text);
     try {
-      if (typeof agent.followup === 'function') { agent.followup(msg); return { ok: true }; }
-      if (agent.inbox && typeof agent.inbox.send === 'function') { agent.inbox.send(msg, 'turn', true); return { ok: true }; }
-      return { ok: false, error: '该 Agent 既没有 followup 也没有 inbox.send，无法投递' };
+      // 2026-11-08：原来用 followup ⇒ 排队到"下一个回合"，接收方要等整个回合跑完才看到，
+      // 造成信息延迟。DSH 的"插话发送"走的是 steer ⇒ send(input,'next-step',true)，
+      // 在下一个 step 开始前（上一次工具结果之后）就被读走。这里对齐 steer 语义。
+      if (typeof agent.steer === 'function') { agent.steer(msg); return { ok: true, mode: 'steer' }; }
+      if (typeof agent.followup === 'function') { agent.followup(msg); return { ok: true, mode: 'followup' }; }
+      // 旧的 inbox.send 分支已删除：Inbox 没有 send 方法，'turn' 也不是合法边界（查证见
+      // docs/调查-消息插入延迟.md），属于死代码。
+      return { ok: false, error: '该 Agent 既没有 steer 也没有 followup，无法投递' };
     } catch (e) {
       return { ok: false, error: '投递失败：' + (e && e.message ? e.message : String(e)) };
     }
@@ -236,8 +242,206 @@ export function apply(ctx) {
     },
   };
 
+  const defSessions = {
+    name: 'agent_sessions',
+    description:
+      'List conversations (sessions) with title, session id and workspace. Read-only. ' +
+      'Includes sessions that are not currently running, newest first. ' +
+      'Use it to find the exact `to` for agent_send / dsh_wake_session.',
+    parameters: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        workspace: { type: 'string', description: 'Only workspaces whose title or path contains this text.' },
+        limit: { type: 'integer', description: 'Max rows to return (default 50, max 500).' },
+      },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_a, v) => [{ type: 'text', text: typeof v?.text === 'string' ? v.text : JSON.stringify(v) }],
+    },
+    async execute(args) {
+      let alive = [];
+      try { alive = liveIds(); } catch { alive = []; }
+      const running = new Set(alive);
+      const { total, rows } = listSessions({ limit: args?.limit, workspace: args?.workspace });
+      for (const r of rows) r.running = running.has(r.sessionId);
+      if (rows.length === 0) return { ok: true, total: 0, rows: [], text: '没有找到会话。' };
+      const wsWidth = Math.max(...rows.map((r) => String(r.workspace).length), 9);
+      const lines = rows.map((r) =>
+        `${r.running ? '*' : ' '} ${r.sessionId}  ${String(r.workspace).padEnd(wsWidth)}  ${r.title || '(无标题)'}`);
+      return {
+        ok: true,
+        total,
+        rows,
+        text: `${lines.join('\n')}\n\n共 ${total} 个会话，显示 ${rows.length} 个（* = 正在运行）`,
+      };
+    },
+  };
+
   ctx.effect(() => ctx.tools.register(defSend), 'dsh-agent-bus: agent_send');
   ctx.effect(() => ctx.tools.register(defInbox), 'dsh-agent-bus: agent_inbox');
+  ctx.effect(() => ctx.tools.register(defSessions), 'dsh-agent-bus: agent_sessions');
+}
+
+// ---------------------------------------------------------------------------
+// 会话清单（只读）
+// ---------------------------------------------------------------------------
+// 目的：发消息前能看见"有谁、叫什么"，而不是只有一个 uuid。
+// 数据源：DSH_HOME/sessions/<工作区目录>/<session-id>/session.v4.jsonl.zstd
+//         + storages/workspace.json（工作区名与成员关系）
+//         + 会话日志里的 session/title 事件（对话名，最后一条胜出）
+// 全部只读；不写、不删、不改任何会话文件。
+
+const ZSTD_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
+const titleCache = new Map(); // file -> { mtimeMs, size, title }
+
+function dshHome() {
+  return process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+}
+function sessionsRoot() {
+  return path.join(dshHome(), 'sessions');
+}
+function workspaceJson() {
+  return path.join(dshHome(), 'storages', 'workspace.json');
+}
+
+/**
+ * 解一条会话日志的全部事件。
+ *
+ * 会话日志是**追加写入**的，所以磁盘上是多段独立 zstd 帧，不是单帧。
+ * 标准解码器（同步与流式都一样）只认第一帧，多帧会报 "Unknown frame descriptor"，
+ * 于是只能解出那条头部。做法：按 magic 逐帧定位，各自解压后合并。
+ * 帧长未知不影响——从帧头开始解，解码器读完自己那一帧就停。
+ */
+export function decodeSessionEvents(file) {
+  let buf;
+  try { buf = fs.readFileSync(file); } catch { return []; }
+  const events = [];
+  let i = 0;
+  while ((i = buf.indexOf(ZSTD_MAGIC, i)) !== -1) {
+    try {
+      const text = zstdDecompressSync(buf.subarray(i)).toString('utf8');
+      for (const line of text.split('\n')) {
+        if (!line) continue;
+        try { events.push(JSON.parse(line)); } catch {}
+      }
+    } catch {}
+    i += ZSTD_MAGIC.length;
+  }
+  return events;
+}
+
+/** 折叠标题：最后一条 session/title 胜出（与 dsh-session-title 的语义一致）。 */
+export function foldSessionTitle(events) {
+  let title = null;
+  for (const e of events) {
+    if (e && e.type === 'session/title' && e.data && typeof e.data.title === 'string') title = e.data.title;
+  }
+  return title;
+}
+
+/** 一个文件里所有 zstd 帧的起始偏移。 */
+function frameOffsets(buf) {
+  const offs = [];
+  let i = 0;
+  while ((i = buf.indexOf(ZSTD_MAGIC, i)) !== -1) { offs.push(i); i += ZSTD_MAGIC.length; }
+  return offs;
+}
+
+/** 一个帧里的全部事件；解不开返回空数组。 */
+function frameEvents(buf, off) {
+  let text;
+  try { text = zstdDecompressSync(buf.subarray(off)).toString('utf8'); } catch { return []; }
+  const out = [];
+  for (const line of text.split('\n')) {
+    if (!line) continue;
+    try { out.push(JSON.parse(line)); } catch {}
+  }
+  return out;
+}
+
+/**
+ * 读一个会话的标题，按 (mtime, size) 缓存。
+ *
+ * 帧从**后往前**扫，命中第一条 session/title 即停：标题很少变，几乎总在尾部几帧里，
+ * 不必把整份日志（几百帧）解完。567 个会话只解当前页，且每页只解尾部。
+ */
+function readTitle(file) {
+  let st, buf;
+  try { st = fs.statSync(file); buf = fs.readFileSync(file); } catch { return null; }
+  const hit = titleCache.get(file);
+  if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.title;
+  let title = null;
+  const offs = frameOffsets(buf);
+  for (let k = offs.length - 1; k >= 0; k -= 1) {
+    const found = foldSessionTitle(frameEvents(buf, offs[k]));
+    if (found) { title = found; break; }
+  }
+  titleCache.set(file, { mtimeMs: st.mtimeMs, size: st.size, title });
+  return title;
+}
+
+/** sessionId -> { workspace, workspacePath }，来自 workspace.json。 */
+function readWorkspaceIndex() {
+  const map = new Map();
+  try {
+    const j = JSON.parse(fs.readFileSync(workspaceJson(), 'utf8'));
+    const table = (j && j.tables && j.tables.workspaces) || {};
+    for (const ws of Object.values(table)) {
+      if (!ws) continue;
+      for (const sid of ws.sessionIds || []) {
+        map.set(String(sid), { workspace: ws.title || null, workspacePath: ws.path || null });
+      }
+    }
+  } catch {}
+  return map;
+}
+
+/**
+ * 列出会话，按最近写入倒序。
+ * @param {{limit?: number, workspace?: string}} opts
+ * @returns {{total: number, rows: object[]}}
+ */
+export function listSessions({ limit, workspace } = {}) {
+  const root = sessionsRoot();
+  const known = readWorkspaceIndex();
+  const rows = [];
+  let wsDirs = [];
+  try { wsDirs = fs.readdirSync(root, { withFileTypes: true }); } catch { return { total: 0, rows: [] }; }
+  for (const wsDir of wsDirs) {
+    if (!wsDir.isDirectory()) continue;
+    let subs = [];
+    try { subs = fs.readdirSync(path.join(root, wsDir.name), { withFileTypes: true }); } catch { continue; }
+    for (const s of subs) {
+      if (!s.isDirectory() || !s.name.startsWith('session-')) continue;
+      const file = path.join(root, wsDir.name, s.name, 'session.v4.jsonl.zstd');
+      let mtimeMs = 0;
+      try { mtimeMs = fs.statSync(file).mtimeMs; } catch { continue; }
+      const meta = known.get(s.name);
+      rows.push({
+        sessionId: s.name,
+        file,
+        mtimeMs,
+        // workspace.json 里没有的会话（旧工作区/已删除工作区）退回用目录名
+        workspace: (meta && meta.workspace) || wsDir.name,
+        workspacePath: (meta && meta.workspacePath) || null,
+      });
+    }
+  }
+  rows.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const needle = String(workspace || '').trim().toLowerCase();
+  const filtered = needle
+    ? rows.filter((r) => String(r.workspace).toLowerCase().includes(needle)
+        || String(r.workspacePath || '').toLowerCase().includes(needle))
+    : rows;
+  const n = Math.min(Math.max(Number(limit) || 50, 1), 500);
+  const page = filtered.slice(0, n);
+  for (const r of page) {
+    r.title = readTitle(r.file);
+    delete r.file;
+    delete r.mtimeMs;
+  }
+  return { total: filtered.length, rows: page };
 }
 
 function senderOf(exec) {
