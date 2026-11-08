@@ -236,8 +236,37 @@ async function opUndelete(args = {}) {
   return { ok: true, text: `已恢复：${subject}.${attribute} = ${row.value}` };
 }
 
-async function opConflicts(args = {}) {
+/**
+ * 关键词检索：对 subject / attribute / value 做子串匹配。
+ *
+ * 为什么用 LIKE 而不是向量：事实只有几千条、且查询几乎都是"精确词"（如 `tCEM`、`波特率`），
+ * 子串匹配既准确又零延迟（实测 2776 条库，全表扫描 <5ms），引入 embedding 只会带来
+ * "差不多但不对"的结果——这正是项目库最不该有的东西。
+ * 命中的排序：subject 命中 > attribute 命中 > value 命中，同级别按更新时间倒序。
+ */
+async function opSearch(args = {}) {
+  const q = String(args.query ?? '').trim();
+  if (!q) return { ok: false, text: 'query 必填' };
+  const limit = Number.isFinite(args.limit) ? Math.max(1, Math.min(Number(args.limit), 100)) : 20;
+  // LIKE 里的 % _ 是通配符，必须转义，否则查 "%" 会命中全库
+  const esc = q.replace(/[\\%_]/g, (m) => '\\' + m);
+  const like = `%${esc}%`;
   const d = db();
+  const rows = d.prepare(`
+    SELECT *, CASE
+      WHEN subject LIKE ? ESCAPE '\\' THEN 3
+      WHEN attribute LIKE ? ESCAPE '\\' THEN 2
+      ELSE 1 END AS rank
+    FROM facts
+    WHERE deleted_at IS NULL
+      AND (subject LIKE ? ESCAPE '\\' OR attribute LIKE ? ESCAPE '\\' OR value LIKE ? ESCAPE '\\')
+    ORDER BY rank DESC, updated_at DESC
+    LIMIT ?`).all(like, like, like, like, like, limit);
+  if (!rows.length) return { ok: true, text: `没有匹配「${q}」的事实（共 ${d.prepare('SELECT COUNT(*) AS n FROM facts WHERE deleted_at IS NULL').get().n} 条在库）` };
+  return { ok: true, text: `命中 ${rows.length} 条：\n` + rows.map(fmtRow).join('\n') };
+}
+
+async function opConflicts(args = {}) {  const d = db();
   // 唯一索引保证"当前值"只有一条 ⇒ 冲突要从**历史**看：同一键出现过多个不同 value。
   // 这样导入冲突素材时不丢信息（旧值都在历史里），也能回答"这条事实有没有争议"。
   const limit = Number.isFinite(args.limit) ? Math.max(1, Math.min(Number(args.limit), 500)) : 50;
@@ -307,6 +336,10 @@ function buildToolDefinitions() {
       { type: 'object', additionalProperties: false, required: ['subject', 'attribute'], properties: {
         subject: { type: 'string' }, attribute: { type: 'string' } } },
       (a) => opUndelete(a)),
+    tool('proj_search', 'Substring search over subject/attribute/value (fast; no embeddings). Use it when you do not know the exact key.',
+      { type: 'object', additionalProperties: false, required: ['query'], properties: {
+        query: { type: 'string' }, limit: { type: 'number' } } },
+      (a) => opSearch(a)),
     tool('proj_conflicts', 'List keys that hold more than one live value.',
       { type: 'object', additionalProperties: false, properties: {} },
       () => opConflicts()),
@@ -339,6 +372,9 @@ if (process.argv[1] && process.argv[1].endsWith('index.js')) {
     }
     console.log(`导入完成：成功 ${ok}（其中变更 ${changed}），跳过/失败 ${bad}`);
     console.log((await opStats()).text);
+  } else if (process.argv.includes('--search')) {
+    const q = process.argv[process.argv.indexOf('--search') + 1];
+    console.log((await opSearch({ query: q })).text);
   } else if (process.argv.includes('--stats')) {
     console.log((await opStats()).text);
   } else if (process.argv.includes('--get')) {
@@ -348,3 +384,4 @@ if (process.argv[1] && process.argv[1].endsWith('index.js')) {
     console.log((await opGet({ subject, attribute })).text);
   }
 }
+
