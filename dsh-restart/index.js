@@ -239,12 +239,30 @@ export function apply(ctx) {
     return all.some((x) => x && (x.id === id || String(x.id).replace(/^session-/, '') === bare));
   };
 
-  /** 投递一条【Agent 消息】（不是用户消息）。 */
-  // mode：'steer'（默认，派活/唤醒用）＝在对方**下一个 step** 开始前插进去；
-  //       'turn'＝排到下一回合（重启表决、流程通知这类"别打断它"的消息用）。
-  // 2026-11-08 实测：wake 走 followup 平均 +41.6 秒、等对方整个回合跑完才读到；
-  // agent_send 走 steer 只 +1.13 秒。用户投诉的"消息还在排队"就是这个原因。
-  const relay = (toId, kind, body, senderId, mode = 'steer') => {
+  /**
+   * 投递一条【Agent 消息】（不是用户消息）。
+   *
+   * mode = 入队边界，2026-11-08 新增（用户报「消息怎么还是排队，没搞好插队」的根因修复）：
+   *
+   *   'steer' ⇒ agent.steer()    ⇒ 底层 splice 到 **next-step**：
+   *              接收方在**下一个 step 开始前**（上一次工具结果之后）就读到 ⇒ 真插队。
+   *              只给「派活 / 纠偏 / 唤醒」用。
+   *   'turn'  ⇒ agent.followup() ⇒ 底层 splice 到 **next-turn**：
+   *              排在接收方的**下一个回合**，要等它整个回合跑完 ⇒ 不打断。
+   *              表决 / 广播 / 完成通知都用它。**默认值**（漏传不会误打断别人）。
+   *
+   *   注意 'turn' 只是本插件起的模式名，**不是**合法的 InboxTarget
+   *   （InboxTarget 只有 'next-turn' | 'next-step'），别把它直接传给 inbox.splice。
+   *
+   * 实测差距（同一回合内相隔 2 秒投两条，详见 docs/调查-消息插队复测.md）：
+   *   steer 那条  1.13 秒后被模型看到（跨 1 个 step）；
+   *   next-turn   那条 41.61 秒后才被看到（要等剩余 7 个 step + 一次回合切换）。
+   *
+   * 历史坑：这段代码原来只有 followup，而它上面那行
+   *   `a.inbox.send(msg, 'turn', true)` 是**死代码** —— Inbox 根本没有 send 方法，
+   *   'turn' 也不是合法边界，所以 234 次成功投递 100% 落在 followup 上，一次 steer 都没有。
+   */
+  const relay = (toId, kind, body, senderId, mode = 'turn') => {
     let agents = null;
     try { agents = ctx.get ? ctx.get('agents') : undefined; } catch { agents = null; }
     const lookup = (id) => {
@@ -276,10 +294,19 @@ export function apply(ctx) {
     };
     const deliver = (a, how, mode) => {
       try {
-        // steer 优先：在对方"下一个 step 开始前"插入，延迟从整个回合降到当前这一步。
-        // 2026-11-08 实测：followup 平均 +41.6s（等回合跑完），steer 只 +1.13s。
-        if (mode !== 'turn' && typeof a.steer === 'function') { a.steer(msg); log('relay ok(steer/' + how + ') → ' + toId); return true; }
-        if (typeof a.followup === 'function') { a.followup(msg); log('relay ok(followup/' + how + ') → ' + toId); return true; }
+        // 插队：steer 优先。Agent 门面上 steer / followup 都是公开方法
+        // （dsh-agent-preset-registry/lib/typert.host.js:277），插件层就能选边界，
+        // 不需要改 DSH 发行包。没有 steer 的老年份门面退回 followup：消息不会丢，只是排队。
+        if (mode === 'steer' && typeof a.steer === 'function') {
+          a.steer(msg);
+          log('relay ok(steer/' + how + ') → ' + toId);
+          return true;
+        }
+        if (typeof a.followup === 'function') {
+          a.followup(msg);
+          log('relay ok(followup' + (mode === 'steer' ? '-fallback' : '') + '/' + how + ') → ' + toId);
+          return true;
+        }
       } catch (e) { log('relay send THREW (' + how + ') → ' + toId + ' :: ' + (e && e.message ? e.message : String(e))); }
       return false;
     };
@@ -294,7 +321,7 @@ export function apply(ctx) {
         const a = r && (r.agent || r.value || null);
         if (!a) { log('wake FAILED: resolveAgent 未返回 Agent → ' + toId + ' :: ' + JSON.stringify(r || null).slice(0, 200)); return; }
         woken.set(String(toId), Date.now());
-        if (deliver(a, 'wake')) log('wake ok → ' + toId);
+        if (deliver(a, 'wake', mode)) log('wake ok → ' + toId);
       }).catch((e) => log('wake THREW → ' + toId + ' :: ' + (e && e.message ? e.message : String(e))));
       return { ok: true, via: 'wake' };
     }
@@ -419,12 +446,15 @@ export function apply(ctx) {
 
   const notifyTargets = (targets, kind, body, senderId, opts) => {
     const skip = (opts && opts.skip) || [];
+    // 默认 'turn'（不打断）：广播类消息漏传 mode 时，宁可晚到也不要插别人的队。
+    // 需要插队的场合由调用点显式传 opts.mode='steer'。
+    const mode = (opts && opts.mode) || 'turn';
     const okIds = [];
     for (const t of targets) {
       // 审批员只在「需要它投票」时收消息；其余流程通知（进入待执行、重启完成等）
       // 对它都是纯噪声（用户 2026-11-06 要求）。
       if (skip.includes(t)) continue;
-      const r = relay(t, kind, body, senderId, 'turn'); // 表决/流程广播：排到下一回合，不插队
+      const r = relay(t, kind, body, senderId, mode);
       if (r.ok) okIds.push(t); else log('relay failed to ' + t + ': ' + r.error);
     }
     return okIds;
@@ -467,7 +497,11 @@ export function apply(ctx) {
 
       const notified = notifyTargets(targets, 'request',
         '请求重启 DSH' + (st.note ? '：' + st.note : '') + '。\n同意请调用 allowdshrestarting；拒绝请调用 stopdshfromrestarting 并附理由。',
-        requester);
+        requester,
+        // mode='turn'（不插队）：这是**表决请求**。重启是破坏性操作，被请求方需要停下手上的事
+        // 正经投一票；插到它某个 step 中途只会打断它正在做的多步操作，之后还得重捡上下文。
+        // 实测插队能省 ~40 秒，但表决不缺这 40 秒，稳比快重要。
+        { mode: 'turn' });
       writeState(st);
 
       const deadline = Date.now() + WAIT_BLOCK_MS;
@@ -597,11 +631,14 @@ export function apply(ctx) {
       if (r.error) return { ok: false, text: r.error };
       writeState(r.state);
       if (r.transition === 'approved') {
-        notifyTargets(r.state.targets, 'notice', '全员已同意，重启进入待执行（由发起者提交）。', sid, { skip: [APPROVAL_SESSION] });
+        // mode='turn'：纯流程通报（"已批准，等发起者提交"）。没人需要为此停下手上工作，
+        // 插队只会平白打断；等它这一回合收尾再看完全够。
+        notifyTargets(r.state.targets, 'notice', '全员已同意，重启进入待执行（由发起者提交）。', sid, { skip: [APPROVAL_SESSION], mode: 'turn' });
         return { ok: true, phase: 'approved', text: '已同意（最后一票）⇒ 已批准；等待发起者提交执行。' };
       }
       if (r.transition === 'denied') {
-        notifyTargets(r.state.targets.concat(r.state.requester), 'notice', '已拒绝重启：' + String((args && args.reason) || ''), sid, { skip: [APPROVAL_SESSION] });
+        // mode='turn'：同上。拒绝也是通报，插队没有收益。
+        notifyTargets(r.state.targets.concat(r.state.requester), 'notice', '已拒绝重启：' + String((args && args.reason) || ''), sid, { skip: [APPROVAL_SESSION], mode: 'turn' });
         return { ok: true, phase: 'denied', text: '已拒绝，理由已记录并通知发起者。' };
       }
       return { ok: true, phase: 'collecting', text: '已同意，还剩 ' + pendingTargets(r.state).length + ' 个未决。' };
@@ -625,7 +662,9 @@ export function apply(ctx) {
       const pending = pendingTargets(out.state);
       // 消息里带上请求 id：实测审批会话会因为读到旧请求（上一条已 denied）而说"没有待表决请求"，
       // 带上 id 它就能对着这一条表决，而不是靠"最近一条"猜。
-      notifyTargets(pending, 'notice', '重启表决还在等你（请求 ' + out.state.id + '）：同意请 allowdshrestarting；拒绝请 stopdshfromrestarting 并附理由。', out.state.requester);
+      // mode='turn'（不插队）：这是**表决催办**，属表决类。催办每 5 分钟一次，对方这一回合
+      // 收尾后自然会看到；为了催票去插它的队、打断它正在做的事，收益为负。
+      notifyTargets(pending, 'notice', '重启表决还在等你（请求 ' + out.state.id + '）：同意请 allowdshrestarting；拒绝请 stopdshfromrestarting 并附理由。', out.state.requester, { mode: 'turn' });
       log('nudged ' + pending.join(','));
     }
   }, 30000);
