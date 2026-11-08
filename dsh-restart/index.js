@@ -240,7 +240,11 @@ export function apply(ctx) {
   };
 
   /** 投递一条【Agent 消息】（不是用户消息）。 */
-  const relay = (toId, kind, body, senderId) => {
+  // mode：'steer'（默认，派活/唤醒用）＝在对方**下一个 step** 开始前插进去；
+  //       'turn'＝排到下一回合（重启表决、流程通知这类"别打断它"的消息用）。
+  // 2026-11-08 实测：wake 走 followup 平均 +41.6 秒、等对方整个回合跑完才读到；
+  // agent_send 走 steer 只 +1.13 秒。用户投诉的"消息还在排队"就是这个原因。
+  const relay = (toId, kind, body, senderId, mode = 'steer') => {
     let agents = null;
     try { agents = ctx.get ? ctx.get('agents') : undefined; } catch { agents = null; }
     const lookup = (id) => {
@@ -270,15 +274,17 @@ export function apply(ctx) {
       content: [{ type: 'text', text }],
       source: { kind: 'agent-message', form: 'relay', senderSessionId: senderId },
     };
-    const deliver = (a, how) => {
+    const deliver = (a, how, mode) => {
       try {
-        if (a.inbox && typeof a.inbox.send === 'function') { a.inbox.send(msg, 'turn', true); log('relay ok(inbox/' + how + ') → ' + toId); return true; }
+        // steer 优先：在对方"下一个 step 开始前"插入，延迟从整个回合降到当前这一步。
+        // 2026-11-08 实测：followup 平均 +41.6s（等回合跑完），steer 只 +1.13s。
+        if (mode !== 'turn' && typeof a.steer === 'function') { a.steer(msg); log('relay ok(steer/' + how + ') → ' + toId); return true; }
         if (typeof a.followup === 'function') { a.followup(msg); log('relay ok(followup/' + how + ') → ' + toId); return true; }
       } catch (e) { log('relay send THREW (' + how + ') → ' + toId + ' :: ' + (e && e.message ? e.message : String(e))); }
       return false;
     };
     const agent = lookup(toId);
-    if (agent && deliver(agent, 'live')) return { ok: true, via: 'live' };
+    if (agent && deliver(agent, 'live', mode)) return { ok: true, via: 'live' };
     // 2026-10-31：目标没加载时，用官方入口 SessionController.resolveAgent(sessionId) 唤起。
     // 它的注释原文就是 "Resolve or resume one ordinary Session" —— 这才是真唤醒。
     // （之前的 sessionController.prompt 只是"接受"，实测目标会话文件根本没被写过。）
@@ -418,7 +424,7 @@ export function apply(ctx) {
       // 审批员只在「需要它投票」时收消息；其余流程通知（进入待执行、重启完成等）
       // 对它都是纯噪声（用户 2026-11-06 要求）。
       if (skip.includes(t)) continue;
-      const r = relay(t, kind, body, senderId);
+      const r = relay(t, kind, body, senderId, 'turn'); // 表决/流程广播：排到下一回合，不插队
       if (r.ok) okIds.push(t); else log('relay failed to ' + t + ': ' + r.error);
     }
     return okIds;
@@ -542,7 +548,7 @@ export function apply(ctx) {
       const self = senderOf(exec);
       const to = (args && args.to) || self;
       if (!to) return { ok: false, text: '拿不到目标会话 id' };
-      const r = relay(to, 'notice', (args && args.text) || 'wake 测试', self || to);
+      const r = relay(to, 'notice', (args && args.text) || 'wake 测试', self || to, 'steer'); // 派活：插队到下一个 step
       return { ok: !!r.ok, to, via: r.via || 'live', text: (r.ok ? '已投递 → ' + to : '投递失败 → ' + to + '：' + (r.error || '')) };
     },
   };
@@ -638,7 +644,7 @@ export function apply(ctx) {
     const still = [];
     for (const sid of st.pendingNotify) {
       if (sid === APPROVAL_SESSION) continue; // 审批员不收「重启完成」；见 writeState 处的说明
-      const r = relay(sid, 'notice', summary, st.requester);
+      const r = relay(sid, 'notice', summary, st.requester, 'turn'); // 重启结果：排到下一回合，不打断
       if (!r.ok) still.push(sid);
     }
     log('replay#' + attempt + ' pending=' + st.pendingNotify.length + ' 未送达=' + still.length);
@@ -669,6 +675,8 @@ export function apply(ctx) {
     });
   } catch (e) { log('inject commands failed: ' + (e && e.message)); }
 }
+
+
 
 
 
