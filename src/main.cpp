@@ -494,8 +494,15 @@ int main(void) {
      *   循环期间 SWD 的体检做不完、COM7 也抓不稳，等于把调试手段全废了。
      *
      * 重新打开前，要先把步号标记【挪到 psram_reinitialize() 之前】，让循环能收敛。
+     *
+     * ★ 2026-11-08：上述前提【已满足】——
+     *   psram_probe.c 的步号标记已挪到 psram_set_params()/psram_reinitialize() 之前，
+     *   且重初始化失败路径会清标记 ⇒ 复位循环能单调收敛 ✓
+     *   同时长度档由 5 档扩到 9 档（16/32/64/128/256/512/1024/4096/16384），
+     *   用于判定"128B 及以下全过、256B 仍挂"这条判据（PM 派活）。
+     *   ⇒ 打开 = 1。跑完（g_wt_done==1）后请改回 0。
      */
-#define PSRAM_WRITE_TEST 0
+#define PSRAM_WRITE_TEST 1
 #if PSRAM_WRITE_TEST
     printf("\n=== PSRAM 连续写入实验（可能顶死板子，靠看门狗续跑）===\n");
     fflush(stdout);

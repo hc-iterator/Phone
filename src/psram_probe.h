@@ -70,8 +70,19 @@ void psram_probe_report(void);
 /* ── 连续写入实验（2026-09-27 新增）────────────────────────────────
  *
  * 诊断已证实芯片真在 GPIO47 上，所以"连续写挂死"是时序/信号问题。
- * 这个实验试 3 组 QMI 参数 × 5 档长度（16B → 16KiB），
+ * 这个实验试 3 组 QMI 参数 × 9 档长度（16B → 16KiB），
  * 看哪一组能撑到 16 KiB。
+ *
+ * ★ 2026-11-08（PM 派活）：长度档由 5 档扩到 9 档 ——
+ *   原表 {16,256,1024,4096,16384} 缺了 32/64/128/512，无法判定
+ *   "128B 及以下全过、256B 仍挂"这个判据。现为：
+ *   {16, 32, 64, 128, 256, 512, 1024, 4096, 16384}
+ *
+ *   ⚠️ 同时必须记住一条结构事实（决定了本实验能证明什么）：
+ *   写入是逐字（每 4 字节一次 STR）经 XIP 走 QMI 的 ⇒ **每次访问本身
+ *   就是一次独立事务，CS 在每次 4B 后都已释放** ⇒ 单次 CS 低电平窗口
+ *   只有 ~0.2 µs，离 APS6404 的 tCEM(≈8 µs) 差 40 倍。
+ *   所以若 256B 挂而 128B 过，**不能**直接归因于 tCEM ⇒ 见验收结论。
  *
  * ⚠️ 这个实验【会】把板子顶死，靠看门狗复位。
  *    它把步号写进 watchdog scratch[4]，开机时读回来，
@@ -86,7 +97,7 @@ void psram_probe_report(void);
  *   g_wt_end_config_ok         QMI 参数是否成功还原成 SDK 原来那套
  */
 #define WT_CFG_COUNT   3
-#define WT_STEP_COUNT  5
+#define WT_STEP_COUNT  9
 
 extern volatile uint32_t g_wt_result[WT_CFG_COUNT][WT_STEP_COUNT];
 extern volatile uint32_t g_wt_us[WT_CFG_COUNT][WT_STEP_COUNT];

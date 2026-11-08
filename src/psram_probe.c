@@ -214,8 +214,9 @@ void psram_probe_report(void) {
  *     不需要人工干预，也不会陷入"开机→挂死→复位"的死循环。
  */
 
-#define WT_CFG_COUNT   3
-#define WT_STEP_COUNT  5
+/* ★ 2026-11-08：档数改由头文件《单一来源》提供。
+ *   原先这里又本地 #define 了一遍 WT_STEP_COUNT 5 ⇒ 改头文件不生效，
+ *   还会报 conflicting types for 'g_wt_us' [3][5] vs [3][9] ✗（实际踩过） */
 #define WT_TOTAL       (WT_CFG_COUNT * WT_STEP_COUNT)
 #define WT_MARK_BASE   0x50530000u   /* 'PS' + 0 + 步号，写在 watchdog scratch[0] */
 #define WT_MAGIC       0x57543132u   /* 'WT12'，写在 scratch[3]，用来校验 scratch[1] 是否本固件所写 */
@@ -235,7 +236,12 @@ static const wt_cfg_t k_wt_cfg[WT_CFG_COUNT] = {
     { 4, 4, 18, 2, "C 降频   div4(37.5MHz) maxsel18(7.7us)" },
 };
 
-static const uint32_t k_wt_len[WT_STEP_COUNT] = { 16u, 256u, 1024u, 4096u, 16384u };
+/* ★ 2026-11-08（PM 派活）：扩到 9 档，补上 32/64/128/512
+ *   原表 {16,256,...} 跳过了 32~128，无法判定"128 过 / 256 挂"的判据 ✓
+ *   注意：每档都是一次"连续逐字写"（每次 4B 一个独立 QMI 事务 ⇒ CS 每 4B 释放一次） */
+static const uint32_t k_wt_len[WT_STEP_COUNT] = {
+    16u, 32u, 64u, 128u, 256u, 512u, 1024u, 4096u, 16384u
+};
 
 /* 结果：0=没跑 1=通过 2=挂死(上次复位在这里) 3=数据不符 4=重初始化失败 */
 volatile uint32_t g_wt_result[WT_CFG_COUNT][WT_STEP_COUNT];
@@ -308,17 +314,21 @@ void psram_writetest_run(void) {
         const wt_cfg_t *c = &k_wt_cfg[ci];
         size_t len = k_wt_len[si];
 
-        /* ── 2. 应用这一组参数并重建 PSRAM ── */
-        psram_set_params(c->divisor, c->rxdelay, c->max_select, c->min_deselect);
-        if (psram_reinitialize() != PICO_OK) {
-            g_wt_result[ci][si] = 4;
-            continue;
-        }
-
-        /* ── 3. 标记这一步（万一挂死，下次开机就知道是它） ──
+        /* ── 2. 先标记这一步，再重初始化 ★ 2026-11-08 修 ──
+         * 册子 docs/当前状态.md:227 记过这个坑：标记原先在 psram_reinitialize()
+         * 【之后】才写 ⇒ 若重初始化期间就挂死，复位后会把"挂死"错记成【上一步】。
+         * 现在挪到最前面，失败路径单独清标记 ✓
          * 用 scratch[0]，原因见函数开头。 */
         watchdog_hw->scratch[0] = WT_MARK_BASE | idx;
         watchdog_update();
+
+        /* ── 3. 应用这一组参数并重建 PSRAM ── */
+        psram_set_params(c->divisor, c->rxdelay, c->max_select, c->min_deselect);
+        if (psram_reinitialize() != PICO_OK) {
+            g_wt_result[ci][si] = 4;
+            watchdog_hw->scratch[0] = 0;
+            continue;
+        }
 
         /* ── 4. 顺序写 ── */
         uint32_t t0 = time_us_32();
