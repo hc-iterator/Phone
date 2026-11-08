@@ -1,0 +1,9 @@
+{
+  "name": "@local/dsh-tool-lazy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "description": "按需加载工具组：上下文只列组名，用时才把该组工具放行到当前会话（基于 tools.register/restrict 的 scoped 能力）",
+  "files": ["index.js", "README.md", "smoke-test.mjs", "skills/**/*"]
+}
