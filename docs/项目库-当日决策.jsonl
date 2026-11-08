@@ -1,0 +1,15 @@
+{"subject":"项目治理","attribute":"项目经理","value":"PicoMode（session-b1774d91）","unit":null,"source":"README.md 项目治理原则 2026-11-07","confidence":"高","conflict":false}
+{"subject":"项目治理","attribute":"服从范围","value":"PicoPhone 文件夹下所有会话","unit":null,"source":"README.md 项目治理原则 2026-11-07","confidence":"高","conflict":false}
+{"subject":"项目治理","attribute":"重启审批权","value":"属用户与重启审批员（6c3e7938），项目经理不请求不施压","unit":null,"source":"docs/项目治理-会话能力矩阵.md","confidence":"高","conflict":false}
+{"subject":"预算","attribute":"单日基准","value":"15","unit":"元","source":"用户 2026-11-07 批准","confidence":"高","conflict":false}
+{"subject":"预算","attribute":"弹性上限","value":"20（仅收尾已开工的大活，不得开新活）","unit":"元","source":"用户 2026-11-07 追加","confidence":"高","conflict":false}
+{"subject":"预算","attribute":"余额","value":"94.36","unit":"元","source":"account_balance 2026-11-08 10:33","confidence":"高","conflict":false}
+{"subject":"项目库","attribute":"形态","value":"SQLite 单文件 KV（facts + fact_history），%DSH_HOME%\\projectdb\\project.db","unit":null,"source":"dsh-plugins/dsh-projectdb","confidence":"高","conflict":false}
+{"subject":"项目库","attribute":"规模","value":"2776 条有效事实 / 1574 主题 / 历史 2821 条 / 0.8 MB","unit":null,"source":"proj_stats 2026-11-08","confidence":"高","conflict":false}
+{"subject":"项目库","attribute":"并发实测","value":"两进程各写同键 40 次，80 次全成功、零丢失","unit":null,"source":"2026-11-08 实测","confidence":"高","conflict":false}
+{"subject":"项目库","attribute":"已知缺陷","value":"176 条（6.3%）subject 被抽成文件名；自动归一会产碎片，暂不改","unit":null,"source":"docs/项目库-进展.md","confidence":"高","conflict":false}
+{"subject":"PSRAM","attribute":"当前状态","value":"等硬件：手上只有两块无 PSRAM 的互联板","unit":null,"source":"用户 2026-11-08 确认","confidence":"高","conflict":false}
+{"subject":"PSRAM","attribute":"等待烧写的固件","value":"uf2 363520 B，sha256 b283f157…73ac（代码+编译已完成，未上机）","unit":null,"source":"PicoPhone 回执 2026-11-08","confidence":"中","conflict":false}
+{"subject":"DVI","attribute":"当前状态","value":"只能显示棋盘格，行列未定；暂不纠缠（用户 2026-11-07 决定）","unit":null,"source":"docs/项目库-进展.md","confidence":"高","conflict":false}
+{"subject":"PIO 自动循环","attribute":"假设","value":"WRAP_TOP/BOTTOM 可替代 jmp，每轮省 1 周期 + 1 指令槽（未验证）","unit":null,"source":"docs/实验-PIO自动循环.md","confidence":"中","conflict":false}
+{"subject":"云主机","attribute":"定位","value":"ClawsGO 容器常驻 DSH；可当 OTA 分发（哑分发 + 设备端验签）","unit":null,"source":"会话 2026-11-07 讨论","confidence":"中","conflict":false}
