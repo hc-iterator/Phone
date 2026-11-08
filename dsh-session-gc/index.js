@@ -222,6 +222,27 @@ export async function apply(ctx) {
   for (const definition of buildToolDefinitions()) {
     ctx.effect(() => ctx.tools.register(definition), `dsh-session-gc: ${definition.name}`);
   }
+
+  // ── 开机自愈：积压的空草稿自动清 ────────────────────────────────────────────
+  // 2026-11-08 调查：空草稿 16 天 724 个、中位间隔 59.6 秒，且"没派活也在涨" ⇒ 多个来源；
+  // 根治要改创建点（需 CDP 定位前端）。在那之前先让积压不滚雪球：
+  //   · 只在"积压 ≥ 20 个且都老于 1 小时"时动手（不误伤正在用的）；
+  //   · 删除 = 移到回收站，可恢复；失败不影响主流程。
+  try {
+    const scan = scanCandidates({ minAgeHours: 1, currentSessionId: '' });
+    if (scan.candidates.length >= 20) {
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const dest = path.join(trashRoot(), stamp);
+      fs.mkdirSync(dest, { recursive: true });
+      let moved = 0;
+      for (const c of scan.candidates.slice(0, 500)) {
+        try { fs.renameSync(c.dir, path.join(dest, c.id)); moved++; } catch { /* 单个失败无妨 */ }
+      }
+      if (moved > 0) console.log(`[dsh-session-gc] 启动自愈：清理 ${moved} 个空草稿 → ${dest}`);
+    }
+  } catch (error) {
+    console.log(`[dsh-session-gc] 启动自愈跳过：${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 // ── 命令行：node index.js --scan [小时] / --apply [小时] ─────────────────────
