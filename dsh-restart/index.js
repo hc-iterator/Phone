@@ -56,6 +56,42 @@ const EXPIRE_MS = 10 * 60_000;
  */
 const APPROVAL_SESSION = 'session-a58366b8-c5f6-4d39-8cdb-bfda148d5cc2';
 
+/*
+ * 2026-11-14 改进（采纳「Rain 那台」的交接建议）：
+ *   ① 审批岗**可绑定**：优先 %LOCALAPPDATA%\dsh-restart\approval-session.txt，
+ *      其次环境变量 DSH_APPROVAL_SESSION，最后才回落到上面写死的 id。
+ *   ② 审批岗**必须真实存在**才纳入表决目标——否则那台机器上没有这个会话时，
+ *      请求会永远卡在 collecting，只能干等过期（两边都实测卡过）。
+ */
+function approvalSession() {
+  try {
+    const p = path.join(process.env.LOCALAPPDATA || '', 'dsh-restart', 'approval-session.txt');
+    if (p && fs.existsSync(p)) {
+      const s = fs.readFileSync(p, 'utf8').trim();
+      if (s) return s.startsWith('session-') ? s : 'session-' + s;
+    }
+  } catch { /* 读不到就回落 */ }
+  const env = (process.env.DSH_APPROVAL_SESSION || '').trim();
+  if (env) return env.startsWith('session-') ? env : 'session-' + env;
+  return APPROVAL_SESSION;
+}
+
+/** 审批岗是否真实存在（内存里有 Agent，或磁盘上有会话文件）。 */
+function approvalAlive(id) {
+  try { if (typeof hasAgent === 'function' && hasAgent(id)) return true; } catch { /* 继续查磁盘 */ }
+  try {
+    const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+    const bare = String(id).replace(/^session-/, '');
+    if (fs.existsSync(path.join(home, 'storages', 'session_projcache', 'sessions', 'session-' + bare + '.json'))) return true;
+    const root = path.join(home, 'sessions');
+    for (const ws of fs.readdirSync(root, { withFileTypes: true })) {
+      if (!ws.isDirectory()) continue;
+      if (fs.existsSync(path.join(root, ws.name, 'session-' + bare, 'session.v4.jsonl.zstd'))) return true;
+    }
+  } catch { /* 查不到当不存在 */ }
+  return false;
+}
+
 const PWSH = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
 const NODE = 'C:\\Program Files\\nodejs\\node.exe';
 const BIN = 'C:\\Users\\Chen\\AppData\\Roaming\\npm\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js';
@@ -484,8 +520,13 @@ export function apply(ctx) {
       // 取不到写入时间时保守处理：不算忙（宁可少通知，也不要把空转会话拉来投票）
       if (last !== undefined && Date.now() - last <= STALL_MS) union.add(id);
     }
-    // 常驻审批岗：无条件加入（不管它忙不忙），任何重启都必须经它投一票。
-    if (requester !== APPROVAL_SESSION) union.add(APPROVAL_SESSION);
+    // 常驻审批岗：任何重启都必须经它投一票；但它**必须真实存在**，
+    // 否则表决会一直卡在 collecting 直到过期（Rain 那台实测卡过两次，我们也卡过）。
+    const ap = approvalSession();
+    if (requester !== ap) {
+      if (approvalAlive(ap)) union.add(ap);
+      else log('busySessions: 审批岗不存在/不可达，跳过目标（' + ap + '）');
+    }
     union.delete(requester);
     log('busySessions: 最终目标 ' + union.size + ' 个 → ' + [...union].join(','));
     return [...union];
@@ -603,7 +644,7 @@ export function apply(ctx) {
       tokenUsed: true,
       // 「重启完成」不必再告诉重启审批员：它已经投过票、也知道自己批的是什么。
       // 每重启一次就给它推一条"重启完成"是纯噪声（用户 2026-10-31 明确要求去掉）。
-      pendingNotify: st.targets.concat(st.requester).filter((id) => id && id !== APPROVAL_SESSION),
+      pendingNotify: st.targets.concat(st.requester).filter((id) => id && id !== approvalSession()),
     });
       writeState(next);
       const r = scheduleRestart();
@@ -686,12 +727,12 @@ export function apply(ctx) {
       if (r.transition === 'approved') {
         // mode='turn'：纯流程通报（"已批准，等发起者提交"）。没人需要为此停下手上工作，
         // 插队只会平白打断；等它这一回合收尾再看完全够。
-        notifyTargets(r.state.targets, 'notice', '全员已同意，重启进入待执行（由发起者提交）。', sid, { skip: [APPROVAL_SESSION], mode: 'turn' });
+        notifyTargets(r.state.targets, 'notice', '全员已同意，重启进入待执行（由发起者提交）。', sid, { skip: [approvalSession()], mode: 'turn' });
         return { ok: true, phase: 'approved', text: '已同意（最后一票）⇒ 已批准；等待发起者提交执行。' };
       }
       if (r.transition === 'denied') {
         // mode='turn'：同上。拒绝也是通报，插队没有收益。
-        notifyTargets(r.state.targets.concat(r.state.requester), 'notice', '已拒绝重启：' + String((args && args.reason) || ''), sid, { skip: [APPROVAL_SESSION], mode: 'turn' });
+        notifyTargets(r.state.targets.concat(r.state.requester), 'notice', '已拒绝重启：' + String((args && args.reason) || ''), sid, { skip: [approvalSession()], mode: 'turn' });
         return { ok: true, phase: 'denied', text: '已拒绝，理由已记录并通知发起者。' };
       }
       return { ok: true, phase: 'collecting', text: '已同意，还剩 ' + pendingTargets(r.state).length + ' 个未决。' };
@@ -736,7 +777,7 @@ export function apply(ctx) {
     const summary = res ? '重启完成：旧 pid ' + res.oldPid + ' → 新 pid ' + res.newPid + '，监听=' + res.up : '重启完成（未读到结果文件）';
     const still = [];
     for (const sid of st.pendingNotify) {
-      if (sid === APPROVAL_SESSION) continue; // 审批员不收「重启完成」；见 writeState 处的说明
+      if (sid === approvalSession()) continue; // 审批员不收「重启完成」；见 writeState 处的说明
       const r = relay(sid, 'notice', summary, st.requester, 'turn'); // 重启结果：排到下一回合，不打断
       if (!r.ok) still.push(sid);
     }
@@ -768,6 +809,9 @@ export function apply(ctx) {
     });
   } catch (e) { log('inject commands failed: ' + (e && e.message)); }
 }
+
+
+
 
 
 
