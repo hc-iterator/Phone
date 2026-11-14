@@ -38,6 +38,26 @@ description: Use BEFORE the first pico_* tool call or /pico command in a session
 
 `/pico` 命令是同一批能力的**人工入口**：`status|build|flash|serial|console|git|run|exec|lock|trust|docs|agents|swd|procs`。
 
+## 2.5 GitHub 加速路线（`pico_github`）
+
+本机的 hosts 把 `github.com` / `api.github.com` / `raw.githubusercontent.com` **全部指向 127.0.0.1**，
+由 `Steam++.Accelerator` 在本机 443 端口做 TLS 终止后转发。后果三条：
+
+1. **`web_fetch` 抓不到 GitHub**（对方是私网 IP，被拒）——别浪费一次调用；
+2. **普通 TLS 客户端也常失败**（加速器证书不在吊销列表里）：
+   - `curl` 要加 `--ssl-no-revoke`；
+   - Node 要 `rejectUnauthorized: false`（或 `NODE_TLS_REJECT_UNAUTHORIZED=0`，仅限本机临时用）；
+3. **所有 GitHub 访问走 `pico_github`**，它直接跟加速器对话：
+
+```js
+pico_github({ url: "/rate_limit" })                  // 相对路径 = api.github.com
+pico_github({ url: "owner/repo" })                   // 仓库页
+pico_github({ url: "https://raw.githubusercontent.com/o/r/main/x.md", raw: true })  // 原文
+pico_github({ url: "https://ghproxy.net/https://raw.githubusercontent.com/o/r/main/x.md", raw: true })  // raw 域名不通时的备选
+```
+
+判断「加速器没在跑」：`pico_github` 超时 + `hosts` 里确实指着 127.0.0.1 ⇒ 不是网络问题，是 `Steam++.Accelerator` 没启动。
+
 ## 3. 常见失败与其含义
 
 - `Could not find file 'COM…'` ⇒ 板子不在（或它跑的固件没开 USB stdio）

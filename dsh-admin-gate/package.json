@@ -1,0 +1,29 @@
+{
+  "name": "@local/dsh-admin-gate",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Administrator permission gate: who is an admin, who may grant/revoke, audited to %DSH_HOME%/pm, with a Web UI settings panel.",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-workspace"
+      ]
+    }
+  },
+  "meta": {
+    "title": "DSH Admin Gate",
+    "description": "管理员权限闸门：任命 / 撤销 / 查询，改动全部落盘可追溯，并带设置面板。"
+  }
+}

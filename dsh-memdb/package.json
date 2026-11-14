@@ -1,0 +1,9 @@
+{
+  "name": "@local/dsh-memdb",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Memory DB v0: event timeline (decision/milestone/incident/preference/todo) + single-row user profile, sharing the same SQLite file as dsh-projectdb.",
+  "type": "module",
+  "exports": { ".": "./index.js", "./package.json": "./package.json" },
+  "files": ["index.js", "README.md"]
+}

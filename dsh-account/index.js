@@ -261,6 +261,94 @@ function startOfToday() {
   return d.getTime();
 }
 
+/**
+ * DeepSeek 官方价格（元 / 百万 tokens），来源：
+ * https://api-docs.deepseek.com/zh-cn/quick_start/pricing
+ * 空闲时段 = 高峰时段的一半；高峰为北京时间周一至周五 9:00-12:00、14:00-18:00
+ * （不含中国法定节假日——节假日这里无法自动判断，按工作日算，属于已知偏差）。
+ */
+const PRICING = {
+  'deepseek-flash': {
+    peak: { cacheRead: 0.04, input: 2, output: 8 },
+    offpeak: { cacheRead: 0.02, input: 1, output: 4 },
+  },
+  'deepseek-v4-pro': {
+    peak: { cacheRead: 0.3, input: 9, output: 27 },
+    offpeak: { cacheRead: 0.15, input: 4.5, output: 13.5 },
+  },
+};
+
+const PRICING_SOURCE = 'https://api-docs.deepseek.com/zh-cn/quick_start/pricing';
+
+// ── 余额快照：唯一能反映「真实花掉多少钱」的口径 ────────────────────────────
+// 官方单价 × token 数算出来的值实测比真实账单高一个数量级（cacheRead 口径偏大），
+// 所以真实花费一律用余额差值，token 估算只作参考。
+
+function snapshotPath() {
+  return path.join(dshHome(), 'usage', 'balance-snapshots.json');
+}
+
+function loadSnapshots() {
+  try {
+    const raw = fs.readFileSync(snapshotPath(), 'utf8');
+    const list = JSON.parse(raw);
+    return Array.isArray(list) ? list : [];
+  } catch { return []; }
+}
+
+function saveSnapshots(list) {
+  try {
+    const p = snapshotPath();
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    // 只留最近 500 条，避免文件无限长
+    const trimmed = list.slice(-500);
+    fs.writeFileSync(p, JSON.stringify(trimmed), 'utf8');
+  } catch { /* 写不进去不影响主流程 */ }
+}
+
+/** 记录一次余额观测；同一分钟内重复的不重复记。 */
+function recordSnapshot(total, at = Date.now()) {
+  if (total == null || !Number.isFinite(total)) return loadSnapshots();
+  const list = loadSnapshots();
+  const last = list[list.length - 1];
+  if (last && at - Number(last.at) < 60000 && Number(last.total) === total) return list;
+  list.push({ at, total });
+  saveSnapshots(list);
+  return list;
+}
+
+/**
+ * 找基线：范围内最早的那次观测。
+ * 如果范围内一条都没有，说明这个区间还没开始记账，返回 null。
+ */
+function baselineFor(list, since) {
+  const inRange = list.filter((s) => Number(s.at) >= since);
+  return inRange.length ? inRange[0] : null;
+}
+
+/** 判断某个时间点是否落在高峰时段（按北京时间算）。 */
+function isPeakTime(ts) {
+  const d = new Date(ts + 8 * 3600 * 1000); // 平移到 UTC+8
+  const day = d.getUTCDay();                 // 0=周日, 6=周六
+  if (day === 0 || day === 6) return false;
+  const h = d.getUTCHours();
+  return (h >= 9 && h < 12) || (h >= 14 && h < 18);
+}
+
+/** 取模型价格表；未知模型返回 null。 */
+function pricingFor(model) {
+  const key = String(model || 'deepseek-flash');
+  return PRICING[key] ?? null;
+}
+
+/** 按三段 token 数和价格算钱（元）。 */
+function costOf(usage, price) {
+  const MILLION = 1e6;
+  return (usage.input / MILLION) * price.input
+    + (usage.cacheRead / MILLION) * price.cacheRead
+    + (usage.output / MILLION) * price.output;
+}
+
 async function opUsage(args = {}, sessionId = '') {
   const scope = String(args.scope ?? 'today');
   // 修复（F 路 A4/A5）：days 之前用 Number.isFinite 判断，传字符串 "3" 会被静默当成 7 天；
@@ -331,6 +419,120 @@ async function opUsage(args = {}, sessionId = '') {
   return { ok: true, text: lines.join('\n') };
 }
 
+/**
+ * 算「这次会话花了多少钱」。
+ * 价格按 DeepSeek 官方表；时段按调用发生的时间判定（高峰/空闲分别计价）。
+ * 由于库表里没有逐条记录模型名，模型用参数指定，默认 deepseek-flash。
+ */
+async function opCost(args = {}, sessionId = '') {
+  const scope = String(args.scope ?? 'today');
+  const model = String(args.model ?? 'deepseek-flash');
+  const price = pricingFor(model);
+  if (!price) {
+    return { ok: false, text: `未知模型 ${model}，可选：${Object.keys(PRICING).join(' / ')}` };
+  }
+
+  let since = 0;
+  let until = Date.now();
+  if (scope === 'today') since = startOfToday();
+  else if (scope === 'all') since = 0;
+  else if (scope === 'session') since = 0;
+  else return { ok: false, text: 'scope 只能是 session / today / all' };
+
+  // ① 真实口径：余额差值
+  const before = await fetchBalance(false);
+  let realText = '';
+  if (before.payload && before.payload.total != null) {
+    const list = recordSnapshot(before.payload.total, before.at);
+    const base = baselineFor(list, since === 0 ? 0 : since);
+    if (base && base !== list[list.length - 1]) {
+      const delta = Number(base.total) - Number(before.payload.total);
+      realText = `  自 ${new Date(Number(base.at)).toLocaleString('zh-CN')} 起的余额差值：¥${delta.toFixed(2)}（未覆盖更早时段）`
+        + `（基线 ${new Date(Number(base.at)).toLocaleString('zh-CN')} ¥${Number(base.total).toFixed(2)} → 现在 ¥${Number(before.payload.total).toFixed(2)}）`;
+    } else if (list.length <= 1) {
+      realText = '  真实花费：还没基线。这次已记下当前余额，下次再查就能给出差值。';
+    } else {
+      realText = `  真实花费：本次范围内只有一条余额观测（¥${Number(before.payload.total).toFixed(2)}），多查几次就能算出差值。`;
+    }
+  } else {
+    realText = '  真实花费：取不到余额（' + (before.error || '未知原因') + '）';
+  }
+
+  // ② 参考口径：token × 官方单价
+
+  // 确保索引进到最新
+  const files = sessionFiles();
+  for (const f of files) {
+    try {
+      const st = fs.statSync(f.file);
+      if (since > 0 && Math.floor(st.mtimeMs) < since) continue;
+      indexFile(f.file, f.session);
+    } catch { /* 单个文件失败不影响整体 */ }
+  }
+
+  const where = [];
+  const params = [];
+  if (scope === 'session') { where.push('session = ?'); params.push(String(sessionId || 'session-')); }
+  if (since > 0) { where.push('ts >= ?'); params.push(since); }
+  if (until > 0) { where.push('ts <= ?'); params.push(until); }
+  const whereSql = where.length ? 'WHERE ' + where.join(' AND ') : '';
+
+  // 逐条取出（只有几千条的量级），按时间判高峰/空闲分别累加
+  let rows;
+  try {
+    rows = db().prepare(
+      `SELECT ts, input, output, cache_read AS cacheRead FROM calls ${whereSql} ORDER BY ts`
+    ).all(...params);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (/locked|busy/i.test(msg)) return { ok: false, text: '用量库正被另一个进程写入（锁超时），稍后重试即可。' };
+    return { ok: false, text: `查询用量失败：${msg}` };
+  }
+
+  const peakU = { input: 0, output: 0, cacheRead: 0 };
+  const offU = { input: 0, output: 0, cacheRead: 0 };
+  for (const r of rows) {
+    const bucket = isPeakTime(Number(r.ts)) ? peakU : offU;
+    bucket.input += Number(r.input) || 0;
+    bucket.output += Number(r.output) || 0;
+    bucket.cacheRead += Number(r.cacheRead) || 0;
+  }
+
+  const peakCost = costOf(peakU, price.peak);
+  const offCost = costOf(offU, price.offpeak);
+  const total = peakCost + offCost;
+
+  const scopeLabel = scope === 'session' ? '本会话'
+    : scope === 'today' ? '今天' : '全部历史';
+  const fmt = (n) => n.toLocaleString('zh-CN');
+  const money = (n) => '¥' + n.toFixed(4);
+  const tok = (u) => `输入 ${fmt(u.input)} · 输出 ${fmt(u.output)} · 缓存命中 ${fmt(u.cacheRead)}`;
+
+  const sum = {
+    input: peakU.input + offU.input,
+    output: peakU.output + offU.output,
+    cacheRead: peakU.cacheRead + offU.cacheRead,
+  };
+
+  const lines = [
+    `${scopeLabel} token 结构（${model}）：`,
+    `  覆盖时间：${rows.length ? new Date(Number(rows[0].ts)).toLocaleString('zh-CN') : '-'}`
+      + ` → ${rows.length ? new Date(Number(rows[rows.length - 1].ts)).toLocaleString('zh-CN') : '-'}`,
+    `  估计费用 ${money(total)}`,
+    `  高峰时段 ${money(peakCost)}（${tok(peakU)}）`,
+    `  空闲时段 ${money(offCost)}（${tok(offU)}）`,
+    `  合计 tokens：${fmt(sum.input + sum.output + sum.cacheRead)}（${rows.length} 次调用）`,
+    `  单价（元/百万 tokens）：缓存命中 ${price.peak.cacheRead}/${price.offpeak.cacheRead} · `
+      + `输入 ${price.peak.input}/${price.offpeak.input} · 输出 ${price.peak.output}/${price.offpeak.output}（高峰/空闲）`,
+    `  价格来源：${PRICING_SOURCE}（法定节假日按工作日计，属已知偏差）`,
+    '',
+    `对账参考（余额差值，最接近真实扣费）：`,
+    realText,
+  ];
+  if (rows.length === 0) lines.push('提示：范围内没有调用记录，先调 usage_reindex 建索引。');
+  return { ok: true, text: lines.join('\n') };
+}
+
 async function opReindex(args = {}) {
   const maxFiles = Number.isFinite(args.maxFiles) ? Number(args.maxFiles) : 0;
   const started = Date.now();
@@ -382,6 +584,13 @@ function buildToolDefinitions() {
       { type: 'object', additionalProperties: false, properties: {
         maxFiles: { type: 'number', description: 'Only index the first N sessions (debugging).' } } },
       (a) => opReindex(a)),
+    tool('usage_cost',
+      'Estimate how much money this session (or today / all history) has cost, using the official DeepSeek price table '
+        + 'and splitting peak vs off-peak by call time. CNY.',
+      { type: 'object', additionalProperties: false, properties: {
+        scope: { type: 'string', enum: ['today', 'session', 'all'], description: 'Default today. session = the whole conversation, which may span days.' },
+        model: { type: 'string', description: 'deepseek-flash (default) or deepseek-v4-pro.' } } },
+      (a, s) => opCost(a, s)),
   ];
 }
 
@@ -404,3 +613,5 @@ if (process.argv[1] && process.argv[1].endsWith('index.js') && process.argv.incl
   const r = await opUsage({ scope: 'all' }, '');
   console.log((r.ok ? 'OK  ' : 'FAIL') + ' ' + r.text.split('\n')[0]);
 }
+
+

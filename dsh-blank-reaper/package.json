@@ -1,0 +1,9 @@
+{
+  "name": "@local/dsh-blank-reaper",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Keep only the newest empty draft session per workspace; move older empty drafts into the recycle bin (recoverable)",
+  "type": "module",
+  "exports": { ".": "./index.js", "./package.json": "./package.json" },
+  "files": ["index.js", "README.md"]
+}

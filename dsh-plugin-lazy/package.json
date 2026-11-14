@@ -1,0 +1,20 @@
+{
+  "name": "@local/dsh-plugin-lazy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Runtime plugin lazy-loading: list/unload/load plugins, keep-alive across turns, auto-unload at turn end.",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "meta": {
+    "title": "DSH Plugin Lazy",
+    "description": "插件级懒加载：回合结束自动卸载未用插件，可续命、可手动装卸，核心包受保护。"
+  }
+}

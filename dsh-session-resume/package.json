@@ -1,0 +1,16 @@
+{
+  "name": "@local/dsh-session-resume",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH 重启后自动继续退出时仍在跑的会话（只恢复 running，不恢复空转）。",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

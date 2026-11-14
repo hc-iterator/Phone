@@ -39,6 +39,10 @@ const MAX_HOP = 2;
 const RATE_LIMIT = 30;          // 每个发送者 1 分钟内的上限
 const RATE_WINDOW = 60_000;
 
+// 群发（2026-11-12 用户要求）：单次最多 20 个目标；同一调用者 30 秒内最多 1 次。
+const BROADCAST_MAX_TARGETS = 20;
+const BROADCAST_WINDOW = 30_000;
+
 /** 密钥/凭据类特征。命中即拒发——降低手滑概率，不承诺 100%。 */
 export const SECRET_PATTERNS = [
   { label: 'bitlocker-recovery-key', re: /\b(?:\d{6}-){7}\d{6}\b/ },
@@ -135,8 +139,118 @@ export function checkRate(senderId, now = Date.now()) {
   return { ok: true };
 }
 
+// ── 群发（2026-11-12 用户要求）────────────────────────────────────────────
+// 一次给多个会话发同一条消息。工具名 agent_broadcast。
+//   targets: 数组（完整 session id / 8 位短 id）或 "all" / "running"
+//   text:    正文（沿用 agent_send 的信封与密钥扫描）
+//   mode:    'steer'（默认，下一步读）/ 'turn'（排队）
+//   kind:    默认 'notice'
+//   includeSelf: 默认 false
+// 规则：单次最多 20 个目标；同一调用者 30 秒内最多 1 次；密钥命中 ⇒ 整次取消。
+
+const broadcastRate = new Map(); // senderId -> 上次群发的时间戳
+export function checkBroadcastRate(senderId, now = Date.now()) {
+  const last = broadcastRate.get(senderId);
+  if (last !== undefined && now - last < BROADCAST_WINDOW) {
+    const wait = Math.ceil((BROADCAST_WINDOW - (now - last)) / 1000);
+    return { ok: false, error: `群发过于频繁（${BROADCAST_WINDOW / 1000} 秒内最多 1 次，还需等 ${wait} 秒）` };
+  }
+  broadcastRate.set(senderId, now);
+  return { ok: true };
+}
+
+/**
+ * 解析一个目标：先认完整编号（复用 resolveTarget），再认 8 位短 id。
+ * 短 id 必须唯一命中，多义就报错，绝不猜。
+ */
+export function resolveShortTarget(liveIds, raw) {
+  const text = String(raw ?? '').trim();
+  if (!text) return { ok: false, error: '目标不能为空' };
+  const exact = liveIds.find((id) => id === text);
+  if (exact) return { ok: true, sessionId: exact };
+  const bare = text.replace(/^session-/, '');
+  if (/^[0-9a-f]{8}$/i.test(bare)) {
+    const hits = liveIds.filter((id) => String(id).replace(/^session-/, '').toLowerCase().startsWith(bare.toLowerCase()));
+    if (hits.length === 1) return { ok: true, sessionId: hits[0] };
+    if (hits.length > 1) return { ok: false, error: `短 id ${bare} 命中 ${hits.length} 个会话，请给完整 id` };
+  }
+  return resolveTarget(liveIds, text);
+}
+
+/**
+ * 把一组原始目标解析成 [{ target, sessionId, error }]（纯函数）。
+ * 解析失败的目标保留在结果里（后面会记一条失败审计），不静默丢弃。
+ *
+ * 2026-11-12：完整 session id / uuid 即使**没加载**也收下——留给投递阶段先唤醒，
+ * 不能在这里当成"找不到活动会话"拒掉（用户实测的 bug 2）。
+ */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function normalizeSessionId(raw) {
+  const text = String(raw ?? '').trim().replace(/^session-/, '');
+  return UUID_RE.test(text) ? `session-${text.toLowerCase()}` : null;
+}
+
+export function resolveBroadcastTargets(liveIds, rawTargets, { sender = '', includeSelf = false } = {}) {
+  if (!Array.isArray(rawTargets)) return { ok: false, error: 'targets 必须是数组，或字符串 "all" / "running"' };
+  if (rawTargets.length === 0) return { ok: false, error: 'targets 不能为空' };
+  if (rawTargets.length > BROADCAST_MAX_TARGETS) {
+    return { ok: false, error: `一次最多 ${BROADCAST_MAX_TARGETS} 个目标（给了 ${rawTargets.length} 个）` };
+  }
+  const senderId = normalizeSessionId(sender) || String(sender || '');
+  const out = [];
+  const seen = new Set();
+  for (const raw of rawTargets) {
+    const r = resolveShortTarget(liveIds, raw);
+    if (!r.ok) {
+      const wakeId = normalizeSessionId(raw);
+      if (wakeId) {
+        if (!includeSelf && wakeId === senderId) continue;
+        if (seen.has(wakeId)) continue;
+        seen.add(wakeId);
+        out.push({ target: String(raw), sessionId: wakeId, needsWake: true });
+      } else {
+        out.push({ target: String(raw), sessionId: null, error: r.error });
+      }
+      continue;
+    }
+    if (!includeSelf && r.sessionId === senderId) continue;
+    if (seen.has(r.sessionId)) continue;
+    seen.add(r.sessionId);
+    out.push({ target: String(raw), sessionId: r.sessionId });
+  }
+  return { ok: true, targets: out };
+}
+
+
 export function apply(ctx) {
   ensureDir();
+
+  /**
+   * 会话最后一次"真的动过"的时间（毫秒时间戳），取不到返回 undefined。
+   *
+   * 数据来源：投影缓存 `%DSH_HOME%\storages\session_projcache\sessions\session-<id>.json`
+   * 的修改时间。这是运行时会话持久化时必然刷新的文件，比"内存里有没有加载"可信。
+   */
+  const lastActivityMs = (sessionId) => {
+    try {
+      const base = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+      // sessionId 本身通常已带 "session-" 前缀；重复拼接会永远取不到文件（2026-11-11 实测）。
+      const bare = String(sessionId).replace(/^session-/, '');
+      const dir = path.join(base, 'storages', 'session_projcache', 'sessions');
+      const direct = path.join(dir, `session-${bare}.json`);
+      try { return fs.statSync(direct).mtimeMs; } catch { /* 换一种布局再试 */ }
+      // 兼容旧布局：分工作区目录下的 session.v4.jsonl.zstd
+      const root = path.join(base, 'sessions');
+      for (const ws of fs.readdirSync(root, { withFileTypes: true })) {
+        if (!ws.isDirectory()) continue;
+        try {
+          return fs.statSync(path.join(root, ws.name, `session-${bare}`, 'session.v4.jsonl.zstd')).mtimeMs;
+        } catch { /* 继续找 */ }
+      }
+      return undefined;
+    } catch { return undefined; }
+  };
 
   const liveIds = () => {
     try {
@@ -146,23 +260,102 @@ export function apply(ctx) {
     } catch { return []; }
   };
 
-  const deliver = (toId, text, senderId) => {
+  /**
+   * 真正"此刻有一个回合在跑"的会话（本地补丁，2026-11-11）。
+   *
+   * 之前 `agent_sessions` 用 `liveIds()` 判定，那是"会话是否被加载在内存里"——
+   * 一个会话被唤醒过一次就会一直挂在注册表里，于是界面显示"正在运行"，
+   * 实际上一小时没有任何动作（用户实测：Worker_Pico_Low 16:45 之后再没动过，标记仍在）。
+   *
+   * 现在改成读每个 agent 自己的 `status`：`'running'` 表示有回合在跑，`'idle'` 表示没有。
+   * 取不到 status 的（旧运行时）退回原判定，不把功能弄坏。
+   */
+  const liveRunningIds = () => {
+    try {
+      const svc = ctx.get ? ctx.get('agents') : undefined;
+      if (!svc || typeof svc.list !== 'function') return [];
+      const out = [];
+      for (const a of svc.list()) {
+        const id = String(a?.id ?? '');
+        if (!id) continue;
+        const status = a?.status;
+        if (status === undefined || status === 'running') out.push(id);
+      }
+      return out;
+    } catch { return []; }
+  };
+
+  const deliver = (toId, text, senderId, mode = 'steer') => {
     let agents = null;
     try { agents = ctx.get ? ctx.get('agents') : undefined; } catch { agents = null; }
     const agent = agents && typeof agents.get === 'function' ? agents.get(toId) : undefined;
-    if (!agent) return { ok: false, error: '目标会话当前没有存活的 Agent（只能发给正在运行的会话）' };
+    if (!agent) {
+      /*
+       * 2026-11-11：这句话以前写成"只能发给正在运行的会话"，把两件事混了——
+       * 真正缺席的是"这个会话没有活着的 Agent"（没加载），而不是"它没有回合在跑"。
+       * 加载了但空闲的会话是可以收消息的，收下后会被唤醒；所以这里如实说缺少什么。
+       */
+      return {
+        ok: false,
+        error: '目标会话没有活着的 Agent（既没加载也无法唤醒）；已加载但空闲的会话是可以接收消息的',
+      };
+    }
     const msg = buildAgentMessage(senderId, text);
     try {
       // 2026-11-08：原来用 followup ⇒ 排队到"下一个回合"，接收方要等整个回合跑完才看到，
       // 造成信息延迟。DSH 的"插话发送"走的是 steer ⇒ send(input,'next-step',true)，
       // 在下一个 step 开始前（上一次工具结果之后）就被读走。这里对齐 steer 语义。
-      if (typeof agent.steer === 'function') { agent.steer(msg); return { ok: true, mode: 'steer' }; }
+      // 2026-11-12：群发需要 'turn' 模式，所以把边界变成参数；默认仍是 steer。
+      if (mode === 'steer' && typeof agent.steer === 'function') { agent.steer(msg); return { ok: true, mode: 'steer' }; }
       if (typeof agent.followup === 'function') { agent.followup(msg); return { ok: true, mode: 'followup' }; }
+      if (typeof agent.steer === 'function') { agent.steer(msg); return { ok: true, mode: 'steer' }; }
       // 旧的 inbox.send 分支已删除：Inbox 没有 send 方法，'turn' 也不是合法边界（查证见
       // docs/调查-消息插入延迟.md），属于死代码。
       return { ok: false, error: '该 Agent 既没有 steer 也没有 followup，无法投递' };
     } catch (e) {
       return { ok: false, error: '投递失败：' + (e && e.message ? e.message : String(e)) };
+    }
+  };
+
+  /**
+   * 投递一条消息；目标没加载就先冷唤起再投——与 dsh_wake_session 同一条路
+   * （sessionController.resolveAgent → steer/followup）。
+   *
+   * 2026-11-12 用户实测：群发到"没加载"的会话时原来直接漏掉，必须补唤醒。
+   * @returns {Promise<{ok:boolean, mode?:string, via?:'live'|'wake', error?:string}>}
+   */
+  const deliverWithWake = async (toId, text, senderId, mode = 'steer') => {
+    const first = deliver(toId, text, senderId, mode);
+    if (first.ok) return { ...first, via: 'live' };
+
+    let sc = null;
+    try { sc = ctx.get ? ctx.get('sessionController') : undefined; } catch { sc = null; }
+    if (!sc || typeof sc.resolveAgent !== 'function') {
+      return { ok: false, error: `${first.error}；且没有 sessionController.resolveAgent 可唤醒` };
+    }
+    let resolved;
+    try {
+      resolved = await Promise.resolve(sc.resolveAgent(toId));
+    } catch (e) {
+      return { ok: false, error: '唤醒失败：' + (e && e.message ? e.message : String(e)) };
+    }
+    const agent = resolved && (resolved.agent || resolved.value || null);
+    if (!agent) {
+      const err = resolved && resolved.error;
+      let detail = '';
+      if (err) {
+        try { detail = typeof err === 'string' ? err : JSON.stringify(err).slice(0, 160); } catch { detail = String(err); }
+      }
+      return { ok: false, error: '唤醒失败：resolveAgent 未返回 Agent' + (detail ? `（${detail}）` : '') };
+    }
+    const msg = buildAgentMessage(senderId, text);
+    try {
+      if (mode === 'steer' && typeof agent.steer === 'function') { agent.steer(msg); return { ok: true, mode: 'steer', via: 'wake' }; }
+      if (typeof agent.followup === 'function') { agent.followup(msg); return { ok: true, mode: 'followup', via: 'wake' }; }
+      if (typeof agent.steer === 'function') { agent.steer(msg); return { ok: true, mode: 'steer', via: 'wake' }; }
+      return { ok: false, error: '唤醒后的 Agent 既没有 steer 也没有 followup' };
+    } catch (e) {
+      return { ok: false, error: '唤醒后投递失败：' + (e && e.message ? e.message : String(e)) };
     }
   };
 
@@ -247,6 +440,7 @@ export function apply(ctx) {
     description:
       'List conversations (sessions) with title, session id and workspace. Read-only. ' +
       'Includes sessions that are not currently running, newest first. ' +
+      '`*` marks a session that has a turn in flight right now (not merely one that was ever woken). ' +
       'Use it to find the exact `to` for agent_send / dsh_wake_session.',
     parameters: {
       type: 'object', additionalProperties: false,
@@ -261,24 +455,215 @@ export function apply(ctx) {
     },
     async execute(args) {
       let alive = [];
-      try { alive = liveIds(); } catch { alive = []; }
+      try { alive = liveRunningIds(); } catch { alive = []; }
       const running = new Set(alive);
       const { total, rows } = listSessions({ limit: args?.limit, workspace: args?.workspace });
-      for (const r of rows) r.running = running.has(r.sessionId);
+      const now = Date.now();
+      /**
+       * 卡住上限（用户定：15 分钟）。
+       *
+       * 判定语义：`status === 'running'` 表示"有回合在跑"，但回合可能卡在等模型返回、
+       * 等工具、等审批上——那种情况下它永远不结束，"运行中"就成了假话。
+       * 所以再叠一层：15 分钟没有任何进展 ⇒ 标"疑似卡住"。
+       */
+      const STUCK_MS = 15 * 60 * 1000;
+      for (const r of rows) {
+        r.running = running.has(r.sessionId);
+        const t = lastActivityMs(r.sessionId);
+        r.lastActivity = t === undefined ? null : new Date(t).toISOString();
+        r.idleMinutes = t === undefined ? null : Math.floor((now - t) / 60000);
+        r.stuck = r.running && t !== undefined && now - t > STUCK_MS;
+      }
       if (rows.length === 0) return { ok: true, total: 0, rows: [], text: '没有找到会话。' };
       const wsWidth = Math.max(...rows.map((r) => String(r.workspace).length), 9);
-      const lines = rows.map((r) =>
-        `${r.running ? '*' : ' '} ${r.sessionId}  ${String(r.workspace).padEnd(wsWidth)}  ${r.title || '(无标题)'}`);
+      const age = (r) => {
+        if (r.idleMinutes === null) return '无记录';
+        if (r.idleMinutes < 1) return '刚刚';
+        if (r.idleMinutes < 60) return `${r.idleMinutes} 分钟前`;
+        return `${Math.floor(r.idleMinutes / 60)} 小时前`;
+      };
+      const lines = rows.map((r) => {
+        const mark = r.running ? '*' : ' ';
+        const state = r.running
+          ? (r.stuck ? `运行中·疑似卡住（${age(r)}无进展）` : `运行中（最后进展 ${age(r)}）`)
+          : (r.idleMinutes !== null && r.idleMinutes <= 2 ? '已加载·空闲' : `空闲（${age(r)}无动作）`);
+        return `${mark} ${r.sessionId}  ${String(r.workspace).padEnd(wsWidth)}  ${r.title || '(无标题)'}  ${state}`;
+      });
       return {
         ok: true,
         total,
         rows,
-        text: `${lines.join('\n')}\n\n共 ${total} 个会话，显示 ${rows.length} 个（* = 正在运行）`,
+        text: `${lines.join('\n')}\n\n共 ${total} 个会话，显示 ${rows.length} 个`
+          + `（* = 现在有回合在跑；超过 15 分钟无进展标"疑似卡住"；空白 = 没有回合在跑）`,
+      };
+    },
+  };
+
+  /**
+   * 群发（2026-11-12 用户要求）。
+   *
+   * 与 agent_send 的差别：一次解析多个目标、逐个投递、逐个回报；
+   * 任何一条正文命中密钥就整次取消（不能发一半）。
+   * 审计：每个目标一行，同一次调用带同一个 broadcastGroup。
+   */
+  const defBroadcast = {
+    name: 'agent_broadcast',
+    description:
+      'Broadcast ONE Agent message (not a user message) to several conversations at once. ' +
+      '`targets` is an array of exact session ids or unique 8-character id prefixes (a JSON-encoded array string is also accepted), or the string "all" / "running". ' +
+      'Targets that are not loaded are woken first (like dsh_wake_session) and then delivered; archived conversations are skipped. ' +
+      'Per-target results are returned; secrets in the text cancel the whole call. ' +
+      'Max 20 targets; at most one broadcast per caller per 30 seconds. Off by default it never sends to the caller itself.',
+    parameters: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        targets: {
+          description: 'Array of session ids / 8-char id prefixes (a JSON-encoded array string is also accepted), or "all" (every live session in this workspace, archived ones excluded) / "running" (only sessions with a turn in flight).',
+          oneOf: [
+            { type: 'array', items: { type: 'string' } },
+            { type: 'string' },
+          ],
+        },
+        text: { type: 'string', description: 'Plain text, max 500 chars. No secrets.' },
+        mode: {
+          type: 'string', enum: ['steer', 'turn'],
+          description: 'steer = read before the next step (default, for dispatch); turn = queued after the current turn.',
+        },
+        kind: { type: 'string', enum: [...KINDS], description: 'Default notice.' },
+        includeSelf: { type: 'boolean', description: 'Also send to the caller session (default false).' },
+      },
+      required: ['targets', 'text'],
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_a, v) => [{ type: 'text', text: typeof v?.text === 'string' ? v.text : JSON.stringify(v) }],
+    },
+    async execute(args, exec) {
+      const sender = senderOf(exec);
+      const kind = String(args?.kind ?? 'notice');
+      const mode = args?.mode === 'turn' ? 'turn' : 'steer';
+      const includeSelf = args?.includeSelf === true;
+      const text = String(args?.text ?? '').trim();
+
+      // 1) 正文校验（kind / 长度 / 密钥）——先做，命中就一条都不发
+      const check = validateSend({ kind, body: text, hop: 0 });
+      if (!check.ok) {
+        audit({ ev: 'reject', reason: check.error, from: sender, to: 'broadcast', body: text.slice(0, 80) });
+        return { ok: false, text: check.error };
+      }
+
+      // 2) 解析目标
+      const ids = liveIds();
+      const archived = readArchivedIds();
+      let rawList;
+      let excludedArchived = 0;
+      if (typeof args?.targets === 'string') {
+        const key = args.targets.trim().toLowerCase();
+        if (key === 'all' || key === 'running') {
+          // 2026-11-12 用户要求："all" 不把已归档的会话算进去（也不占 20 个名额）
+          const base = key === 'all' ? ids.slice() : liveRunningIds();
+          const kept = base.filter((id) => !archived.has(id));
+          excludedArchived = base.length - kept.length;
+          rawList = kept;
+        } else if (args.targets.trim().startsWith('[')) {
+          // 2026-11-12：某些调用方会把数组序列化成 JSON 字符串（实测工具参数被 stringify），
+          // 这里兼容一下，否则永远走不到数组分支。
+          try {
+            const parsed = JSON.parse(args.targets);
+            if (!Array.isArray(parsed)) return { ok: false, text: 'targets 必须是数组，或字符串 "all" / "running"' };
+            rawList = parsed;
+          } catch {
+            return { ok: false, text: 'targets 是字符串但不是合法 JSON 数组' };
+          }
+        } else return { ok: false, text: 'targets 只接受数组、"all" 或 "running"' };
+      } else if (Array.isArray(args?.targets)) {
+        rawList = args.targets;
+      } else {
+        return { ok: false, text: 'targets 必须是数组，或字符串 "all" / "running"' };
+      }
+
+      const resolved = resolveBroadcastTargets(ids, rawList, { sender, includeSelf });
+      if (!resolved.ok) {
+        audit({ ev: 'reject', reason: resolved.error, from: sender, to: 'broadcast', body: text.slice(0, 80) });
+        return { ok: false, text: resolved.error };
+      }
+      const plan = resolved.targets;
+      if (plan.length === 0) {
+        return { ok: false, text: '没有可发送的目标（自己默认被排除；要发给自己请 includeSelf=true）' };
+      }
+
+      // 3) 限流：同一调用者 30 秒内最多 1 次（放在目标确认之后，无效调用不烧配额）
+      const rl = checkBroadcastRate(sender);
+      if (!rl.ok) {
+        audit({ ev: 'reject', reason: rl.error, from: sender, to: 'broadcast' });
+        return { ok: false, text: rl.error };
+      }
+
+      // 4) 逐个投递（未加载先唤醒）+ 每个目标一行审计
+      const group = randomUUID();
+      const envelope = `【Agent 消息·${kind}】from ${sender}\n${text}`;
+      const results = [];
+      for (const item of plan) {
+        if (!item.sessionId) {
+          audit({
+            ev: 'send', id: randomUUID(), from: sender, to: item.target, kind, hop: 0,
+            ok: false, error: item.error, body: text, broadcastGroup: group,
+          });
+          results.push({ target: item.target, ok: false, error: item.error });
+          continue;
+        }
+        if (archived.has(item.sessionId)) {
+          audit({
+            ev: 'send', id: randomUUID(), from: sender, to: item.sessionId, kind, hop: 0,
+            ok: false, skipped: 'archived', error: null, body: text, broadcastGroup: group,
+          });
+          results.push({ target: item.sessionId, ok: false, skipped: 'archived' });
+          continue;
+        }
+        const sent = await deliverWithWake(item.sessionId, envelope, sender, mode);
+        audit({
+          ev: 'send', id: randomUUID(), from: sender, to: item.sessionId, kind, hop: 0,
+          ok: sent.ok, error: sent.error ?? null, via: sent.via ?? null, body: text, broadcastGroup: group,
+        });
+        results.push({
+          target: item.sessionId,
+          ok: sent.ok,
+          via: sent.ok ? sent.via : null,
+          mode: sent.ok ? (sent.mode || null) : null,
+          error: sent.ok ? null : sent.error,
+        });
+      }
+
+      const wakeOk = results.filter((r) => r.ok && r.via === 'wake').length;
+      const liveOk = results.filter((r) => r.ok && r.via === 'live').length;
+      const skipped = results.filter((r) => r.skipped === 'archived').length + excludedArchived;
+      const failed = results.filter((r) => !r.ok && !r.skipped).length;
+      const succeeded = liveOk + wakeOk;
+      const lines = results.map((r) => {
+        if (r.skipped === 'archived') return `○ ${r.target} 已归档，跳过`;
+        if (!r.ok) return `✗ ${r.target} ${r.error}`;
+        return r.via === 'wake'
+          ? `✓ ${r.target} 唤醒后投递（${r.mode}）`
+          : `✓ ${r.target} 已投递（${r.mode}）`;
+      });
+      const summary = `群发完成：成功 ${succeeded}（唤醒后 ${wakeOk}），跳过归档 ${skipped}，失败 ${failed}`
+        + `（group ${group.slice(0, 8)}）\n${lines.join('\n')}`;
+      return {
+        ok: succeeded > 0,
+        group,
+        total: results.length + excludedArchived,
+        succeeded,
+        wokeSucceeded: wakeOk,
+        skippedArchived: skipped,
+        failed,
+        results,
+        text: summary,
       };
     },
   };
 
   ctx.effect(() => ctx.tools.register(defSend), 'dsh-agent-bus: agent_send');
+  ctx.effect(() => ctx.tools.register(defBroadcast), 'dsh-agent-bus: agent_broadcast');
   ctx.effect(() => ctx.tools.register(defInbox), 'dsh-agent-bus: agent_inbox');
   ctx.effect(() => ctx.tools.register(defSessions), 'dsh-agent-bus: agent_sessions');
 }
@@ -303,6 +688,21 @@ function sessionsRoot() {
 }
 function workspaceJson() {
   return path.join(dshHome(), 'storages', 'workspace.json');
+}
+
+/**
+ * 已归档的会话 id 集合。
+ *
+ * 权威来源：`%DSH_HOME%\storages\workspace.json` 的 `global.archivedSessionIds`
+ * （DSH 把"归档"记在这里，工作区各自的 sessionIds 只表示成员关系）。
+ * 读不到就当没有归档——不能因为读失败把群发弄崩。
+ */
+export function readArchivedIds(file = workspaceJson()) {
+  try {
+    const j = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const list = j && j.global && Array.isArray(j.global.archivedSessionIds) ? j.global.archivedSessionIds : [];
+    return new Set(list.map(String));
+  } catch { return new Set(); }
 }
 
 /**

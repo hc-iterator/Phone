@@ -1,0 +1,9 @@
+{
+  "name": "@local/dsh-auto-compact",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Compact each session once its last turn/end is a normal completion, even below the pressure threshold; 10-minute per-session throttle, file log, never retries",
+  "type": "module",
+  "exports": { ".": "./index.js", "./package.json": "./package.json" },
+  "files": ["index.js", "README.md"]
+}

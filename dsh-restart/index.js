@@ -54,7 +54,7 @@ const EXPIRE_MS = 10 * 60_000;
  * 常驻审批岗：任何重启都必须通知这个对话并取得它的同意（用户 2026-10-31 要求）。
  * 写死 session id —— 对话标题是「重启审批员」。它不在线时靠 resolveAgent 唤醒。
  */
-const APPROVAL_SESSION = 'session-6c3e7938-e76f-4e5b-b8d0-47b29c22a1c2';
+const APPROVAL_SESSION = 'session-a58366b8-c5f6-4d39-8cdb-bfda148d5cc2';
 
 const PWSH = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
 const NODE = 'C:\\Program Files\\nodejs\\node.exe';
@@ -393,6 +393,35 @@ export function apply(ctx) {
   };
 
   /** 除发起者外，正在干活的会话：本轮在跑 / 有子 Agent 在跑 / 我们唤醒过且仍加载。 */
+  /**
+   * 某个会话最后一次写盘时间（毫秒），取不到返回 undefined。
+   *
+   * 2026-11-11 新增：用来区分"加载在内存"和"真的有进展"。会话只要在跑就一定在写盘，
+   * 光被唤醒过则不会。同时兼容两种落盘布局（分工作区目录 / 投影缓存）。
+   */
+  const lastSessionWriteMs = (sessionId) => {
+    const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+    const bare = String(sessionId).replace(/^session-/, '');
+    const candidates = [
+      path.join(home, 'storages', 'session_projcache', 'sessions', `session-${bare}.json`),
+    ];
+    const root = path.join(home, 'sessions');
+    try {
+      for (const ws of fs.readdirSync(root, { withFileTypes: true })) {
+        if (!ws.isDirectory()) continue;
+        candidates.push(path.join(root, ws.name, `session-${bare}`, 'session.v4.jsonl.zstd'));
+      }
+    } catch { /* 没有 sessions 目录就只试投影缓存 */ }
+    let best;
+    for (const file of candidates) {
+      try {
+        const t = fs.statSync(file).mtimeMs;
+        if (best === undefined || t > best) best = t;
+      } catch { /* 这个布局没有该会话 */ }
+    }
+    return best;
+  };
+
   const busySessions = (requester) => {    const union = new Set();
     let items = [];
     // 2026-10-31 实测：三轮重启请求都报"目标=0"，而目标会话当时明明在跑子 agent。
@@ -411,10 +440,16 @@ export function apply(ctx) {
     } catch (e) {
       log('busySessions: list() THREW :: ' + (e && e.message ? e.message : String(e)));
     }
+    // 2026-11-11：`running` 这个内存标记会变成僵尸（回合卡住就永远不落回 idle），
+    // 所以叠一层"15 分钟内有过写盘"才算真忙；取不到写盘时间就按不忙处理。
+    const STALL_LIMIT_MS = 15 * 60_000;
     for (const s of items) {
       if (!s) continue;
-      if (s.running) union.add(String(s.sessionId));
-      if (s.running && s.parentSessionId) union.add(String(s.parentSessionId));
+      const id = String(s.sessionId);
+      const last = lastSessionWriteMs(id);
+      const fresh = last !== undefined && Date.now() - last <= STALL_LIMIT_MS;
+      if (s.running && fresh) union.add(id);
+      if (s.running && fresh && s.parentSessionId) union.add(String(s.parentSessionId));
     }
     // 兜底 1（最可靠）：按**会话文件的写入时间**判断是否在干活。
     // 2026-10-31 实测：这台机器上 list() 恒为 0 项，导致"PicoMode (1) 正在运行"时
@@ -431,11 +466,23 @@ export function apply(ctx) {
       log('busySessions: 扫描会话文件失败 :: ' + (e && e.message ? e.message : String(e)));
     }
     // 兜底 2：经 resolveAgent 唤醒过、且此刻仍持有 Agent 的会话。
+    //
+    // 2026-11-11 用户指出：**"加载在内存"不等于"有回合在跑"**。一个会话被唤醒过一次，
+    // agent 就会一直挂在注册表里（`agents.list()` 的注释原文就是 "All live agents"），
+    // 于是它永远被当成"忙"，每次重启都被拉去投票——用户实测 Worker_Pico_Max 明明空着也
+    // 收到重启请求、迟迟不表决，把重启卡死。
+    //
+    // 现在只有在 **15 分钟内有过进展**（会话文件写入）的前提下，才把"持有 agent"当作忙。
+    // 也就是说：真的动过才算数，光被加载过不算。
     const WOKEN_TTL_MS = 10 * 60_000;
+    const STALL_MS = 15 * 60_000;
     for (const [id, at] of woken) {
       if (Date.now() - at > WOKEN_TTL_MS) { woken.delete(id); continue; }
       if (id === requester) continue;
-      if (hasAgent(id)) union.add(id);
+      if (!hasAgent(id)) continue;
+      const last = lastSessionWriteMs(id);
+      // 取不到写入时间时保守处理：不算忙（宁可少通知，也不要把空转会话拉来投票）
+      if (last !== undefined && Date.now() - last <= STALL_MS) union.add(id);
     }
     // 常驻审批岗：无条件加入（不管它忙不忙），任何重启都必须经它投一票。
     if (requester !== APPROVAL_SESSION) union.add(APPROVAL_SESSION);
@@ -498,10 +545,16 @@ export function apply(ctx) {
       const notified = notifyTargets(targets, 'request',
         '请求重启 DSH' + (st.note ? '：' + st.note : '') + '。\n同意请调用 allowdshrestarting；拒绝请调用 stopdshfromrestarting 并附理由。',
         requester,
-        // mode='turn'（不插队）：这是**表决请求**。重启是破坏性操作，被请求方需要停下手上的事
-        // 正经投一票；插到它某个 step 中途只会打断它正在做的多步操作，之后还得重捡上下文。
-        // 实测插队能省 ~40 秒，但表决不缺这 40 秒，稳比快重要。
-        { mode: 'turn' });
+        /*
+         * 2026-11-11 用户实测反馈：表决请求用 'turn'（next-turn 排队）时，对方若空闲或正忙，
+         * 消息就一直躺在队列里，界面上表现为"等待制度"、迟迟不表决——用户原话：
+         * 「重启插件发出的通知还是等待制度而非插入的」。
+         *
+         * 所以表决改用 'steer'（next-step 插入）：对方在下一个步边界就会读到并表决。
+         * 代价是可能插进它某个多步操作中途；用户明确选择"要立刻表决"，这个代价可以接受。
+         * 其余广播类通知仍保持 'turn'（见下方 notice 调用），不打扰。
+         */
+        { mode: 'steer' });
       writeState(st);
 
       const deadline = Date.now() + WAIT_BLOCK_MS;
@@ -662,9 +715,10 @@ export function apply(ctx) {
       const pending = pendingTargets(out.state);
       // 消息里带上请求 id：实测审批会话会因为读到旧请求（上一条已 denied）而说"没有待表决请求"，
       // 带上 id 它就能对着这一条表决，而不是靠"最近一条"猜。
-      // mode='turn'（不插队）：这是**表决催办**，属表决类。催办每 5 分钟一次，对方这一回合
-      // 收尾后自然会看到；为了催票去插它的队、打断它正在做的事，收益为负。
-      notifyTargets(pending, 'notice', '重启表决还在等你（请求 ' + out.state.id + '）：同意请 allowdshrestarting；拒绝请 stopdshfromrestarting 并附理由。', out.state.requester, { mode: 'turn' });
+      // 2026-11-11：催办也改成 'steer'（插入）。原来用 'turn' 排队，用户实测表现为
+      // "界面一直显示等待/催了也没反应"——催办的唯一目的就是让对方立刻看到并表决，
+      // 排队就等于没催。表决类消息统一走插入。
+      notifyTargets(pending, 'notice', '重启表决还在等你（请求 ' + out.state.id + '）：同意请 allowdshrestarting；拒绝请 stopdshfromrestarting 并附理由。', out.state.requester, { mode: 'steer' });
       log('nudged ' + pending.join(','));
     }
   }, 30000);

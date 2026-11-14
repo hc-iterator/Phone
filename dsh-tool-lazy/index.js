@@ -28,6 +28,19 @@ const GROUPS = {
   'rea-firmware': { prefix: 'rea_', match: /firmware|rtos|boot|flash|uboot|squashfs|jffs/i, label: '固件/嵌入式：解包、RTOS 符号、启动链' },
   'rea-workflow': { prefix: 'rea_', match: /workflow|session|task|report|evidence|note|plan/i, label: '流程编排：会话、任务、报告与证据' },
   probe: { prefix: 'timer_', match: /^timer_/, label: '测试用：timer_*（验证 load/unload 机制）' },
+
+  // 2026-11-12 用户要求精简系统提示词：把低频但占地大的工具按组藏起来，用 tools_load 再拉。
+  // 2026-11-13 用户要求：会话清理类保留但折叠（低频，用时再 tools_load）。
+  gc: { prefix: 'session_gc_', label: '会话清理：按时间/空会话回收' },
+  reaper: { prefix: 'blank_reaper', label: '空草稿回收：只留每个工作区最新一个' },
+  gui: { prefix: 'gui_', label: 'GUI/桌面：截屏、点击、输入、窗口、虚拟屏' },
+  pico: { prefix: 'pico_', label: 'Pico 台架：构建、烧写、串口、SWD' },
+  mem: { prefix: 'mem_', label: '记忆库：事件时间线、用户画像' },
+  proj: { prefix: 'proj_', label: '项目库：事实存取与查询' },
+  agent: { prefix: 'agent_', label: '会话间消息：发送、收件箱、群发、清单' },
+  admin: { prefix: 'pm_', label: '管理员：任命、撤销、查询' },
+  ws: { prefix: 'ws_', label: '工作状态：模式与角色' },
+  gate: { prefix: 'gate_', label: '危险操作闸门：申请、决定、状态' },
 };
 const GROUP_KEYS = Object.keys(GROUPS);
 const CATALOG_KEYS = GROUP_KEYS.filter((k) => k !== 'probe');

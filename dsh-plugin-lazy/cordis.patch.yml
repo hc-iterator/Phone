@@ -1,0 +1,5 @@
+- insert:
+    - id: dsh-plugin-lazy
+      name: '@local/dsh-plugin-lazy'
+      config:
+        idleMinutes: 30

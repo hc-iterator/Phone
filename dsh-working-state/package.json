@@ -1,0 +1,9 @@
+{
+  "name": "@local/dsh-working-state",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Global working mode (local/wechat/away) plus a per-session role registry (manager/worker/other), exposed as four tools",
+  "type": "module",
+  "exports": { ".": "./index.js", "./package.json": "./package.json" },
+  "files": ["index.js", "README.md", "selftest.mjs"]
+}
